@@ -89,6 +89,18 @@ strategy-lab backtest \
   --strategy turnaround_v2
 ```
 
+For spot-style long-only testing:
+
+```bash
+strategy-lab backtest \
+  --exchange binance \
+  --market-type spot \
+  --symbols BTC/USDT \
+  --timeframe 1d \
+  --strategy turnaround_v2 \
+  --no-allow-shorts
+```
+
 By default, backtests exit on either the opposite strategy signal or continuation failure:
 
 - long continuation failure: 4 consecutive lower closes

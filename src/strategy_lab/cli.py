@@ -85,6 +85,10 @@ def backtest(
     fees: float = typer.Option(0.0005, help="One-way fee rate."),
     slippage: float = typer.Option(0.0005, help="One-way slippage rate."),
     cash: float = typer.Option(10_000.0, help="Initial cash."),
+    allow_shorts: bool = typer.Option(
+        True,
+        help="Allow short entries. Disable for spot-style long-only testing.",
+    ),
     exit_mode: ExitMode = typer.Option(
         ExitMode.CONTINUATION_FAILURE,
         help="Exit behavior: continuation failure, trend failure, setup invalidation stop, or opposite signal only.",
@@ -97,7 +101,7 @@ def backtest(
     report_root: Path = typer.Option(Path("reports"), help="Report output folder."),
 ) -> None:
     """Run a vectorbt backtest for one or more stored symbols."""
-    strategy = get_strategy(strategy_name)
+    strategy = get_strategy(strategy_name, allow_shorts=allow_shorts)
     for symbol in _split_symbols(symbols):
         identity = MarketDataIdentity(
             exchange=exchange,

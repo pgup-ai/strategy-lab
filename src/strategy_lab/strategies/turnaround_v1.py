@@ -54,6 +54,7 @@ class TurnaroundV1:
             trend_failure_short_exits=trend_failure_short_exits,
             metadata={
                 "logic": "two opposite candles followed by a reversal candle",
+                "allow_shorts": self.allow_shorts,
                 "setup_stop": "long below setup low, short above setup high",
                 "trend_failure_ema_span": self.trend_failure_ema_span,
             },

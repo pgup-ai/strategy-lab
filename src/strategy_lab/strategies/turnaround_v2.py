@@ -71,6 +71,7 @@ class TurnaroundV2:
             trend_failure_long_exits=trend_failure_long_exits,
             trend_failure_short_exits=trend_failure_short_exits,
             metadata={
+                "allow_shorts": self.allow_shorts,
                 "ema_trend_span": self.ema_trend_span,
                 "ema_extension_span": self.ema_extension_span,
                 "long_extension": self.long_extension,
