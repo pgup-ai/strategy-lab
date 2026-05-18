@@ -14,6 +14,8 @@ class SignalSet:
     short_entries: pd.Series
     short_exits: pd.Series
     setup_stop_loss: pd.Series | None = None
+    trend_failure_long_exits: pd.Series | None = None
+    trend_failure_short_exits: pd.Series | None = None
     metadata: dict = field(default_factory=dict)
 
 
@@ -53,3 +55,16 @@ def setup_invalidation_stop_loss(
     stop_loss.loc[long_entries] = long_stop.loc[long_entries]
     stop_loss.loc[short_entries] = short_stop.loc[short_entries]
     return stop_loss.where(stop_loss > 0)
+
+
+def ema_trend_failure_exits(
+    df: pd.DataFrame,
+    *,
+    ema_span: int,
+) -> tuple[pd.Series, pd.Series]:
+    validate_ohlcv(df)
+
+    ema_trend = df["close"].ewm(span=ema_span, adjust=False).mean()
+    long_exits = df["close"] < ema_trend
+    short_exits = df["close"] > ema_trend
+    return long_exits.fillna(False), short_exits.fillna(False)

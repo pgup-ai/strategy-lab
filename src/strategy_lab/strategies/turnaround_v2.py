@@ -4,7 +4,12 @@ from dataclasses import dataclass
 
 import pandas as pd
 
-from strategy_lab.strategies.base import SignalSet, setup_invalidation_stop_loss, validate_ohlcv
+from strategy_lab.strategies.base import (
+    SignalSet,
+    ema_trend_failure_exits,
+    setup_invalidation_stop_loss,
+    validate_ohlcv,
+)
 
 
 @dataclass(frozen=True)
@@ -48,6 +53,10 @@ class TurnaroundV2:
             short_entries = pd.Series(False, index=df.index)
         long_entries = long_entries.fillna(False)
         short_entries = short_entries.fillna(False)
+        trend_failure_long_exits, trend_failure_short_exits = ema_trend_failure_exits(
+            df,
+            ema_span=self.ema_trend_span,
+        )
 
         return SignalSet(
             long_entries=long_entries,
@@ -59,6 +68,8 @@ class TurnaroundV2:
                 long_entries=long_entries,
                 short_entries=short_entries,
             ),
+            trend_failure_long_exits=trend_failure_long_exits,
+            trend_failure_short_exits=trend_failure_short_exits,
             metadata={
                 "ema_trend_span": self.ema_trend_span,
                 "ema_extension_span": self.ema_extension_span,

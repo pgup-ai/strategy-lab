@@ -13,13 +13,14 @@ import numpy as np
 import pandas as pd
 
 from strategy_lab.market_data.base import MarketDataIdentity
-from strategy_lab.strategies.base import Strategy
+from strategy_lab.strategies.base import SignalSet, Strategy
 from strategy_lab.timeframes import timeframe_to_pandas_freq
 
 
 class ExitMode(str, Enum):
     OPPOSITE_SIGNAL_ONLY = "opposite_signal_only"
     SETUP_INVALIDATION_STOP = "setup_invalidation_stop"
+    TREND_FAILURE = "trend_failure"
 
 
 @dataclass(frozen=True)
@@ -39,7 +40,7 @@ def run_backtest(
     fees: float = 0.0005,
     slippage: float = 0.0005,
     cash: float = 10_000.0,
-    exit_mode: ExitMode | str = ExitMode.SETUP_INVALIDATION_STOP,
+    exit_mode: ExitMode | str = ExitMode.TREND_FAILURE,
     report_root: Path = Path("reports"),
 ) -> BacktestResult:
     try:
@@ -53,14 +54,15 @@ def run_backtest(
     df = df.sort_index()
     signals = strategy.generate_signals(df)
     exit_mode = ExitMode(exit_mode)
+    long_exits, short_exits = _exit_signals(signals, exit_mode)
     stop_kwargs = _stop_kwargs(df, signals.setup_stop_loss, exit_mode)
 
     pf = vbt.Portfolio.from_signals(
         close=df["close"],
         entries=signals.long_entries,
-        exits=signals.long_exits,
+        exits=long_exits,
         short_entries=signals.short_entries,
-        short_exits=signals.short_exits,
+        short_exits=short_exits,
         init_cash=cash,
         fees=fees,
         slippage=slippage,
@@ -110,12 +112,25 @@ def run_backtest(
     )
 
 
+def _exit_signals(signals: SignalSet, exit_mode: ExitMode) -> tuple[pd.Series, pd.Series]:
+    if exit_mode != ExitMode.TREND_FAILURE:
+        return signals.long_exits, signals.short_exits
+
+    if signals.trend_failure_long_exits is None or signals.trend_failure_short_exits is None:
+        raise ValueError("Strategy did not provide trend failure exits")
+
+    return (
+        signals.long_exits | signals.trend_failure_long_exits,
+        signals.short_exits | signals.trend_failure_short_exits,
+    )
+
+
 def _stop_kwargs(
     df: pd.DataFrame,
     setup_stop_loss: pd.Series | None,
     exit_mode: ExitMode,
 ) -> dict[str, Any]:
-    if exit_mode == ExitMode.OPPOSITE_SIGNAL_ONLY:
+    if exit_mode in {ExitMode.OPPOSITE_SIGNAL_ONLY, ExitMode.TREND_FAILURE}:
         return {}
     if setup_stop_loss is None:
         raise ValueError("Strategy did not provide setup invalidation stop levels")

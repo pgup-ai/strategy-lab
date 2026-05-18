@@ -86,8 +86,8 @@ def backtest(
     slippage: float = typer.Option(0.0005, help="One-way slippage rate."),
     cash: float = typer.Option(10_000.0, help="Initial cash."),
     exit_mode: ExitMode = typer.Option(
-        ExitMode.SETUP_INVALIDATION_STOP,
-        help="Exit behavior: setup invalidation stop plus opposite signal, or opposite signal only.",
+        ExitMode.TREND_FAILURE,
+        help="Exit behavior: trend failure, setup invalidation stop, or opposite signal only.",
     ),
     report_root: Path = typer.Option(Path("reports"), help="Report output folder."),
 ) -> None:
