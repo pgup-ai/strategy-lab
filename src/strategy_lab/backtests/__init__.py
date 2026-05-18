@@ -1,3 +1,3 @@
-from strategy_lab.backtests.engine import BacktestResult, run_backtest
+from strategy_lab.backtests.engine import BacktestResult, ExitMode, run_backtest
 
-__all__ = ["BacktestResult", "run_backtest"]
+__all__ = ["BacktestResult", "ExitMode", "run_backtest"]

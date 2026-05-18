@@ -89,6 +89,23 @@ strategy-lab backtest \
   --strategy turnaround_v2
 ```
 
+By default, backtests exit on either the opposite strategy signal or a setup invalidation stop:
+
+- long stop: below the low of the three-candle reversal setup
+- short stop: above the high of the three-candle reversal setup
+
+To compare against the original behavior:
+
+```bash
+strategy-lab backtest \
+  --exchange binance \
+  --market-type spot \
+  --symbols BTC/USDT \
+  --timeframe 15m \
+  --strategy turnaround_v2 \
+  --exit-mode opposite_signal_only
+```
+
 Stock example:
 
 ```bash
@@ -124,6 +141,7 @@ That report directory is the reproducibility boundary for comparing strategy cha
 - long only when price is below EMA20 extension threshold
 - short only when price is above EMA20 extension threshold
 - fees and slippage are applied in the backtest runner
+- setup invalidation stops are applied by default in the backtest runner
 
 Indicators and signals are derived at backtest time. The database stores raw candles only.
 

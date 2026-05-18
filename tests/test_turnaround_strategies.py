@@ -27,6 +27,9 @@ def test_turnaround_v1_detects_base_reversals() -> None:
     assert signals.short_entries.iloc[6]
     assert signals.long_exits.equals(signals.short_entries)
     assert signals.short_exits.equals(signals.long_entries)
+    assert signals.setup_stop_loss is not None
+    assert signals.setup_stop_loss.iloc[3] == (102 - 95) / 102
+    assert signals.setup_stop_loss.iloc[6] == (106 - 104) / 104
 
 
 def test_turnaround_v2_keeps_signal_shape() -> None:

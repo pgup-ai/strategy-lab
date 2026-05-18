@@ -4,7 +4,7 @@ from pathlib import Path
 
 import typer
 
-from strategy_lab.backtests import run_backtest
+from strategy_lab.backtests import ExitMode, run_backtest
 from strategy_lab.db import init_db, list_candle_sets, load_candles, upsert_candles
 from strategy_lab.db.candles import normalize_candle_frame
 from strategy_lab.market_data.base import MarketDataIdentity
@@ -85,6 +85,10 @@ def backtest(
     fees: float = typer.Option(0.0005, help="One-way fee rate."),
     slippage: float = typer.Option(0.0005, help="One-way slippage rate."),
     cash: float = typer.Option(10_000.0, help="Initial cash."),
+    exit_mode: ExitMode = typer.Option(
+        ExitMode.SETUP_INVALIDATION_STOP,
+        help="Exit behavior: setup invalidation stop plus opposite signal, or opposite signal only.",
+    ),
     report_root: Path = typer.Option(Path("reports"), help="Report output folder."),
 ) -> None:
     """Run a vectorbt backtest for one or more stored symbols."""
@@ -113,6 +117,7 @@ def backtest(
             fees=fees,
             slippage=slippage,
             cash=cash,
+            exit_mode=exit_mode,
             report_root=report_root,
         )
         typer.echo(f"Wrote report for {symbol}: {result.report_dir}")

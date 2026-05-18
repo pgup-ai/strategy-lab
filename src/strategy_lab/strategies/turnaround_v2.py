@@ -4,7 +4,7 @@ from dataclasses import dataclass
 
 import pandas as pd
 
-from strategy_lab.strategies.base import SignalSet, validate_ohlcv
+from strategy_lab.strategies.base import SignalSet, setup_invalidation_stop_loss, validate_ohlcv
 
 
 @dataclass(frozen=True)
@@ -46,16 +46,24 @@ class TurnaroundV2:
         )
         if not self.allow_shorts:
             short_entries = pd.Series(False, index=df.index)
+        long_entries = long_entries.fillna(False)
+        short_entries = short_entries.fillna(False)
 
         return SignalSet(
-            long_entries=long_entries.fillna(False),
-            long_exits=short_entries.fillna(False),
-            short_entries=short_entries.fillna(False),
-            short_exits=long_entries.fillna(False),
+            long_entries=long_entries,
+            long_exits=short_entries,
+            short_entries=short_entries,
+            short_exits=long_entries,
+            setup_stop_loss=setup_invalidation_stop_loss(
+                df,
+                long_entries=long_entries,
+                short_entries=short_entries,
+            ),
             metadata={
                 "ema_trend_span": self.ema_trend_span,
                 "ema_extension_span": self.ema_extension_span,
                 "long_extension": self.long_extension,
                 "short_extension": self.short_extension,
+                "setup_stop": "long below setup low, short above setup high",
             },
         )

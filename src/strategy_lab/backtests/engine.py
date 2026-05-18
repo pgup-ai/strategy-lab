@@ -5,6 +5,7 @@ import math
 import re
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
+from enum import Enum
 from pathlib import Path
 from typing import Any
 
@@ -14,6 +15,11 @@ import pandas as pd
 from strategy_lab.market_data.base import MarketDataIdentity
 from strategy_lab.strategies.base import Strategy
 from strategy_lab.timeframes import timeframe_to_pandas_freq
+
+
+class ExitMode(str, Enum):
+    OPPOSITE_SIGNAL_ONLY = "opposite_signal_only"
+    SETUP_INVALIDATION_STOP = "setup_invalidation_stop"
 
 
 @dataclass(frozen=True)
@@ -33,6 +39,7 @@ def run_backtest(
     fees: float = 0.0005,
     slippage: float = 0.0005,
     cash: float = 10_000.0,
+    exit_mode: ExitMode | str = ExitMode.SETUP_INVALIDATION_STOP,
     report_root: Path = Path("reports"),
 ) -> BacktestResult:
     try:
@@ -45,6 +52,8 @@ def run_backtest(
 
     df = df.sort_index()
     signals = strategy.generate_signals(df)
+    exit_mode = ExitMode(exit_mode)
+    stop_kwargs = _stop_kwargs(df, signals.setup_stop_loss, exit_mode)
 
     pf = vbt.Portfolio.from_signals(
         close=df["close"],
@@ -56,6 +65,7 @@ def run_backtest(
         fees=fees,
         slippage=slippage,
         freq=timeframe_to_pandas_freq(identity.timeframe),
+        **stop_kwargs,
     )
 
     report_dir = _build_report_dir(report_root, identity, strategy.name)
@@ -68,6 +78,7 @@ def run_backtest(
         "fees": fees,
         "slippage": slippage,
         "cash": cash,
+        "exit_mode": exit_mode.value,
         "data_start": str(df.index.min()),
         "data_end": str(df.index.max()),
         "candle_count": int(len(df)),
@@ -99,6 +110,29 @@ def run_backtest(
     )
 
 
+def _stop_kwargs(
+    df: pd.DataFrame,
+    setup_stop_loss: pd.Series | None,
+    exit_mode: ExitMode,
+) -> dict[str, Any]:
+    if exit_mode == ExitMode.OPPOSITE_SIGNAL_ONLY:
+        return {}
+    if setup_stop_loss is None:
+        raise ValueError("Strategy did not provide setup invalidation stop levels")
+
+    return {
+        "price": df["close"],
+        "open": df["open"],
+        "high": df["high"],
+        "low": df["low"],
+        "sl_stop": setup_stop_loss,
+        "sl_trail": False,
+        "stop_entry_price": "Price",
+        "stop_exit_price": "StopMarket",
+        "upon_stop_exit": "Close",
+    }
+
+
 def _build_report_dir(report_root: Path, identity: MarketDataIdentity, strategy_name: str) -> Path:
     timestamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
     parts = [
@@ -121,6 +155,8 @@ def _write_json(path: Path, payload: Any) -> None:
 
 
 def _json_safe(value: Any) -> Any:
+    if value is pd.NaT:
+        return None
     if isinstance(value, dict):
         return {str(k): _json_safe(v) for k, v in value.items()}
     if isinstance(value, list | tuple):
