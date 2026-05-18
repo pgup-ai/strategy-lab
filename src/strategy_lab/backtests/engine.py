@@ -18,6 +18,7 @@ from strategy_lab.timeframes import timeframe_to_pandas_freq
 
 
 class ExitMode(str, Enum):
+    CONTINUATION_FAILURE = "continuation_failure"
     OPPOSITE_SIGNAL_ONLY = "opposite_signal_only"
     SETUP_INVALIDATION_STOP = "setup_invalidation_stop"
     TREND_FAILURE = "trend_failure"
@@ -40,7 +41,8 @@ def run_backtest(
     fees: float = 0.0005,
     slippage: float = 0.0005,
     cash: float = 10_000.0,
-    exit_mode: ExitMode | str = ExitMode.TREND_FAILURE,
+    exit_mode: ExitMode | str = ExitMode.CONTINUATION_FAILURE,
+    failure_bars: int = 4,
     report_root: Path = Path("reports"),
 ) -> BacktestResult:
     try:
@@ -54,7 +56,12 @@ def run_backtest(
     df = df.sort_index()
     signals = strategy.generate_signals(df)
     exit_mode = ExitMode(exit_mode)
-    long_exits, short_exits = _exit_signals(signals, exit_mode)
+    long_exits, short_exits = _exit_signals(
+        df=df,
+        signals=signals,
+        exit_mode=exit_mode,
+        failure_bars=failure_bars,
+    )
     stop_kwargs = _stop_kwargs(df, signals.setup_stop_loss, exit_mode)
 
     pf = vbt.Portfolio.from_signals(
@@ -81,6 +88,7 @@ def run_backtest(
         "slippage": slippage,
         "cash": cash,
         "exit_mode": exit_mode.value,
+        "failure_bars": failure_bars,
         "data_start": str(df.index.min()),
         "data_end": str(df.index.max()),
         "candle_count": int(len(df)),
@@ -112,16 +120,54 @@ def run_backtest(
     )
 
 
-def _exit_signals(signals: SignalSet, exit_mode: ExitMode) -> tuple[pd.Series, pd.Series]:
-    if exit_mode != ExitMode.TREND_FAILURE:
+def _exit_signals(
+    *,
+    df: pd.DataFrame,
+    signals: SignalSet,
+    exit_mode: ExitMode,
+    failure_bars: int,
+) -> tuple[pd.Series, pd.Series]:
+    if exit_mode == ExitMode.OPPOSITE_SIGNAL_ONLY or exit_mode == ExitMode.SETUP_INVALIDATION_STOP:
         return signals.long_exits, signals.short_exits
 
-    if signals.trend_failure_long_exits is None or signals.trend_failure_short_exits is None:
-        raise ValueError("Strategy did not provide trend failure exits")
+    if exit_mode == ExitMode.CONTINUATION_FAILURE:
+        continuation_long_exits, continuation_short_exits = _continuation_failure_exits(
+            df,
+            failure_bars=failure_bars,
+        )
+        return (
+            signals.long_exits | continuation_long_exits,
+            signals.short_exits | continuation_short_exits,
+        )
 
+    if exit_mode == ExitMode.TREND_FAILURE:
+        if signals.trend_failure_long_exits is None or signals.trend_failure_short_exits is None:
+            raise ValueError("Strategy did not provide trend failure exits")
+
+        return (
+            signals.long_exits | signals.trend_failure_long_exits,
+            signals.short_exits | signals.trend_failure_short_exits,
+        )
+
+    raise ValueError(f"Unsupported exit mode: {exit_mode}")
+
+
+def _continuation_failure_exits(
+    df: pd.DataFrame,
+    *,
+    failure_bars: int,
+) -> tuple[pd.Series, pd.Series]:
+    if failure_bars < 1:
+        raise ValueError("failure_bars must be >= 1")
+
+    close_change = df["close"].diff()
+    lower_close = close_change < 0
+    higher_close = close_change > 0
+    long_exits = lower_close.rolling(failure_bars, min_periods=failure_bars).sum() == failure_bars
+    short_exits = higher_close.rolling(failure_bars, min_periods=failure_bars).sum() == failure_bars
     return (
-        signals.long_exits | signals.trend_failure_long_exits,
-        signals.short_exits | signals.trend_failure_short_exits,
+        long_exits.fillna(False),
+        short_exits.fillna(False),
     )
 
 
@@ -130,7 +176,11 @@ def _stop_kwargs(
     setup_stop_loss: pd.Series | None,
     exit_mode: ExitMode,
 ) -> dict[str, Any]:
-    if exit_mode in {ExitMode.OPPOSITE_SIGNAL_ONLY, ExitMode.TREND_FAILURE}:
+    if exit_mode in {
+        ExitMode.CONTINUATION_FAILURE,
+        ExitMode.OPPOSITE_SIGNAL_ONLY,
+        ExitMode.TREND_FAILURE,
+    }:
         return {}
     if setup_stop_loss is None:
         raise ValueError("Strategy did not provide setup invalidation stop levels")

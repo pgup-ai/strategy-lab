@@ -86,8 +86,13 @@ def backtest(
     slippage: float = typer.Option(0.0005, help="One-way slippage rate."),
     cash: float = typer.Option(10_000.0, help="Initial cash."),
     exit_mode: ExitMode = typer.Option(
-        ExitMode.TREND_FAILURE,
-        help="Exit behavior: trend failure, setup invalidation stop, or opposite signal only.",
+        ExitMode.CONTINUATION_FAILURE,
+        help="Exit behavior: continuation failure, trend failure, setup invalidation stop, or opposite signal only.",
+    ),
+    failure_bars: int = typer.Option(
+        4,
+        min=1,
+        help="Adverse consecutive close count used by continuation_failure.",
     ),
     report_root: Path = typer.Option(Path("reports"), help="Report output folder."),
 ) -> None:
@@ -118,6 +123,7 @@ def backtest(
             slippage=slippage,
             cash=cash,
             exit_mode=exit_mode,
+            failure_bars=failure_bars,
             report_root=report_root,
         )
         typer.echo(f"Wrote report for {symbol}: {result.report_dir}")

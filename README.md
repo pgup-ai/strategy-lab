@@ -89,10 +89,37 @@ strategy-lab backtest \
   --strategy turnaround_v2
 ```
 
-By default, backtests exit on either the opposite strategy signal or trend failure:
+By default, backtests exit on either the opposite strategy signal or continuation failure:
+
+- long continuation failure: 4 consecutive lower closes
+- short continuation failure: 4 consecutive higher closes
+
+Tune that threshold with `--failure-bars`:
+
+```bash
+strategy-lab backtest \
+  --exchange binance \
+  --market-type spot \
+  --symbols BTC/USDT \
+  --timeframe 15m \
+  --strategy turnaround_v2 \
+  --failure-bars 4
+```
+
+To compare against EMA-based trend failure:
 
 - long trend failure: close falls below the EMA trend filter
 - short trend failure: close rises above the EMA trend filter
+
+```bash
+strategy-lab backtest \
+  --exchange binance \
+  --market-type spot \
+  --symbols BTC/USDT \
+  --timeframe 15m \
+  --strategy turnaround_v2 \
+  --exit-mode trend_failure
+```
 
 To compare against the raw setup invalidation stop:
 
@@ -156,7 +183,7 @@ That report directory is the reproducibility boundary for comparing strategy cha
 - long only when price is below EMA20 extension threshold
 - short only when price is above EMA20 extension threshold
 - fees and slippage are applied in the backtest runner
-- trend failure exits are applied by default in the backtest runner
+- continuation failure exits are applied by default in the backtest runner
 
 Indicators and signals are derived at backtest time. The database stores raw candles only.
 
