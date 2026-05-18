@@ -42,5 +42,12 @@ class YahooFinanceClient:
         df.index = pd.to_datetime(df.index, utc=True)
         df.index.name = "timestamp"
 
+        if "adj_close" in df.columns and "close" in df.columns:
+            adj_factor = df["adj_close"] / df["close"]
+            df["open"] = df["open"] * adj_factor
+            df["high"] = df["high"] * adj_factor
+            df["low"] = df["low"] * adj_factor
+            df["close"] = df["adj_close"]
+
         required = ["open", "high", "low", "close", "volume"]
         return df[required].dropna().sort_index()

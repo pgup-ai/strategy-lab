@@ -9,6 +9,7 @@ from strategy_lab.db import init_db, list_candle_sets, load_candles, upsert_cand
 from strategy_lab.db.candles import normalize_candle_frame
 from strategy_lab.market_data.base import MarketDataIdentity
 from strategy_lab.strategies import get_strategy, list_strategies
+from strategy_lab.universe.etfs import EFT_UNIVERSE, EtfDefinition
 
 
 app = typer.Typer(help="Fetch candles, store them locally, and run reproducible backtests.")
@@ -73,6 +74,43 @@ def fetch_stock(
     typer.echo(f"Upserted {count} candles for yahoo/equity/{symbol}/{timeframe}.")
 
 
+@app.command("fetch-etf-universe")
+def fetch_etf_universe(
+    timeframe: str = typer.Option("1w", help="Candle timeframe for all ETFs."),
+    start: str = typer.Option("2020-01-01", help="UTC start date."),
+    end: str | None = typer.Option(None, help="UTC end date. Defaults to today."),
+    symbols: str | None = typer.Option(
+        None,
+        help="Comma-separated symbols to fetch. Defaults to all configured ETFs.",
+    ),
+) -> None:
+    """Fetch weekly candles for the configured ETF universe from Yahoo Finance."""
+    from strategy_lab.market_data.yahoo import YahooFinanceClient
+
+    if symbols:
+        target = [s.strip().upper() for s in symbols.split(",") if s.strip()]
+    else:
+        target = [etf.symbol for etf in EFT_UNIVERSE]
+
+    client = YahooFinanceClient()
+    for symbol in target:
+        typer.echo(f"Fetching {symbol} {timeframe} from {start} ...")
+        df = client.fetch_ohlcv(symbol, timeframe, start=start, end=end)
+        if df.empty:
+            typer.echo(f"  No data returned for {symbol}")
+            continue
+        records = normalize_candle_frame(
+            df,
+            exchange="yahoo",
+            market_type="equity",
+            symbol=symbol,
+            timeframe=timeframe,
+            source=client.source,
+        )
+        count = upsert_candles(records)
+        typer.echo(f"  Upserted {count} candles for yahoo/equity/{symbol}/{timeframe}.")
+
+
 @app.command("backtest")
 def backtest(
     symbols: str = typer.Option("BTC/USDT", help="Comma-separated symbols."),
@@ -97,6 +135,12 @@ def backtest(
         4,
         min=1,
         help="Adverse consecutive close count used by continuation_failure.",
+    ),
+    position_pct: float = typer.Option(
+        0.95,
+        min=0.01,
+        max=1.0,
+        help="Fraction of capital deployed per trade.",
     ),
     report_root: Path = typer.Option(Path("reports"), help="Report output folder."),
 ) -> None:
@@ -128,6 +172,7 @@ def backtest(
             cash=cash,
             exit_mode=exit_mode,
             failure_bars=failure_bars,
+            position_pct=position_pct,
             report_root=report_root,
         )
         typer.echo(f"Wrote report for {symbol}: {result.report_dir}")

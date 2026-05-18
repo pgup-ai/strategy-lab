@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import pandas as pd
 
+from strategy_lab.strategies.trend_following_deepseek_v4 import TrendFollowingDeepseekV4
 from strategy_lab.strategies.turnaround_v1 import TurnaroundV1
 from strategy_lab.strategies.turnaround_v2 import TurnaroundV2
 
@@ -39,3 +40,25 @@ def test_turnaround_v2_keeps_signal_shape() -> None:
 
     assert signals.long_entries.index.equals(_frame().index)
     assert signals.short_entries.dtype == bool
+
+
+def test_trend_following_deepseek_v4_no_opposite_exits() -> None:
+    signals = TrendFollowingDeepseekV4(trend_sma_span=2, max_extension=5.0).generate_signals(_frame())
+
+    assert not signals.long_exits.any()
+    assert not signals.short_entries.any()
+    assert not signals.short_exits.any()
+    assert signals.setup_stop_loss is None
+    assert signals.trend_failure_long_exits is None
+    assert signals.trend_failure_short_exits is None
+
+
+def test_trend_following_deepseek_v4_requires_uptrend() -> None:
+    df = _frame()
+    signals = TrendFollowingDeepseekV4(trend_sma_span=2, max_extension=5.0).generate_signals(df)
+
+    sma = df["close"].rolling(2).mean()
+    expected = df["close"] > sma
+    for idx in df.index:
+        if signals.long_entries.loc[idx]:
+            assert expected.loc[idx], f"Entry at {idx} but close not above trend SMA"

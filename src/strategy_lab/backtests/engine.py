@@ -22,6 +22,7 @@ class ExitMode(str, Enum):
     OPPOSITE_SIGNAL_ONLY = "opposite_signal_only"
     SETUP_INVALIDATION_STOP = "setup_invalidation_stop"
     TREND_FAILURE = "trend_failure"
+    TREND_STRUCTURE = "trend_structure"
 
 
 @dataclass(frozen=True)
@@ -43,6 +44,7 @@ def run_backtest(
     cash: float = 10_000.0,
     exit_mode: ExitMode | str = ExitMode.CONTINUATION_FAILURE,
     failure_bars: int = 4,
+    position_pct: float = 0.95,
     report_root: Path = Path("reports"),
 ) -> BacktestResult:
     try:
@@ -64,12 +66,21 @@ def run_backtest(
     )
     stop_kwargs = _stop_kwargs(df, signals.setup_stop_loss, exit_mode)
 
+    size = _compute_entry_sizes(
+        entries=signals.long_entries,
+        close=df["close"],
+        cash=cash,
+        position_pct=position_pct,
+        position_scale=signals.position_size,
+    )
+
     pf = vbt.Portfolio.from_signals(
         close=df["close"],
         entries=signals.long_entries,
         exits=long_exits,
         short_entries=signals.short_entries,
         short_exits=short_exits,
+        size=size,
         init_cash=cash,
         fees=fees,
         slippage=slippage,
@@ -89,6 +100,7 @@ def run_backtest(
         "cash": cash,
         "exit_mode": exit_mode.value,
         "failure_bars": failure_bars,
+        "position_pct": position_pct,
         "data_start": str(df.index.min()),
         "data_end": str(df.index.max()),
         "candle_count": int(len(df)),
@@ -149,6 +161,18 @@ def _exit_signals(
             signals.short_exits | signals.trend_failure_short_exits,
         )
 
+    if exit_mode == ExitMode.TREND_STRUCTURE:
+        sma_span = signals.metadata.get("trend_sma_span", 40)
+        sma_break_long, _ = _sma_break_exits(df, sma_span=sma_span)
+        continuation_long_exits, _ = _continuation_failure_exits(
+            df,
+            failure_bars=failure_bars,
+        )
+        return (
+            sma_break_long.fillna(False) | continuation_long_exits,
+            pd.Series(False, index=df.index),
+        )
+
     raise ValueError(f"Unsupported exit mode: {exit_mode}")
 
 
@@ -171,6 +195,16 @@ def _continuation_failure_exits(
     )
 
 
+def _sma_break_exits(
+    df: pd.DataFrame,
+    *,
+    sma_span: int,
+) -> tuple[pd.Series, pd.Series]:
+    sma = df["close"].rolling(sma_span).mean()
+    long_exits = df["close"] < sma
+    return long_exits.fillna(False), pd.Series(False, index=df.index)
+
+
 def _stop_kwargs(
     df: pd.DataFrame,
     setup_stop_loss: pd.Series | None,
@@ -180,6 +214,7 @@ def _stop_kwargs(
         ExitMode.CONTINUATION_FAILURE,
         ExitMode.OPPOSITE_SIGNAL_ONLY,
         ExitMode.TREND_FAILURE,
+        ExitMode.TREND_STRUCTURE,
     }:
         return {}
     if setup_stop_loss is None:
@@ -217,6 +252,25 @@ def _slug(value: str) -> str:
 
 def _write_json(path: Path, payload: Any) -> None:
     path.write_text(json.dumps(_json_safe(payload), indent=2, sort_keys=True) + "\n")
+
+
+def _compute_entry_sizes(
+    *,
+    entries: pd.Series,
+    close: pd.Series,
+    cash: float,
+    position_pct: float,
+    position_scale: pd.Series | None,
+) -> pd.Series:
+    size = pd.Series(0.0, index=entries.index, dtype="float64")
+
+    if position_scale is not None:
+        fraction = position_pct * position_scale
+        size.loc[entries] = (cash * fraction.loc[entries]) / close.loc[entries]
+    else:
+        size.loc[entries] = (cash * position_pct) / close.loc[entries]
+
+    return size
 
 
 def _json_safe(value: Any) -> Any:

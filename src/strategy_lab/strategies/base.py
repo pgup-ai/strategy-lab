@@ -16,6 +16,7 @@ class SignalSet:
     setup_stop_loss: pd.Series | None = None
     trend_failure_long_exits: pd.Series | None = None
     trend_failure_short_exits: pd.Series | None = None
+    position_size: pd.Series | None = None
     metadata: dict = field(default_factory=dict)
 
 

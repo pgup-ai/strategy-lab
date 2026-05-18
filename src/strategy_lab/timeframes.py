@@ -14,6 +14,7 @@ FREQUENCY_BY_TIMEFRAME = {
     "4h": "4h",
     "1d": "1d",
     "1w": "7d",
+    "1wk": "7d",
 }
 
 
