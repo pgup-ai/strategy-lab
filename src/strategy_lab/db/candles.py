@@ -105,29 +105,42 @@ def normalize_candle_frame(
     return records
 
 
-def upsert_candles(records: Iterable[dict], database_url: str | None = None) -> int:
+def upsert_candles(
+    records: Iterable[dict],
+    database_url: str | None = None,
+    *,
+    batch_size: int = 1_000,
+) -> int:
     rows = list(records)
     if not rows:
         return 0
 
     engine = get_engine(database_url)
-    stmt = insert(candles_table).values(rows)
-    update_columns = {
-        "open": stmt.excluded.open,
-        "high": stmt.excluded.high,
-        "low": stmt.excluded.low,
-        "close": stmt.excluded.close,
-        "volume": stmt.excluded.volume,
-        "source": stmt.excluded.source,
-        "updated_at": func.now(),
-    }
-    stmt = stmt.on_conflict_do_update(
-        constraint="uq_market_candles_identity",
-        set_=update_columns,
-    )
     with engine.begin() as conn:
-        conn.execute(stmt)
+        for batch in _batched(rows, batch_size):
+            stmt = insert(candles_table).values(batch)
+            update_columns = {
+                "open": stmt.excluded.open,
+                "high": stmt.excluded.high,
+                "low": stmt.excluded.low,
+                "close": stmt.excluded.close,
+                "volume": stmt.excluded.volume,
+                "source": stmt.excluded.source,
+                "updated_at": func.now(),
+            }
+            stmt = stmt.on_conflict_do_update(
+                constraint="uq_market_candles_identity",
+                set_=update_columns,
+            )
+            conn.execute(stmt)
     return len(rows)
+
+
+def _batched(rows: list[dict], batch_size: int) -> Iterable[list[dict]]:
+    if batch_size < 1:
+        raise ValueError("batch_size must be >= 1")
+    for index in range(0, len(rows), batch_size):
+        yield rows[index : index + batch_size]
 
 
 def load_candles(
@@ -169,6 +182,34 @@ def load_candles(
 
     df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True)
     return df.set_index("timestamp")
+
+
+def list_candle_sets(database_url: str | None = None) -> pd.DataFrame:
+    engine = get_engine(database_url)
+    query = (
+        select(
+            candles_table.c.exchange,
+            candles_table.c.market_type,
+            candles_table.c.symbol,
+            candles_table.c.timeframe,
+            func.count().label("candles"),
+            func.min(candles_table.c.timestamp).label("first_timestamp"),
+            func.max(candles_table.c.timestamp).label("last_timestamp"),
+        )
+        .group_by(
+            candles_table.c.exchange,
+            candles_table.c.market_type,
+            candles_table.c.symbol,
+            candles_table.c.timeframe,
+        )
+        .order_by(
+            candles_table.c.exchange,
+            candles_table.c.market_type,
+            candles_table.c.symbol,
+            candles_table.c.timeframe,
+        )
+    )
+    return pd.read_sql(query, engine)
 
 
 def _utc_timestamp(value: str) -> pd.Timestamp:

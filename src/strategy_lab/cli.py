@@ -5,7 +5,7 @@ from pathlib import Path
 import typer
 
 from strategy_lab.backtests import run_backtest
-from strategy_lab.db import init_db, load_candles, upsert_candles
+from strategy_lab.db import init_db, list_candle_sets, load_candles, upsert_candles
 from strategy_lab.db.candles import normalize_candle_frame
 from strategy_lab.market_data.base import MarketDataIdentity
 from strategy_lab.strategies import get_strategy, list_strategies
@@ -104,6 +104,8 @@ def backtest(
             start=start,
             end=end,
         )
+        if df.empty:
+            _raise_missing_candles(identity)
         result = run_backtest(
             df=df,
             strategy=strategy,
@@ -123,8 +125,52 @@ def strategies_command() -> None:
         typer.echo(strategy_name)
 
 
+@app.command("data-sets")
+def data_sets() -> None:
+    """List candle sets currently stored in Postgres."""
+    candle_sets = list_candle_sets()
+    if candle_sets.empty:
+        typer.echo("No candle data stored yet.")
+        raise typer.Exit()
+
+    typer.echo(candle_sets.to_string(index=False))
+
+
 def _split_symbols(symbols: str) -> list[str]:
     return [symbol.strip() for symbol in symbols.split(",") if symbol.strip()]
+
+
+def _raise_missing_candles(identity: MarketDataIdentity) -> None:
+    candle_sets = list_candle_sets()
+    available = "No candle data is stored yet."
+    if not candle_sets.empty:
+        available = candle_sets.to_string(index=False)
+
+    fetch_hint = _fetch_hint(identity)
+    message = (
+        "No candles loaded for "
+        f"{identity.exchange}/{identity.market_type}/{identity.symbol}/{identity.timeframe}.\n\n"
+        f"Available candle sets:\n{available}\n\n"
+        f"Fetch this data first:\n{fetch_hint}"
+    )
+    raise typer.BadParameter(message)
+
+
+def _fetch_hint(identity: MarketDataIdentity) -> str:
+    if identity.exchange == "yahoo" or identity.market_type == "equity":
+        return (
+            "strategy-lab fetch-stock "
+            f"--symbol {identity.symbol} --timeframe {identity.timeframe} --period 2y"
+        )
+
+    return (
+        "strategy-lab fetch-crypto "
+        f"--exchange {identity.exchange} "
+        f"--market-type {identity.market_type} "
+        f"--symbol {identity.symbol} "
+        f"--timeframe {identity.timeframe} "
+        "--since 2024-01-01"
+    )
 
 
 if __name__ == "__main__":

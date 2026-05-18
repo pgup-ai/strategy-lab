@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pandas as pd
 
-from strategy_lab.db.candles import normalize_candle_frame
+from strategy_lab.db.candles import _batched, normalize_candle_frame
 
 
 def test_normalize_candle_frame_adds_identity_fields() -> None:
@@ -40,4 +40,14 @@ def test_normalize_candle_frame_adds_identity_fields() -> None:
             "volume": 10.0,
             "source": "binance",
         }
+    ]
+
+
+def test_batched_splits_large_upserts() -> None:
+    rows = [{"index": index} for index in range(5)]
+
+    assert list(_batched(rows, 2)) == [
+        [{"index": 0}, {"index": 1}],
+        [{"index": 2}, {"index": 3}],
+        [{"index": 4}],
     ]
