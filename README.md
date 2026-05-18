@@ -1,0 +1,144 @@
+# Strategy Lab
+
+Local Python research repo for crypto and stock strategy backtesting.
+
+The current stack is intentionally small:
+
+- Postgres 16 in Docker for reproducible OHLCV storage
+- `ccxt` for crypto candles
+- `yfinance` for stock candles
+- `pandas` and `numpy` for strategy research
+- `vectorbt` for fast signal-based backtests and plots
+
+## Layout
+
+```text
+strategy-lab/
+  data/
+    raw/
+    processed/
+  reports/
+  src/strategy_lab/
+    market_data/     # vehicle/source-specific fetchers
+    db/              # normalized candle schema and read/write helpers
+    strategies/      # strategy modules
+    backtests/       # vectorbt runner and report writer
+    cli.py
+```
+
+## Setup
+
+```bash
+cd /Users/jingbofu/Desktop/repo/strategy-lab
+python3.11 -m venv .venv
+source .venv/bin/activate
+pip install -e ".[dev]"
+docker compose up -d postgres
+strategy-lab init-db
+```
+
+The default database URL is:
+
+```text
+postgresql+psycopg://trader:trader@localhost:5432/strategy_lab
+```
+
+Override it with `DATABASE_URL` if needed.
+
+## Fetch Data
+
+Crypto spot:
+
+```bash
+strategy-lab fetch-crypto \
+  --exchange binance \
+  --market-type spot \
+  --symbol BTC/USDT \
+  --timeframe 15m \
+  --since 2024-01-01
+```
+
+Crypto perps:
+
+```bash
+strategy-lab fetch-crypto \
+  --exchange binance \
+  --market-type perp \
+  --symbol BTC/USDT \
+  --timeframe 1h \
+  --since 2024-01-01
+```
+
+Stocks:
+
+```bash
+strategy-lab fetch-stock \
+  --symbol AAPL \
+  --timeframe 1h \
+  --period 2y
+```
+
+## Backtest
+
+```bash
+strategy-lab backtest \
+  --exchange binance \
+  --market-type spot \
+  --symbols BTC/USDT,ETH/USDT,SOL/USDT \
+  --timeframe 15m \
+  --strategy turnaround_v2
+```
+
+Stock example:
+
+```bash
+strategy-lab backtest \
+  --exchange yahoo \
+  --market-type equity \
+  --symbols AAPL,MSFT,NVDA \
+  --timeframe 1h \
+  --strategy turnaround_v2
+```
+
+Each run writes a snapshot under `reports/`:
+
+- `config.json`
+- `stats.json`
+- `trades.csv`
+- `equity_curve.csv`
+- `plot.html`
+
+That report directory is the reproducibility boundary for comparing strategy changes.
+
+## Strategies
+
+`turnaround_v1` is the base reversal logic:
+
+- long after two red candles followed by a green candle
+- short after two green candles followed by a red candle
+
+`turnaround_v2` adds the first-phase filters:
+
+- long only above EMA200 trend
+- short only below EMA200 trend
+- long only when price is below EMA20 extension threshold
+- short only when price is above EMA20 extension threshold
+- fees and slippage are applied in the backtest runner
+
+Indicators and signals are derived at backtest time. The database stores raw candles only.
+
+## Add A New Trading Vehicle
+
+Add a fetcher under `src/strategy_lab/market_data/` that returns a DataFrame with:
+
+```text
+timestamp index, open, high, low, close, volume
+```
+
+Then write it with `normalize_candle_frame(...)` and identify it with:
+
+```text
+exchange, market_type, symbol, timeframe
+```
+
+The same strategy and backtest code can then run against the new vehicle.
