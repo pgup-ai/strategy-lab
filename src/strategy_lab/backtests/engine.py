@@ -163,6 +163,11 @@ def _exit_signals(
         )
 
     if exit_mode == ExitMode.TREND_STRUCTURE:
+        if signals.short_entries.any():
+            raise ValueError(
+                "trend_structure provides no short exits; "
+                "disable shorts or use a long-only strategy"
+            )
         sma_span = signals.metadata.get("trend_sma_span", 40)
         sma_break_long, _ = _sma_break_exits(df, sma_span=sma_span)
         continuation_long_exits, _ = _continuation_failure_exits(

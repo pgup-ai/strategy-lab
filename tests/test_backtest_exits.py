@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 import pandas as pd
+import pytest
 
 from strategy_lab.backtests.engine import _continuation_failure_exits, _sma_break_exits, run_backtest
 from strategy_lab.market_data.base import MarketDataIdentity
@@ -42,10 +43,10 @@ class _ShortOnlyStrategy:
         )
 
 
-def test_run_backtest_opens_short_trades(tmp_path) -> None:
+def _ohlcv_frame() -> pd.DataFrame:
     closes = [100.0, 101.0, 102.0, 101.0, 100.0, 99.0, 98.0, 97.0, 98.0, 99.0]
     index = pd.date_range("2024-01-01", periods=len(closes), freq="D", tz="UTC")
-    df = pd.DataFrame(
+    return pd.DataFrame(
         {
             "open": closes,
             "high": [c + 1 for c in closes],
@@ -56,15 +57,20 @@ def test_run_backtest_opens_short_trades(tmp_path) -> None:
         index=index,
     )
 
+
+_IDENTITY = MarketDataIdentity(
+    exchange="test",
+    market_type="spot",
+    symbol="TEST/USDT",
+    timeframe="1d",
+)
+
+
+def test_run_backtest_opens_short_trades(tmp_path) -> None:
     result = run_backtest(
-        df=df,
+        df=_ohlcv_frame(),
         strategy=_ShortOnlyStrategy(),
-        identity=MarketDataIdentity(
-            exchange="test",
-            market_type="spot",
-            symbol="TEST/USDT",
-            timeframe="1d",
-        ),
+        identity=_IDENTITY,
         exit_mode="opposite_signal_only",
         report_root=tmp_path,
     )
@@ -72,6 +78,17 @@ def test_run_backtest_opens_short_trades(tmp_path) -> None:
     trades = pd.read_csv(result.trades_path)
     short_trades = trades[trades["Direction"] == "Short"]
     assert not short_trades.empty, "short entry produced no short trades"
+
+
+def test_trend_structure_rejects_short_entries(tmp_path) -> None:
+    with pytest.raises(ValueError, match="short"):
+        run_backtest(
+            df=_ohlcv_frame(),
+            strategy=_ShortOnlyStrategy(),
+            identity=_IDENTITY,
+            exit_mode="trend_structure",
+            report_root=tmp_path,
+        )
 
 
 def test_sma_break_exits_when_close_crosses_below() -> None:

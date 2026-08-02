@@ -186,7 +186,9 @@ The `trend_structure` exit mode exits on either:
 - long: close falls below the 40-week SMA (trend break)
 - long: continuation failure (4 consecutive lower closes by default)
 
-No short exits and no opposite signal exits.
+No short exits and no opposite signal exits — the engine rejects `trend_structure` runs
+whose strategy emits short entries, so pair it with `--no-allow-shorts` or a long-only
+strategy.
 
 For the ATR-sized weekly trend rider (exits are built into the strategy, so use the
 pass-through exit mode):

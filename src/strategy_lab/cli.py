@@ -130,8 +130,8 @@ def backtest(
     exit_mode: ExitMode = typer.Option(
         ExitMode.CONTINUATION_FAILURE,
         help=(
-            "Exit behavior: continuation failure, trend failure, trend structure, "
-            "setup invalidation stop, or opposite signal only."
+            "Exit behavior: continuation failure, trend failure, trend structure "
+            "(long-only), setup invalidation stop, or opposite signal only."
         ),
     ),
     failure_bars: int = typer.Option(
