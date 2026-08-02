@@ -41,8 +41,8 @@ SECTOR_ETFS: list[EtfDefinition] = [
     EtfDefinition(symbol="XLRE", name="Real Estate Select Sector SPDR", sector="realestate", inception="2015-10-08"),
 ]
 
-EFT_UNIVERSE: list[EtfDefinition] = BROAD_ETFS + INTERNATIONAL_ETFS + SECTOR_ETFS
+ETF_UNIVERSE: list[EtfDefinition] = BROAD_ETFS + INTERNATIONAL_ETFS + SECTOR_ETFS
 
 
 def list_etfs() -> list[str]:
-    return [etf.symbol for etf in EFT_UNIVERSE]
+    return [etf.symbol for etf in ETF_UNIVERSE]

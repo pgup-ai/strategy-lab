@@ -115,7 +115,7 @@ class TrendRiderV1DeepseekV4Pro:
             position_size=position_scale,
             metadata={
                 "allow_shorts": self.allow_shorts,
-                "sma_trend_span": self.sma_trend_span,
+                "trend_sma_span": self.sma_trend_span,
                 "roc_momentum_period": self.roc_momentum_period,
                 "atr_period": self.atr_period,
                 "atr_max_ratio": self.atr_max_ratio,

@@ -1,8 +1,12 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 import pandas as pd
 
-from strategy_lab.backtests.engine import _continuation_failure_exits, _sma_break_exits
+from strategy_lab.backtests.engine import _continuation_failure_exits, _sma_break_exits, run_backtest
+from strategy_lab.market_data.base import MarketDataIdentity
+from strategy_lab.strategies.base import SignalSet
 
 
 def test_continuation_failure_exits_after_consecutive_adverse_closes() -> None:
@@ -18,6 +22,57 @@ def test_continuation_failure_exits_after_consecutive_adverse_closes() -> None:
 
     assert long_exits.tolist() == [False, False, False, False, True, False, False, False]
     assert short_exits.tolist() == [False, False, False, False, False, False, False, True]
+
+
+@dataclass(frozen=True)
+class _ShortOnlyStrategy:
+    name: str = "short_only_stub"
+
+    def generate_signals(self, df: pd.DataFrame) -> SignalSet:
+        no_signal = pd.Series(False, index=df.index)
+        short_entries = no_signal.copy()
+        short_entries.iloc[2] = True
+        short_exits = no_signal.copy()
+        short_exits.iloc[7] = True
+        return SignalSet(
+            long_entries=no_signal.copy(),
+            long_exits=no_signal.copy(),
+            short_entries=short_entries,
+            short_exits=short_exits,
+        )
+
+
+def test_run_backtest_opens_short_trades(tmp_path) -> None:
+    closes = [100.0, 101.0, 102.0, 101.0, 100.0, 99.0, 98.0, 97.0, 98.0, 99.0]
+    index = pd.date_range("2024-01-01", periods=len(closes), freq="D", tz="UTC")
+    df = pd.DataFrame(
+        {
+            "open": closes,
+            "high": [c + 1 for c in closes],
+            "low": [c - 1 for c in closes],
+            "close": closes,
+            "volume": [1_000.0] * len(closes),
+        },
+        index=index,
+    )
+
+    result = run_backtest(
+        df=df,
+        strategy=_ShortOnlyStrategy(),
+        identity=MarketDataIdentity(
+            exchange="test",
+            market_type="spot",
+            symbol="TEST/USDT",
+            timeframe="1d",
+        ),
+        exit_mode="opposite_signal_only",
+        report_root=tmp_path,
+    )
+
+    trades = pd.read_csv(result.trades_path)
+    short_trades = trades[trades["Direction"] == "Short"]
+    assert not short_trades.empty, "short entry produced no short trades"
+    assert (short_trades["Size"] > 0).all()
 
 
 def test_sma_break_exits_when_close_crosses_below() -> None:

@@ -3,6 +3,7 @@ from __future__ import annotations
 import pandas as pd
 
 from strategy_lab.strategies.trend_following_deepseek_v4 import TrendFollowingDeepseekV4
+from strategy_lab.strategies.trend_rider_v1_deepseek_v4_pro import TrendRiderV1DeepseekV4Pro
 from strategy_lab.strategies.turnaround_v1 import TurnaroundV1
 from strategy_lab.strategies.turnaround_v2 import TurnaroundV2
 
@@ -51,6 +52,12 @@ def test_trend_following_deepseek_v4_no_opposite_exits() -> None:
     assert signals.setup_stop_loss is None
     assert signals.trend_failure_long_exits is None
     assert signals.trend_failure_short_exits is None
+
+
+def test_trend_rider_publishes_trend_sma_span_for_engine() -> None:
+    signals = TrendRiderV1DeepseekV4Pro(sma_trend_span=3).generate_signals(_frame())
+
+    assert signals.metadata.get("trend_sma_span") == 3
 
 
 def test_trend_following_deepseek_v4_requires_uptrend() -> None:

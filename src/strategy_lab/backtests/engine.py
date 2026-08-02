@@ -67,7 +67,8 @@ def run_backtest(
     stop_kwargs = _stop_kwargs(df, signals.setup_stop_loss, exit_mode)
 
     size = _compute_entry_sizes(
-        entries=signals.long_entries,
+        long_entries=signals.long_entries,
+        short_entries=signals.short_entries,
         close=df["close"],
         cash=cash,
         position_pct=position_pct,
@@ -256,12 +257,14 @@ def _write_json(path: Path, payload: Any) -> None:
 
 def _compute_entry_sizes(
     *,
-    entries: pd.Series,
+    long_entries: pd.Series,
+    short_entries: pd.Series,
     close: pd.Series,
     cash: float,
     position_pct: float,
     position_scale: pd.Series | None,
 ) -> pd.Series:
+    entries = long_entries | short_entries
     size = pd.Series(0.0, index=entries.index, dtype="float64")
 
     if position_scale is not None:
