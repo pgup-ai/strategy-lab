@@ -54,12 +54,6 @@ def test_trend_following_deepseek_v4_no_opposite_exits() -> None:
     assert signals.trend_failure_short_exits is None
 
 
-def test_trend_rider_publishes_trend_sma_span_for_engine() -> None:
-    signals = TrendRiderV1DeepseekV4Pro(sma_trend_span=3).generate_signals(_frame())
-
-    assert signals.metadata.get("trend_sma_span") == 3
-
-
 def test_trend_following_deepseek_v4_requires_uptrend() -> None:
     df = _frame()
     signals = TrendFollowingDeepseekV4(trend_sma_span=2, max_extension=5.0).generate_signals(df)
@@ -69,3 +63,9 @@ def test_trend_following_deepseek_v4_requires_uptrend() -> None:
     for idx in df.index:
         if signals.long_entries.loc[idx]:
             assert expected.loc[idx], f"Entry at {idx} but close not above trend SMA"
+
+
+def test_trend_rider_publishes_trend_sma_span_for_engine() -> None:
+    signals = TrendRiderV1DeepseekV4Pro(sma_trend_span=3).generate_signals(_frame())
+
+    assert signals.metadata.get("trend_sma_span") == 3

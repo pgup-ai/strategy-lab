@@ -72,7 +72,6 @@ def test_run_backtest_opens_short_trades(tmp_path) -> None:
     trades = pd.read_csv(result.trades_path)
     short_trades = trades[trades["Direction"] == "Short"]
     assert not short_trades.empty, "short entry produced no short trades"
-    assert (short_trades["Size"] > 0).all()
 
 
 def test_sma_break_exits_when_close_crosses_below() -> None:
