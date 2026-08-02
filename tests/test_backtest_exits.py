@@ -5,7 +5,11 @@ from dataclasses import dataclass
 import pandas as pd
 import pytest
 
-from strategy_lab.backtests.engine import _continuation_failure_exits, _sma_break_exits, run_backtest
+from strategy_lab.backtests.engine import (
+    _continuation_failure_exits,
+    _sma_break_exits,
+    run_backtest,
+)
 from strategy_lab.market_data.base import MarketDataIdentity
 from strategy_lab.strategies.base import SignalSet
 

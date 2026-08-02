@@ -129,7 +129,7 @@ Engine defaults: `exit_mode=continuation_failure`, `failure_bars=4`.
 | `opposite_signal_only` | opposite signal only | ⚠ never exits | ✅ canonical (pass-through) |
 | `trend_failure` | opposite signal OR EMA200 cross | ✗ raises | ✗ raises |
 | `setup_invalidation_stop` | opposite signal + stop at setup extreme | ✗ raises | ✗ raises |
-| `trend_structure` | long-only: raises if short entries exist; SMA40 via fallback | ✅ canonical: SMA40 break OR N adverse closes | runs with the published span, but replaces the internal exits |
+| `trend_structure` | long-only: raises if short entries exist; SMA40 via fallback | ✅ canonical: SMA40 break OR N adverse closes | long-only (raises if short entries exist — pass `--no-allow-shorts`); replaces the internal exits |
 
 ## Engine behavior worth remembering
 
