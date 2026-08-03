@@ -4,7 +4,7 @@ Source of truth for what each strategy does, how it is meant to be run, and what
 about its behavior. Update this file whenever strategy logic, parameters, or engine exit
 behavior changes — the README only carries quick-start commands.
 
-Last reviewed: 2026-08-02 at commit `31334c4`.
+Last reviewed: 2026-08-03 at commit `498eed5`.
 
 ## At a glance
 
@@ -14,8 +14,17 @@ Last reviewed: 2026-08-02 at commit `31334c4`.
 | `turnaround_v2` | long + short | crypto intraday (15m spot) | same as v1 | EMA200 trend + EMA20 extension | engine | flat | active — crypto |
 | `trend_following_deepseek_v4` | long only | weekly equity ETFs | same pattern within uptrend | SMA40 trend + 1.20× max extension | engine (`trend_structure`) | flat | active — weekly ETF, simple variant |
 | `trend_rider_v1_deepseek_v4_pro` | long only (short path exists) | weekly equity ETFs | same pattern within uptrend | SMA40 trend + ATR volatility gate | strategy (run pass-through) | ATR-scaled | active — weekly ETF, current focus |
+| `tsmom` | long + short | any (MDE R0 baseline) | sign of the 96-bar trailing return | none | engine | flat | R0 baseline |
+| `ema_cross` | long + short | any (MDE R0 baseline) | EMA48 vs EMA192 | none | engine | flat | R0 baseline |
+| `donchian` | long + short | any (MDE R0 baseline) | close breaks the 96-bar channel | none | strategy (48-bar reverse channel) | flat | R0 baseline |
+| `multi_horizon` | long + short | any (MDE R0 baseline) | sign of a 24/48/96/192 vol-normalized blend | none | engine | flat | R0 baseline |
 
 \* Status is inferred from report history — correct these labels as research priorities change.
+
+The bottom four are the [Market Dynamics Engine](docs/research/2026-08-03-market-dynamics-engine.md)
+R0 baselines: the floor every later state-estimation model has to clear out-of-sample.
+They are deliberately unfiltered and unoptimized — a baseline that has been tuned is not
+a baseline.
 
 ## How signals flow
 
@@ -26,8 +35,10 @@ ingredients actually fire. The same strategy can therefore behave very different
 run — always record the `exit_mode` when comparing results (it is written to each
 report's `config.json`).
 
-All entries share the same three-candle turnaround pattern: two adverse candles followed
-by one reversal candle, evaluated and filled on the signal bar's close.
+The four original strategies share the same three-candle turnaround pattern: two adverse
+candles followed by one reversal candle, evaluated and filled on the signal bar's close.
+The R0 baselines do not — they are continuous trend-state rules (or, for `donchian`, a
+channel break), which is what makes them a fair floor for a trend program.
 
 ---
 
@@ -119,6 +130,87 @@ The ETF universe for weekly runs lives in [universe/etfs.py](src/strategy_lab/un
 
 ---
 
+# MDE R0 baselines
+
+Four unfiltered trend rules that exist to be beaten. None of them provides a setup stop
+or a trend-failure series, so `setup_invalidation_stop` and `trend_failure` raise for all
+four. Default parameters are quoted in bars, and were chosen to be round numbers on a 15m
+grid (96 bars = one day) rather than tuned — the R0 parameter sweep is what tests whether
+any of them sits on a stable plateau.
+
+**All four are `warmup_bars`-measured, not `warmup_bars`-declared.** `tsmom`, `donchian`
+and `multi_horizon` use `rolling`/`pct_change` only, so warmup is exactly the longest
+lookback. `ema_cross` uses `ewm(adjust=False)`, which recurses from bar 0, so its warmup
+is 20× the slow span — see the note in [CLAUDE.md](CLAUDE.md) and
+`tests/test_strategy_metadata.py`.
+
+## tsmom
+
+The single most-documented trend effect in the literature, and the reference floor.
+
+- **Entry**: long while the `lookback`-bar trailing return is positive, short while it is
+  negative. A continuous state, not an event — it re-asserts on every bar.
+- **Exits provided**: opposite state only.
+- **Params**: `lookback=96`, `warmup_bars=96`.
+
+## ema_cross
+
+- **Entry**: long while EMA(`fast_span`) > EMA(`slow_span`), short while it is below.
+- **Exits provided**: opposite state only.
+- **Params**: `fast_span=48`, `slow_span=192`, `warmup_bars=3840` (= 20 × `slow_span`).
+- **Note**: 3840 is not conservatism. At `warmup_bars=192` the span-192 EMA is wrong by up
+  to 2.6e-2 *relative* on 299 of 300 probed bars, and the fast-vs-slow comparison still
+  comes out identical on all 300 — so the signal-level cold-start test cannot see it.
+  `test_recursive_ema_is_bit_exact_after_the_declared_warmup` is what pins this.
+
+## donchian
+
+Turtle-style channel breakout: enter slowly, leave faster, so a trend can be ridden
+rather than round-tripped.
+
+- **Entry**: long when close exceeds the prior `entry_span`-bar high; short when it falls
+  below the prior `entry_span`-bar low.
+- **Exits provided**: reverse break of the shorter `exit_span` channel — independent of
+  the entry state, which makes this the only R0 baseline that still exits when shorts are
+  disabled (see the caveat below).
+- **Params**: `entry_span=96`, `exit_span=48`, `warmup_bars=96`.
+- **Note**: every channel is `.rolling(n).max().shift(1)`. The `shift(1)` is load-bearing
+  but *not* a lookahead guard — bar *t*'s own high is known at bar *t*'s close, so the
+  poison probe passes without it. What it prevents is degeneracy: `high >= close` within a
+  bar, so an unshifted channel makes `close > entry_high` unsatisfiable and the strategy
+  never trades at all.
+
+## multi_horizon
+
+Averages volatility-normalized trailing returns across several lookbacks. The point is
+not a better number — it is removing the single-lookback choice, which is where most trend
+backtests quietly overfit.
+
+- **Entry**: long while the blended score exceeds `entry_threshold`, short while it is
+  below its negative.
+- **Score**: mean over `lookbacks` of `pct_change(lookback) / (rolling(96).std() *
+  sqrt(lookback))` — each horizon becomes a unit-scale t-statistic under a random walk, so
+  neither a noisier regime nor a longer horizon can dominate the blend by raw magnitude.
+- **Exits provided**: opposite state only.
+- **Params**: `lookbacks=(24, 48, 96, 192)`, `entry_threshold=0.0`, `warmup_bars=192`.
+- **Note**: `rolling(...).std()` is not bit-reproducible across a cold start (pandas adds
+  and removes observations one at a time, and the removals leave rounding residue).
+  Measured at warmup 192 the score differs from the whole-history value on 195/300 bars —
+  by at most 1.1e-15, against a smallest observed |score| of 5.9e-3. Signals are identical
+  on every bar, which is why `warmup_bars` is the longest lookback and not a multiple.
+
+### ⚠ Caveat: `--no-allow-shorts` removes the long exit
+
+`tsmom`, `ema_cross` and `multi_horizon` all wire `long_exits = short_state`. Passing
+`--no-allow-shorts` forces `short_state` to all-False, which silently takes the long exit
+with it: measured on 5,000 synthetic bars, `opposite_signal_only` drops from 2,889 to
+**0** long exits for `tsmom` (3,191 → 0 for `ema_cross`, 2,745 → 0 for `multi_horizon`).
+A long-only run in that mode never closes a position. Either keep shorts enabled, or use
+`continuation_failure`/`trend_structure`, which supply engine-side exits. `donchian` is
+unaffected because its exits come from the reverse channel rather than the entry state.
+
+---
+
 ## Exit mode × strategy matrix
 
 Engine defaults: `exit_mode=continuation_failure`, `failure_bars=4`.
@@ -130,6 +222,16 @@ Engine defaults: `exit_mode=continuation_failure`, `failure_bars=4`.
 | `trend_failure` | opposite signal OR EMA200 cross | ✗ raises | ✗ raises |
 | `setup_invalidation_stop` | opposite signal + stop at setup extreme | ✗ raises | ✗ raises |
 | `trend_structure` | long-only: raises if short entries exist; SMA40 via fallback | ✅ canonical: SMA40 break OR N adverse closes | long-only (raises if short entries exist — pass `--no-allow-shorts`); replaces the internal exits |
+
+R0 baselines (verified against the engine on 5,000 synthetic bars, 2026-08-03):
+
+| `exit_mode` | tsmom / ema_cross / multi_horizon | donchian |
+|---|---|---|
+| `continuation_failure` (default) | opposite state OR N adverse closes | channel exit OR N adverse closes |
+| `opposite_signal_only` | ✅ canonical *with shorts on*; ⚠ **never exits a long** under `--no-allow-shorts` | ✅ canonical — channel exit, unaffected by `--no-allow-shorts` |
+| `trend_failure` | ✗ raises (no trend-failure series) | ✗ raises (no trend-failure series) |
+| `setup_invalidation_stop` | ✗ raises (no setup stop) | ✗ raises (no setup stop) |
+| `trend_structure` | long-only (raises if short entries exist — pass `--no-allow-shorts`); SMA40 via fallback | same; note it *replaces* the channel exit |
 
 ## Engine behavior worth remembering
 
