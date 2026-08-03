@@ -17,6 +17,8 @@ from strategy_lab.strategies.base import SignalSet, validate_ohlcv
 @dataclass(frozen=True)
 class TrendRiderV1DeepseekV4Pro:
     name: str = "trend_rider_v1_deepseek_v4_pro"
+    version: str = "1.0.0"
+    warmup_bars: int = 40
     sma_trend_span: int = 40
     roc_momentum_period: int = 26
     atr_period: int = 14

@@ -22,6 +22,8 @@ class SignalSet:
 
 class Strategy(Protocol):
     name: str
+    version: str
+    warmup_bars: int
 
     def generate_signals(self, df: pd.DataFrame) -> SignalSet:
         ...

@@ -7,7 +7,7 @@ name = "strategy-lab"
 version = "0.1.0"
 description = "Local research and backtesting lab for crypto and stock trading strategies."
 readme = "README.md"
-requires-python = ">=3.10,<3.13"
+requires-python = ">=3.11,<3.13"
 dependencies = [
   "ccxt>=4.0",
   "numpy>=1.26",
@@ -38,8 +38,11 @@ strategy_lab = ["backtests/assets/*.js"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-pythonpath = ["src"]
+pythonpath = ["src", "."]
+markers = [
+  "db: requires a reachable Postgres instance",
+]
 
 [tool.ruff]
 line-length = 100
-target-version = "py310"
+target-version = "py311"

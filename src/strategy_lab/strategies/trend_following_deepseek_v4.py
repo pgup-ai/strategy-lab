@@ -13,6 +13,8 @@ from strategy_lab.strategies.base import (
 @dataclass(frozen=True)
 class TrendFollowingDeepseekV4:
     name: str = "trend_following_deepseek_v4"
+    version: str = "1.0.0"
+    warmup_bars: int = 40
     trend_sma_span: int = 40
     max_extension: float = 1.20
     allow_shorts: bool = False
