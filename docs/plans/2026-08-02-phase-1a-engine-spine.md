@@ -550,6 +550,45 @@ git commit -m "feat(strategies): declare version and warmup_bars on the Strategy
 
 This is the primary lookahead gate. It overwrites every bar after index `t` with violent-but-legal values and asserts row `t` is unchanged. Per the design doc §2 this catches subtle lookahead (full-sample normalization) far more efficiently than an equivalence sweep.
 
+> **Corrections applied during implementation — the code below is the starting point, not the shipped version.**
+>
+> 1. **`n=400` is too short.** Measured across 40 seeds, a 400-bar frame misses a genuine
+>    injected lookahead bug in `turnaround_v1` on **32.5%** of seeds; it passed on seed 7
+>    only by luck, firing at a single probe point. Halving `step` does **not** help (still
+>    27.5% miss) — detection depends on covering varied price regimes, not sampling
+>    density. At **`n=1200` the miss rate is 0/40** for ~0.2s. Use 1200.
+> 2. **A second poison profile helps, but not for the reason first assumed — and the
+>    obvious version of it does nothing.** The flat poison sets `open == close`, so
+>    candle-direction predicates collapse to one value across the corrupted tail, and all
+>    four strategies are built on that predicate family. But the alarming early readings
+>    (`long_entries` alone catching 0/10 for `turnaround_v2`) were an artifact of the
+>    10-probe-point budget, **not** of the flat poison: once fix 1 raised the frame to
+>    1200 bars, flat alone caught a purely candle-direction lookahead cheat on **40/40
+>    seeds**. The gate was never walkable. Flat's weakness is statistical — it halves
+>    detection events — not structural.
+>
+>    Critically, **strict alternation does not fix it**: measured against this repo's own
+>    three-candle setup, flat scored 6 offenders and strict R,G,R,G scored **6** — because
+>    an alternating tail never contains "two red then a green", so the conjunction stays
+>    False either way. A de Bruijn sequence over all 8 triples also scored 6. A fixed run
+>    pattern scored 44 on the long setup and 5 on the mirrored short setup, i.e. it
+>    overfits to whichever pattern its leading bars happen to spell.
+>
+>    The actual variable is **phase**. The poisoned tail always starts at bar `t+1`, so any
+>    fixed pattern hands every probe point the same leading candles, and only those first
+>    few bars matter for short-horizon lookahead. The shipped profile therefore draws
+>    directions from a PRNG **seeded by the probe index `t`**, so phase varies across probe
+>    points — deterministic across runs, unbiased across patterns, and beats flat on 40/40
+>    seeds. Do not "simplify" it to a fixed or modular-rotating pattern; modular rotation
+>    aliases against `step` (`t % 16` with `step=20` cycles just two phases).
+> 3. **`position_size` is inert on synthetic data** — the ATR scale never leaves its
+>    `max_scale=1.0` clip, so the field has zero baseline variance. It is not a reliable
+>    tripwire here. Noted, not fixed.
+> 4. **`pythonpath = ["src"]` breaks `from tests.conftest import ...` under the bare
+>    `pytest` entry point** (`python -m pytest` masks it by putting CWD on `sys.path`).
+>    CLAUDE.md documents `pytest -q` as the command, so this matters. Fixed with
+>    `pythonpath = ["src", "."]`.
+
 - [ ] **Step 1: Write the test, including the cheats that prove it has teeth**
 
 Create `tests/test_lookahead.py`:
