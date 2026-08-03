@@ -5,6 +5,14 @@ from dataclasses import dataclass
 import pandas as pd
 
 
+# Yahoo rejects the repo's "1w" timeframe alias; its weekly interval is "1wk".
+_INTERVAL_ALIASES = {"1w": "1wk"}
+
+
+def _yahoo_interval(timeframe: str) -> str:
+    return _INTERVAL_ALIASES.get(timeframe, timeframe)
+
+
 @dataclass
 class YahooFinanceClient:
     source: str = "yahoo"
@@ -25,7 +33,7 @@ class YahooFinanceClient:
             period=None if start else period,
             start=start,
             end=end,
-            interval=timeframe,
+            interval=_yahoo_interval(timeframe),
             auto_adjust=False,
             progress=False,
         )

@@ -227,6 +227,21 @@ Each run writes a snapshot under `reports/`:
 
 That report directory is the reproducibility boundary for comparing strategy changes.
 
+## Live Report Serving
+
+Reports are static files, but `strategy-lab serve` adds a delayed live feed:
+
+```bash
+strategy-lab serve --port 8750
+```
+
+Open a report through the server (`http://127.0.0.1:8750/<report-dir>/plot.html`) and a
+"delayed" pill appears in the header: the page polls `/api/candles` every 60 seconds,
+which re-fetches the latest bars from the upstream source (Yahoo Finance or ccxt),
+upserts them into Postgres, and streams them onto the chart — including the current
+forming bar. Click the pill to refresh immediately. The same file opened directly from
+disk stays fully static.
+
 ## Strategies
 
 - `turnaround_v1` — base three-candle reversal logic, no filters (control)
