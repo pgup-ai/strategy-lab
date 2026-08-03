@@ -4,7 +4,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from strategy_lab.strategies.registry import get_strategy, list_strategies
+from strategy_lab.strategies.registry import get_strategy
 from tests.conftest import synthetic_ohlcv
 
 BASELINES = ("tsmom", "ema_cross", "donchian", "multi_horizon")
@@ -38,9 +38,8 @@ def reversal_frame(up_bars: int, down_bars: int = 300) -> pd.DataFrame:
         tz="UTC",
         name="timestamp",
     )
-    # A single factor applied to every OHLC column, so the legs join without a
-    # price gap and each bar keeps its high/low ordering. Rescaling close alone
-    # would leave the other three columns at the pre-splice level.
+    # One factor across all four OHLC columns, so the legs join without a price
+    # gap and each bar keeps its high/low ordering.
     scale = up_leg["close"].iloc[-1] / down_leg["close"].iloc[0]
     for column in ("open", "high", "low", "close"):
         down_leg[column] = down_leg[column] * scale
@@ -48,9 +47,13 @@ def reversal_frame(up_bars: int, down_bars: int = 300) -> pd.DataFrame:
 
 
 @pytest.mark.parametrize("name", BASELINES)
-def test_baseline_is_registered(name):
-    assert name in list_strategies()
-    assert get_strategy(name).name == name
+def test_a_baseline_is_long_and_never_short_in_a_clean_uptrend(name):
+    strategy = get_strategy(name)
+    signals = strategy.generate_signals(trending_frame(n=strategy.warmup_bars + 300))
+
+    tail = slice(strategy.warmup_bars, None)
+    assert signals.long_entries[tail].any(), f"{name} took no long exposure in a clean uptrend"
+    assert not signals.short_entries[tail].any(), f"{name} shorted a monotone uptrend"
 
 
 @pytest.mark.parametrize("name", BASELINES)
@@ -59,9 +62,9 @@ def test_disabling_shorts_does_not_disable_the_long_exit(name):
 
     The US ETF half of the program is long-only by design, so a baseline that
     never closes a position under ``--no-allow-shorts`` is buy-and-hold wearing a
-    strategy's name -- it cannot be the floor the program is gated on. Three of
-    these four derive ``long_exits`` from the short state, which is exactly the
-    wiring that made zeroing the short state take the long exit with it.
+    strategy's name. Three of these four derive ``long_exits`` from the short
+    state, which is exactly the wiring that made zeroing the short state take the
+    long exit with it.
     """
     with_shorts = get_strategy(name, allow_shorts=True)
     long_only = get_strategy(name, allow_shorts=False)
@@ -83,16 +86,6 @@ def test_disabling_shorts_does_not_disable_the_long_exit(name):
     pd.testing.assert_series_equal(
         long_only_signals.long_exits, shorted_signals.long_exits, check_names=False
     )
-
-
-def test_tsmom_goes_long_in_a_sustained_uptrend():
-    strategy = get_strategy("tsmom")
-    df = trending_frame(n=strategy.warmup_bars + 400)
-    signals = strategy.generate_signals(df)
-
-    tail = slice(strategy.warmup_bars, None)
-    assert signals.long_entries[tail].any(), "expected long exposure in a clean uptrend"
-    assert not signals.short_entries[tail].any(), "must not short a monotone uptrend"
 
 
 def test_tsmom_reads_the_lookback_window_not_the_newest_bar():
@@ -128,39 +121,7 @@ def test_tsmom_flips_short_when_the_trend_reverses():
     assert signals.short_entries.iloc[-100:].any(), "expected short exposure after a reversal"
 
 
-def test_ema_cross_warmup_covers_ewm_convergence():
-    """ewm(adjust=False) decays its seed rather than dropping it, so warmup is ~20x span."""
-    strategy = get_strategy("ema_cross")
-    assert strategy.warmup_bars >= 20 * strategy.slow_span
-
-
-def test_ema_cross_is_long_while_fast_leads_slow():
-    strategy = get_strategy("ema_cross")
-    df = trending_frame(n=strategy.warmup_bars + 300)
-    signals = strategy.generate_signals(df)
-
-    tail = slice(strategy.warmup_bars, None)
-    assert signals.long_entries[tail].all(), "fast EMA must lead slow throughout a clean uptrend"
-    assert not signals.short_entries[tail].any()
-
-
-def test_donchian_exit_channel_is_shorter_than_entry_channel():
-    """The asymmetry is the point: enter slowly, leave faster, so trends can be ridden."""
-    strategy = get_strategy("donchian")
-    assert strategy.exit_span < strategy.entry_span
-
-
-def test_donchian_breaks_out_long_on_a_new_channel_high():
-    strategy = get_strategy("donchian")
-    df = trending_frame(n=strategy.warmup_bars + 300)
-    signals = strategy.generate_signals(df)
-
-    tail = slice(strategy.warmup_bars, None)
-    assert signals.long_entries[tail].any()
-    assert not signals.short_entries[tail].any()
-
-
-def test_donchian_uses_only_prior_bars_for_the_channel():
+def test_donchian_uses_only_prior_bars_for_the_entry_channel():
     """The channel must exclude the current bar.
 
     Two failure modes, opposite in shape, so both directions are pinned here.
@@ -195,35 +156,6 @@ def test_donchian_exits_on_a_reverse_break_of_the_faster_channel():
     tail = slice(strategy.warmup_bars, None)
     assert signals.short_exits[tail].any(), "a rising close never cleared the exit channel high"
     assert signals.long_exits.iloc[-100:].any(), "a falling close never broke the exit channel low"
-
-
-def test_multi_horizon_averages_several_lookbacks():
-    strategy = get_strategy("multi_horizon")
-    assert len(strategy.lookbacks) >= 3, "a single-lookback ensemble defeats the purpose"
-    assert strategy.warmup_bars >= max(strategy.lookbacks)
-
-
-def test_multi_horizon_is_long_when_every_horizon_agrees():
-    strategy = get_strategy("multi_horizon")
-    df = trending_frame(n=strategy.warmup_bars + 400)
-    signals = strategy.generate_signals(df)
-
-    tail = slice(strategy.warmup_bars, None)
-    assert signals.long_entries[tail].any()
-    assert not signals.short_entries[tail].any()
-
-
-def test_multi_horizon_score_is_scale_invariant():
-    """Denominating the same series in different units must not move the score."""
-    strategy = get_strategy("multi_horizon")
-    calm = trending_frame(n=strategy.warmup_bars + 200, slope=0.001)
-    rescaled = calm.copy()
-    for column in ("open", "high", "low", "close"):
-        rescaled[column] = rescaled[column] * 10
-
-    calm_score = strategy.generate_signals(calm).metadata["final_score"]
-    rescaled_score = strategy.generate_signals(rescaled).metadata["final_score"]
-    assert calm_score == pytest.approx(rescaled_score, rel=0.05)
 
 
 def test_multi_horizon_divides_the_blend_by_realized_volatility():

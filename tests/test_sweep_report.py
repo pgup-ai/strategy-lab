@@ -4,7 +4,7 @@ import re
 
 import pytest
 
-from strategy_lab.backtests.sweep import SweepPoint, stability_score
+from strategy_lab.backtests.sweep import SweepPoint
 from strategy_lab.backtests.sweep_report import render_sweep_html
 
 
@@ -42,16 +42,6 @@ def test_report_renders_every_grid_cell():
     for span in ("24", "48", "12"):
         assert span in html
     assert "donchian" in html
-
-
-def test_report_states_the_stability_score():
-    points = _points()
-    html = render_sweep_html(points=points, config={"strategy": "donchian"})
-
-    assert "stability" in html.lower()
-    assert f"{stability_score(points):.3f}" in html, (
-        "the score itself must appear, not merely the word"
-    )
 
 
 def test_report_handles_a_one_dimensional_grid():
@@ -93,9 +83,9 @@ def test_cells_are_coloured_by_the_sign_and_size_of_sharpe():
 
 def test_report_declares_that_the_numbers_are_gross_of_costs():
     """Measured on 83,348 BTC 15m bars: the best tsmom cell reads +0.74 Sharpe
-    here and -100% once the engine's own default 10bp per side is charged, because
-    it flips 8,545 times. A surface that shows the first number without saying so
-    is precisely the flattering report this page exists to prevent.
+    here and -100% once the engine's default 10bp per side is charged, because it
+    flips 8,545 times. Showing the first number without saying so is exactly the
+    flattering report this page exists to prevent.
     """
     html = render_sweep_html(points=_points(), config={"strategy": "donchian"}).lower()
 

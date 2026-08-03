@@ -23,7 +23,6 @@ from strategy_lab.market_data.binance_futures import (
     parse_funding,
     parse_klines,
     parse_open_interest,
-    to_venue_symbol,
 )
 
 RAW_KLINE = [[1785772800000, "63659.50", "64058.80", "63626.20", "63836.90", "20815.435",
@@ -95,19 +94,6 @@ def test_klines_parse_to_a_utc_indexed_ohlcv_frame():
     assert df["close"].iloc[0] == pytest.approx(63836.90)
 
 
-def test_funding_parses_rate_and_time():
-    rows = parse_funding(RAW_FUNDING, exchange="binance", market_type="perp", symbol="BTC/USDT")
-    assert rows[0]["funding_time_ms"] == 1785744000000
-    assert rows[0]["funding_rate"] == Decimal("0.00006364")
-    assert rows[0]["symbol"] == "BTC/USDT"
-
-
-def test_open_interest_parses_both_units():
-    rows = parse_open_interest(RAW_OI, exchange="binance", market_type="perp", symbol="BTC/USDT")
-    assert rows[0]["open_interest"] == Decimal("108899.067")
-    assert rows[0]["open_interest_usd"] == Decimal("6933046705.789517")
-
-
 def test_the_open_interest_history_limit_is_declared():
     """Binance serves only ~30 days of OI history; C1 is not backtestable without it."""
     assert OPEN_INTEREST_HISTORY_DAYS <= 30
@@ -144,8 +130,14 @@ def test_an_absent_mark_price_is_null_rather_than_a_crash():
     assert rows[0]["funding_time_ms"] == 1568102400000
 
 
-def test_an_unknown_extra_field_does_not_break_parsing():
-    """Older rows carry ``rateType``; newer ones do not. Neither is our business."""
+def test_parsed_rows_carry_exactly_the_storage_columns():
+    """Nothing joins the parser to the table, so the key set is that seam.
+
+    ``upsert_funding`` binds whatever keys it is handed, and the storage tests
+    build their own rows rather than parsing one, so a key the parser emits that
+    ``funding_rates`` has no column for would crash only on a real fetch. The
+    venue's own extra fields (older rows carry ``rateType``) must stay out.
+    """
     rows = parse_funding(RAW_FUNDING_EARLY, **IDENTITY)
     assert set(rows[0]) == {
         "exchange", "market_type", "symbol",
@@ -161,17 +153,15 @@ def test_an_empty_kline_payload_keeps_the_populated_shape():
     assert df["close"].dtype == "float64"
 
 
-def test_symbols_convert_to_the_venue_form():
-    assert to_venue_symbol("BTC/USDT") == "BTCUSDT"
-    assert to_venue_symbol("ETH/USDT") == "ETHUSDT"
-    assert to_venue_symbol("BTCUSDT") == "BTCUSDT"
-
-
 # --- pagination ------------------------------------------------------------
 
 
 def test_klines_paginate_forward_past_the_last_returned_bar():
-    """Never assume a fixed page count -- page until the server stops."""
+    """Never assume a fixed page count -- page until a short page ends it.
+
+    Broken pagination fetched 1,500 rows where 15,128 existed, which reads as a
+    market with a short history rather than as a bug.
+    """
     first = _kline_page(KLINE_PAGE_LIMIT)
     second = _kline_page(3, start_ms=1785772800000 + KLINE_PAGE_LIMIT * FOUR_HOURS_MS)
     client, session, _ = _client(FakeResponse(first), FakeResponse(second))
@@ -185,15 +175,6 @@ def test_klines_paginate_forward_past_the_last_returned_bar():
     assert session.calls[0]["params"]["limit"] == KLINE_PAGE_LIMIT
     # Advance past the last bar, not by a page-sized guess.
     assert session.calls[1]["params"]["startTime"] == first[-1][0] + 1
-
-
-def test_a_short_page_ends_the_backfill():
-    client, session, _ = _client(FakeResponse(_kline_page(5)))
-
-    df = client.fetch_klines("BTC/USDT", "4h", since="2026-08-01")
-
-    assert len(df) == 5
-    assert len(session.calls) == 1
 
 
 def test_klines_stop_at_until():

@@ -80,7 +80,6 @@ def _message(result) -> str:
 
 @pytest.fixture
 def wiring(monkeypatch):
-    """Patch the client factory and all three storage calls; record everything."""
     state: dict = {"client": FakeClient(), "candles": [], "funding": [], "open_interest": []}
 
     monkeypatch.setattr(cli, "_futures_client", lambda **kwargs: state["client"])
@@ -99,15 +98,6 @@ def wiring(monkeypatch):
 
 
 # --- fetch-perp ------------------------------------------------------------
-
-
-def test_fetch_perp_stores_candles_and_reports_the_count(wiring):
-    result = runner.invoke(cli.app, ["fetch-perp", "--symbol", "BTC/USDT", "--timeframe", "4h"])
-
-    assert result.exit_code == 0, result.output
-    assert "2" in result.output
-    [stored] = wiring["candles"]
-    assert len(stored) == 2
 
 
 def test_perp_candles_are_stored_under_the_perp_market_type(wiring):

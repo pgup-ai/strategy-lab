@@ -85,17 +85,13 @@ def _cost_chip(label: str, text: str, cls: str = "", extra: str = "") -> str:
 def _cost_flow(base: dict, funding_applied: bool) -> str:
     """Gross minus each cost equals net, spelled out left to right.
 
-    Funding gets its own emphasised chip because it is the cost that decides
-    whether a perp result is tradeable, and the one a reader is most likely to
-    skip past on the way to the headline return.
+    Funding gets the emphasised chip because it is the cost that decides whether
+    a perp result is tradeable, and the one a reader is most likely to skip past
+    on the way to the headline return.
     """
     funding_paid = float(base["funding_paid"])
     funding_label = "Funding Received" if funding_paid < 0 else "Funding Paid"
-    funding_text = (
-        _fmt_money(abs(funding_paid))
-        if funding_applied
-        else "not modelled"
-    )
+    funding_text = _fmt_money(abs(funding_paid)) if funding_applied else "not modelled"
     funding_cls = "" if not funding_applied else (" down" if funding_paid > 0 else " up")
 
     parts = [
@@ -126,9 +122,7 @@ def _stress_rows(stress: list[dict], funding_applied: bool) -> str:
     for row in stress:
         multiple = float(row["multiple"])
         net = float(row["net_return_pct"])
-        funding = (
-            _fmt_money(float(row["funding_paid"])) if funding_applied else "—"
-        )
+        funding = _fmt_money(float(row["funding_paid"])) if funding_applied else "—"
         marker = ' class="base"' if multiple == 1.0 else ""
         rows.append(
             f"<tr{marker}>"
@@ -300,9 +294,8 @@ def _trade_rows(trades: pd.DataFrame) -> str:
 
 def _stat_chips(stats: dict) -> str:
     # A funding-bearing run reports two returns, and the first chip a reader
-    # sees must not be the one they cannot trade. When a net figure exists, the
-    # vectorbt total is relabelled as gross so the pair cannot be confused, and
-    # the net figure gets the emphasis.
+    # sees must not be the one they cannot trade: the vectorbt total is
+    # relabelled as gross, and the net figure gets the emphasis.
     net_return = "Net Return [%]" in stats
     chips = []
     for key, label, kind in _STAT_KEYS:

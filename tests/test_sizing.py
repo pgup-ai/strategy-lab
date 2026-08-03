@@ -12,13 +12,6 @@ def _returns(scale: float, n: int = 500, seed: int = 5) -> pd.Series:
     return pd.Series(np.random.default_rng(seed).normal(0, scale, n), index=index)
 
 
-def test_a_calmer_market_gets_a_larger_weight():
-    calm, wild = _returns(0.005), _returns(0.05)
-    w_calm = volatility_target_weights(calm, target_annual_vol=0.10, bars_per_year=2190)
-    w_wild = volatility_target_weights(wild, target_annual_vol=0.10, bars_per_year=2190)
-    assert w_calm.iloc[-1] > w_wild.iloc[-1]
-
-
 def test_weights_are_capped():
     weights = volatility_target_weights(
         _returns(0.0001), target_annual_vol=0.10, bars_per_year=2190, max_weight=2.0

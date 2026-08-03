@@ -166,8 +166,9 @@ def run_backtest(
     }
     _write_json(report_dir / "config.json", config)
 
+    costs = {"funding_applied": funding_applied, "stress": breakdown}
     costs_path = report_dir / "costs.json"
-    _write_json(costs_path, {"funding_applied": funding_applied, "stress": breakdown})
+    _write_json(costs_path, costs)
 
     stats = pf.stats().to_dict()
     if funding_applied:
@@ -197,7 +198,7 @@ def run_backtest(
             equity=equity,
             config=config,
             stats=stats,
-            costs={"funding_applied": funding_applied, "stress": breakdown},
+            costs=costs,
         ),
         encoding="utf-8",
     )

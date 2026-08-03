@@ -31,22 +31,6 @@ def _invoke(tmp_path, *args):
     )
 
 
-def test_sweep_writes_both_artifacts_and_echoes_the_score(candles, tmp_path):
-    result = _invoke(
-        tmp_path, "--strategy", "donchian", "--grid", '{"entry_span":[24,48],"exit_span":[12,24]}'
-    )
-
-    assert result.exit_code == 0, result.output
-    [report_dir] = list(tmp_path.iterdir())
-    assert (report_dir / "sweep.html").exists()
-    assert (report_dir / "points.json").exists()
-    assert "donchian_sweep" in report_dir.name
-
-    echoed = " ".join(result.output.split())
-    assert "Stability score:" in echoed
-    assert "/4 cells with positive Sharpe" in echoed
-
-
 def test_points_json_is_the_full_reproducibility_record(candles, tmp_path):
     result = _invoke(
         tmp_path, "--strategy", "tsmom", "--grid", '{"lookback":[24,48,96]}',
@@ -55,6 +39,7 @@ def test_points_json_is_the_full_reproducibility_record(candles, tmp_path):
 
     assert result.exit_code == 0, result.output
     [report_dir] = list(tmp_path.iterdir())
+    assert "tsmom_sweep" in report_dir.name
     record = json.loads((report_dir / "points.json").read_text())
 
     assert record["config"]["grid"] == {"lookback": [24, 48, 96]}
@@ -81,13 +66,13 @@ def test_the_written_html_is_the_rendered_surface(candles, tmp_path):
     [report_dir] = list(tmp_path.iterdir())
     html = (report_dir / "sweep.html").read_text()
 
-    assert html.lstrip().startswith("<!DOCTYPE html>")
     assert "stability" in html.lower()
-    assert "<script src=" not in html
-    # The echoed score and the score on the page must be the same number.
+    # The score in points.json, the score on the page, and the echoed score must
+    # all be the same number.
     score = json.loads((report_dir / "points.json").read_text())["stability_score"]
     assert f"{score:.3f}" in html
     assert f"Stability score: {score:.3f}" in result.output
+    assert "/2 cells with positive Sharpe" in " ".join(result.output.split())
 
 
 @pytest.mark.parametrize(

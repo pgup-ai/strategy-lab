@@ -1,16 +1,15 @@
 """Execution costs and perp funding.
 
 Two costs with different shapes live here. Fees and slippage are per-fill
-frictions and scale with how badly a fill goes, so ``CostModel.stressed``
+frictions that scale with how badly a fill goes, so ``CostModel.stressed``
 multiplies them. Funding is a *market rate* settled between longs and shorts on
-the venue's schedule; multiplying it would model a different market, not a worse
-fill, so ``apply_funding`` never sees a ``CostModel`` and cannot be stressed.
+the venue's schedule, so ``apply_funding`` never sees a ``CostModel`` and cannot
+be stressed.
 
-Funding is the reason perp trend-following differs from futures
-trend-following, and it is large: measured over the stored history, BTC/USDT
-perp funding averages +11.65%/year and ETH/USDT +13.97%/year, both paid by
-longs. A persistently long strategy over the 2019-2026 window pays roughly the
-whole of buy-and-hold. Getting it approximately right is not good enough.
+Funding is large: measured over the stored history, BTC/USDT perp funding
+averages +11.65%/year and ETH/USDT +13.97%/year, both paid by longs, so a
+persistently long strategy over the 2019-2026 window pays roughly the whole of
+buy-and-hold. Getting it approximately right is not good enough.
 """
 
 from __future__ import annotations
@@ -42,19 +41,14 @@ class CostModel:
         """
         return replace(self, fee=self.fee * multiple, slippage=self.slippage * multiple)
 
-    @property
-    def round_trip(self) -> float:
-        """Fee plus slippage on both legs -- what one completed trade costs."""
-        return 2.0 * (self.fee + self.slippage)
-
 
 def apply_funding(*, positions: pd.Series, funding: pd.Series) -> pd.Series:
     """Funding cash flows for ``positions``, aligned to the position index.
 
     Returns one value per bar, in whatever units ``positions`` carries: pass
     signed notional to get currency, pass a signed weight to get a return
-    fraction. Cost is ``-position x rate`` -- a long pays a positive rate, a
-    short receives it, a flat position pays nothing.
+    fraction. Cost is ``-position x rate``, so a long pays a positive rate and a
+    short receives it.
 
     Funding is a **discrete cash flow at settlement**, not a per-bar drag. Each
     settlement is charged once, to the bar whose interval contains it, and bars
@@ -84,9 +78,8 @@ def funding_ledger(*, positions: pd.Series, funding: pd.Series) -> pd.DataFrame:
     """One row per settlement actually charged -- the audit trail behind the total.
 
     Same containment as :func:`apply_funding`, so the two cannot disagree about
-    which settlements were counted. Funding is the number that decides whether a
-    perp result is tradeable, and a single aggregate is not something a human can
-    check against the venue; this is.
+    which settlements were counted. A single aggregate is not something a human
+    can check against the venue's own funding history; this is.
     """
     index = _sorted_index(positions)
     slot, settled, rate = _contained(index, funding)

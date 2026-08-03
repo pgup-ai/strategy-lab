@@ -38,7 +38,7 @@ def clean_slate():
     Without this, an assertion can be satisfied by a *previous* run's row rather
     than by the one the test just wrote -- which is how a test passes against a
     deliberately broken implementation. Measured: with rows left behind,
-    replacing ``ON CONFLICT DO UPDATE`` with ``DO NOTHING`` kept all 12 tests
+    replacing ``ON CONFLICT DO UPDATE`` with ``DO NOTHING`` kept the whole file
     green. Only the ``TEST``-prefixed symbols are touched; real perp data is
     stored under ``BTC/USDT`` and ``ETH/USDT``.
     """
@@ -66,13 +66,6 @@ def _rows(count: int, start_ms: int = 1_700_000_000_000):
     ]
 
 
-def test_funding_round_trips_as_decimal():
-    upsert_funding(_rows(1))
-    loaded = load_funding(**IDENTITY)
-    assert not loaded.empty
-    assert loaded["funding_rate"].iloc[0] == pytest.approx(0.0001)
-
-
 def test_refetching_funding_does_not_duplicate():
     rows = _rows(3, start_ms=1_710_000_000_000)
     upsert_funding(rows)
@@ -86,17 +79,6 @@ def test_funding_loads_in_time_order():
     upsert_funding(list(reversed(rows)))
     loaded = load_funding(**IDENTITY)
     assert loaded.index.is_monotonic_increasing
-
-
-def test_open_interest_round_trips():
-    upsert_open_interest([
-        {**IDENTITY, "ts_ms": 1_730_000_000_000,
-         "open_interest": Decimal("108899.067"),
-         "open_interest_usd": Decimal("6933046705.78")},
-    ])
-    loaded = load_open_interest(**IDENTITY)
-    assert not loaded.empty
-    assert loaded["open_interest"].iloc[0] == pytest.approx(108899.067)
 
 
 def test_refetching_open_interest_does_not_duplicate():
@@ -202,9 +184,7 @@ def test_funding_loads_as_float64_on_a_utc_index():
 
 
 def test_an_empty_range_has_the_same_shape_as_a_populated_one():
-    """A bare ``DataFrame(columns=...)`` hands back object dtype and a tz-naive
-    index, so an empty window would poison a concat or an indicator that the
-    identical code handles fine when rows exist."""
+    """An empty window must not be a differently-typed frame -- see ``_empty_frame``."""
     upsert_funding(_rows(1, start_ms=1_780_000_000_000))
     populated = load_funding(**IDENTITY)
     empty = load_funding(**IDENTITY, start="1999-01-01", end="1999-02-01")

@@ -14,9 +14,8 @@ class Tsmom:
     The reference trend baseline. Every later model in the MDE program has to
     beat this out-of-sample to justify its complexity.
 
-    ``pct_change`` only, so warmup is exactly the lookback -- the value at bar
-    *t* reads bars *t* and *t - lookback* and nothing else, with no recursion to
-    converge.
+    ``pct_change`` only, so warmup is exactly the lookback: bar *t* reads bars
+    *t* and *t - lookback* and nothing else, with no recursion to converge.
     """
 
     name: str = "tsmom"
@@ -32,10 +31,10 @@ class Tsmom:
         long_state = (trailing_return > 0).fillna(False)
         short_state = (trailing_return < 0).fillna(False)
 
-        # ``short_state`` is the raw trend flip, and stays that way: leaving a
-        # long is independent of whether you act on the flip by shorting. Only
-        # the entry is gated. Gating the flip itself left a long-only run with no
-        # exit at all -- buy-and-hold wearing a strategy's name.
+        # Only the entry is gated; ``short_state`` stays the raw trend flip,
+        # because leaving a long is independent of whether you act on the flip
+        # by shorting. Gating the flip itself left a long-only run with no exit
+        # at all -- buy-and-hold wearing a strategy's name.
         short_entries = short_state if self.allow_shorts else pd.Series(False, index=df.index)
 
         return SignalSet(

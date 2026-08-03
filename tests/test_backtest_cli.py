@@ -61,12 +61,6 @@ def _costs(tmp_path) -> dict:
     return json.loads((report_dir / "costs.json").read_text())
 
 
-def test_the_symbol_alias_is_accepted(candles, funding, tmp_path):
-    """The canonical perp command in the plan and the charter writes --symbol."""
-    result = _invoke(tmp_path, *_PERP)
-    assert result.exit_code == 0, result.output
-
-
 def test_cost_stress_renders_every_requested_multiple(candles, funding, tmp_path):
     result = _invoke(tmp_path, *_PERP, "--cost-stress", "1,2,3")
 
@@ -119,9 +113,6 @@ def test_a_perp_run_with_no_stored_funding_stops_rather_than_reporting_gross(
     candles, monkeypatch, tmp_path
 ):
     """Gross-of-carry on a perp reads exactly like a net number and is not tradeable."""
-    monkeypatch.setattr(
-        cli, "load_funding", lambda **kwargs: pd.DataFrame(), raising=False
-    )
     monkeypatch.setattr(
         "strategy_lab.db.funding.load_funding",
         lambda **kwargs: pd.DataFrame({"funding_rate": []}),

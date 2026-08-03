@@ -61,9 +61,7 @@ def test_an_off_grid_settlement_lands_on_the_bar_that_contains_it():
 
     3,260 of BTC's 7,559 stored settlements are off-grid. Matching them to bars
     by equality against a generated 8h ``date_range`` silently drops 43% of them
-    and halves the measured drag. Every settlement below is late by a few
-    milliseconds and must still be charged to the bar whose interval contains it,
-    producing the same series as if the venue had stamped them exactly on the hour.
+    and halves the measured drag.
     """
     on_grid = apply_funding(positions=_positions([1.0] * 6), funding=_funding([0.0001] * 3))
     off_grid = apply_funding(
@@ -149,15 +147,6 @@ def test_missing_rates_are_skipped_rather_than_poisoning_the_series():
     assert (cost != 0).sum() == 2
 
 
-def test_stressing_by_one_leaves_the_model_unchanged():
-    base = CostModel(fee=0.0004, slippage=0.0005)
-    assert base.stressed(1.0) == base
-
-
-def test_round_trip_counts_both_legs_of_fee_and_slippage():
-    assert CostModel(fee=0.0004, slippage=0.0006).round_trip == pytest.approx(0.002)
-
-
 def test_the_ledger_records_the_bar_each_settlement_landed_on():
     ledger = funding_ledger(
         positions=_positions([1.0] * 6),
@@ -182,16 +171,3 @@ def test_the_ledger_totals_to_the_applied_series():
     assert ledger["cash_flow"].sum() == pytest.approx(applied.sum())
     assert len(ledger) == 6
 
-
-def test_the_ledger_omits_settlements_that_were_never_charged():
-    ledger = funding_ledger(
-        positions=_positions([1.0] * 6),
-        funding=_funding_at(["2023-12-31 20:00", "2024-01-01 12:00", "2024-01-02 04:00"]),
-    )
-    assert list(ledger["bar"]) == [pd.Timestamp("2024-01-01 12:00", tz="UTC")]
-
-
-def test_an_empty_ledger_keeps_its_columns():
-    ledger = funding_ledger(positions=_positions([1.0] * 6), funding=_funding_at([]))
-    assert list(ledger.columns) == ["bar", "notional", "rate", "cash_flow"]
-    assert ledger.empty

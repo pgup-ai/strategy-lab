@@ -32,10 +32,10 @@ class EmaCross:
         long_state = (fast > slow).fillna(False)
         short_state = (fast < slow).fillna(False)
 
-        # ``short_state`` is the raw crossover state, and stays that way: the
-        # fast EMA losing the slow one closes a long whether or not shorts are
-        # enabled. Only the entry is gated -- gating the state itself left a
-        # long-only run with no exit at all.
+        # Only the entry is gated; ``short_state`` stays the raw crossover
+        # state, because the fast EMA losing the slow one closes a long whether
+        # or not shorts are enabled. Gating the state itself left a long-only
+        # run with no exit at all.
         short_entries = short_state if self.allow_shorts else pd.Series(False, index=df.index)
 
         return SignalSet(

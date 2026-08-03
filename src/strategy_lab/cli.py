@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import uuid
 from pathlib import Path
 
@@ -379,7 +380,7 @@ def _parse_cost_stress(raw: str) -> tuple[float, ...]:
     return multiples
 
 
-def _funding_rates(identity: MarketDataIdentity, df) -> "object | None":
+def _funding_rates(identity: MarketDataIdentity, df):
     """Stored funding for a perp, bounded to the candle window.
 
     A perp backtest that quietly skips funding reports a gross number that reads
@@ -412,8 +413,6 @@ def _funding_rates(identity: MarketDataIdentity, df) -> "object | None":
 
 
 def _echo_costs(result) -> None:
-    import json
-
     breakdown = json.loads(result.costs_path.read_text())
     base = next(row for row in breakdown["stress"] if row["multiple"] == 1.0)
     typer.echo(
@@ -450,7 +449,6 @@ def sweep_command(
     heatmap both exist to make a lone spike look like the overfit it is rather
     than like a result.
     """
-    import json
     from dataclasses import asdict
     from datetime import UTC, datetime
 
@@ -521,8 +519,6 @@ def sweep_command(
 
 
 def _parse_grid(raw: str) -> dict[str, list]:
-    import json
-
     try:
         parsed = json.loads(raw)
     except json.JSONDecodeError as exc:

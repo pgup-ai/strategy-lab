@@ -11,12 +11,11 @@ from strategy_lab.strategies.base import SignalSet, validate_ohlcv
 class Donchian:
     """Channel breakout with a faster exit channel than entry channel.
 
-    ``shift(1)`` on every channel is load-bearing: without it the current bar is
-    part of its own high/low window, and since ``high >= close`` within a bar,
-    ``close > entry_high`` becomes unsatisfiable and the strategy never trades
-    at all. That is not lookahead -- bar *t*'s own high is known at bar *t*'s
-    close -- so the poison probe cannot see it; the breakout tests are what
-    catch it.
+    ``shift(1)`` on every channel is load-bearing: without it the current bar
+    joins its own high/low window, and since ``high >= close`` within a bar,
+    ``close > entry_high`` becomes unsatisfiable and the strategy never trades.
+    That is not lookahead -- bar *t*'s own high is known at bar *t*'s close --
+    so the poison probe cannot see it; the breakout tests are the only guard.
     """
 
     name: str = "donchian"

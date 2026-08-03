@@ -4,14 +4,8 @@ ccxt does not expose funding history or open interest cleanly, so this talks to
 ``https://fapi.binance.com`` directly.
 
 **Measured against the live API on 2026-08-03 -- these are not read from docs:**
-
-===================================  ==================  ==========
-Endpoint                             History available   Page size
-===================================  ==================  ==========
-``/fapi/v1/klines``                  2019-09-09 ->       1500
-``/fapi/v1/fundingRate``             2019-09-10 ->       1000
-``/futures/data/openInterestHist``   **~30 days only**   500
-===================================  ==================  ==========
+``/fapi/v1/klines`` serves from 2019-09-09, ``/fapi/v1/fundingRate`` from
+2019-09-10, and ``/futures/data/openInterestHist`` only about 30 days.
 
 The open-interest limit is hard: a ``startTime`` 40 days back returns
 ``{"code":-1130,"msg":"parameter 'startTime' is invalid."}``. Open interest can
@@ -74,9 +68,8 @@ def parse_klines(raw: list[list]) -> pd.DataFrame:
     candles rather than inventing a second one.
     """
     if not raw:
-        # Same shape as the populated path: a bare DataFrame(columns=...) gives
-        # object dtype and a tz-naive index, which breaks callers only when a
-        # range happens to be empty.
+        # Typed like the populated path: a bare DataFrame(columns=...) would be
+        # object dtype on a tz-naive index, breaking callers only on empty ranges.
         return pd.DataFrame(
             {name: pd.Series(dtype="float64") for name in OHLCV_COLUMNS},
             index=pd.DatetimeIndex([], tz="UTC", name="timestamp"),
@@ -172,8 +165,6 @@ class BinanceFuturesClient:
 
             self.session = requests.Session()
 
-    # --- public API --------------------------------------------------------
-
     def fetch_klines(
         self,
         symbol: str,
@@ -247,8 +238,6 @@ class BinanceFuturesClient:
         return parse_open_interest(
             raw, exchange=self.exchange, market_type=self.market_type, symbol=symbol
         )
-
-    # --- pagination and transport ------------------------------------------
 
     def _paginate(
         self,
@@ -331,7 +320,6 @@ class BinanceFuturesClient:
 
 
 def _retry_delay(response, attempt: int, backoff: float) -> float:
-    """Honour ``Retry-After`` when the venue sends one, else exponential backoff."""
     header = (getattr(response, "headers", None) or {}).get("Retry-After")
     if header:
         try:

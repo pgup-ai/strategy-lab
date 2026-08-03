@@ -17,13 +17,6 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
-# ewm(adjust=False) is recursive from bar 0 and decays its seed rather than
-# dropping it, so a span-n estimate is still wrong after n bars. Measured in
-# Phase 1a: a span-200 EMA only becomes bit-exact around 4000 bars. Any strategy
-# consuming realized_volatility therefore inherits a ~20x span warmup, which is
-# what tests/test_strategy_metadata.py measures rather than trusts.
-WARMUP_SPAN_MULTIPLE = 20
-
 
 def realized_volatility(
     returns: pd.Series,
@@ -37,9 +30,13 @@ def realized_volatility(
     instead of waiting for the shock to leave a fixed window, and
     ``adjust=False`` so the recursion matches what the event-driven path
     computes bar by bar.
+
+    ``adjust=False`` is recursive from bar 0 and decays its seed rather than
+    dropping it, so a span-n estimate is still wrong after n bars: a span-200
+    EMA only becomes bit-exact around 4000. A strategy consuming this therefore
+    needs ``warmup_bars`` of roughly 20x ``span``, which
+    ``tests/test_strategy_metadata.py`` measures rather than trusts.
     """
-    if span < 1:
-        raise ValueError("span must be >= 1")
     if bars_per_year <= 0:
         raise ValueError("bars_per_year must be > 0")
 
@@ -78,4 +75,4 @@ def volatility_target_weights(
     return weights.replace([np.inf, -np.inf], np.nan).fillna(0.0).clip(0.0, max_weight)
 
 
-__all__ = ["WARMUP_SPAN_MULTIPLE", "realized_volatility", "volatility_target_weights"]
+__all__ = ["realized_volatility", "volatility_target_weights"]

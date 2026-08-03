@@ -176,11 +176,10 @@ SIGNAL_MIGRATIONS: tuple[str, ...] = (
 )
 
 
-# Funding is a cash flow settled on the venue's own schedule and open interest is
-# a point-in-time snapshot, so neither is a candle field and neither belongs as a
-# column on `market_candles`. The settlement interval is per-contract -- 8h for
-# most Binance perps, but not all and not always -- so nothing here encodes one;
-# `funding_time_ms` is stored as the venue reported it and the spacing is a
+# Why these are their own tables rather than columns on `market_candles` is in
+# `db.funding`. What matters here: the settlement interval is per-contract -- 8h
+# for most Binance perps, but not all and not always -- so nothing below encodes
+# one. `funding_time_ms` is stored as the venue reported it, and the spacing is a
 # property of the data rather than a rule the schema imposes.
 #
 # `CREATE TABLE/INDEX IF NOT EXISTS` are genuine no-ops on re-run: they take no

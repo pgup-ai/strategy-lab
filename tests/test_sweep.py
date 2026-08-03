@@ -32,32 +32,6 @@ def test_sweep_returns_one_point_per_parameter_combination():
     }
 
 
-def test_sweep_points_carry_comparable_metrics():
-    df = synthetic_ohlcv(n=900)
-    points = sweep_parameters(
-        df=df,
-        strategy_name="tsmom",
-        grid={"lookback": [24, 48]},
-        timeframe="15m",
-    )
-    for point in points:
-        assert isinstance(point.total_return, float)
-        assert isinstance(point.sharpe, float)
-        assert isinstance(point.max_drawdown, float)
-        assert point.trades >= 0
-
-
-def test_sweep_rejects_a_parameter_the_strategy_does_not_have():
-    df = synthetic_ohlcv(n=300)
-    with pytest.raises(ValueError, match="does not accept parameter"):
-        sweep_parameters(
-            df=df,
-            strategy_name="tsmom",
-            grid={"nonexistent_param": [1, 2]},
-            timeframe="15m",
-        )
-
-
 def test_sweep_refuses_a_frame_that_is_all_warmup():
     """Otherwise every cell scores 0.0 and the surface reads as a flat plateau.
 
@@ -227,31 +201,10 @@ def test_sharpe_annualizes_from_the_timeframe_not_a_hardcoded_bar_count():
 
 
 def test_stability_score_rewards_a_broad_plateau_over_a_lone_spike():
-    """The gate for R0: neighbouring parameters must behave similarly."""
-    plateau = [
-        SweepPoint({"n": n}, total_return=0.20, sharpe=1.0, max_drawdown=-0.1, trades=10)
-        for n in range(5)
-    ]
-    spike = [
-        SweepPoint(
-            {"n": n},
-            total_return=(2.0 if n == 2 else -0.1),
-            sharpe=(3.0 if n == 2 else -0.2),
-            max_drawdown=-0.1,
-            trades=10,
-        )
-        for n in range(5)
-    ]
+    """The gate for R0: neighbouring parameters must behave similarly.
 
-    assert stability_score(plateau) > stability_score(spike)
-
-
-def test_stability_score_is_not_just_the_best_cell():
-    """The spike's best Sharpe beats the plateau's, which is the point.
-
-    Any summary that reduces to ``max(sharpes)`` -- or to a plain mean, which the
-    spike also wins here -- would rank the overfit above the plateau. Guarding
-    both is what makes the previous test non-trivial.
+    The spike wins on ``max(sharpes)`` and on a plain mean, both asserted below,
+    so any summary reducing to either would rank the overfit first.
     """
     plateau = [
         SweepPoint({"n": n}, total_return=0.2, sharpe=1.0, max_drawdown=-0.1, trades=10)

@@ -28,8 +28,8 @@ class SweepPoint:
 def bars_per_year(timeframe: str) -> float:
     """Annualization factor for a timeframe, so Sharpe is comparable across them.
 
-    Hardcoding a bar count silently reports a 15m number for 4h perps and daily
-    ETFs alike -- the same returns would then annualize 4x and 22x wrong.
+    Hardcoding a bar count would silently report a 15m number for 4h perps and
+    daily ETFs alike -- the same returns annualizing 4x and 22x wrong.
     """
     return _MILLIS_PER_YEAR / timeframe_to_millis(timeframe)
 
@@ -43,10 +43,9 @@ def sweep_parameters(
 ) -> list[SweepPoint]:
     """Evaluate a strategy across a parameter grid on one frame.
 
-    Deliberately vectorized and vectorbt-free: a sweep runs hundreds of
-    configurations, and the point is the *shape* of the surface, not the exact
-    PnL of any one cell. Costs and funding come from the R2 layer, which the
-    single-run backtest uses.
+    Deliberately vectorbt-free: a sweep runs hundreds of configurations, and the
+    point is the *shape* of the surface, not the exact PnL of any one cell.
+    Costs and funding live in the R2 layer, which the single-run backtest uses.
 
     Every cell is evaluated over the same bar range -- the template's declared
     ``warmup_bars``, not a per-cell one -- because a surface whose cells cover
@@ -115,11 +114,11 @@ def positions_from_signals(signals: SignalSet) -> pd.Series:
     treats ``entries``/``exits`` against ``short_entries``/``short_exits``.
     Deriving the position from entries alone makes every exit ingredient
     invisible: measured on 83,348 BTC 15m bars, all four donchian ``exit_span``
-    values then scored bit-identically, so a whole grid axis reported "this
+    values then scored bit-identically -- a whole grid axis reporting "this
     parameter does not matter" when what did not matter was the sweep.
 
     Shifted one bar because a signal computed from bar *t*'s close can only be
-    traded from bar *t + 1* -- without the shift the sweep reports lookahead
+    traded from bar *t + 1*. Without the shift the sweep reports lookahead
     returns and every number on the surface is fiction.
     """
     position = _book(signals.long_entries, signals.long_exits, 1.0) + _book(
@@ -131,12 +130,12 @@ def positions_from_signals(signals: SignalSet) -> pd.Series:
 def _book(entries: pd.Series, exits: pd.Series, held: float) -> pd.Series:
     """One side's book: open on an entry, flatten on an exit, else hold.
 
-    Kept separate per side because an exit only speaks for its own side -- a
-    long exit must not flatten an open short. Entries are written after exits so
-    an entry wins a same-bar conflict: an entry states a direction, an exit only
-    says the previous one has expired. No registered strategy can produce that
-    conflict today (every one compares mutually exclusive conditions), so the
-    ordering is pinned by unit test rather than by any live surface.
+    Kept per side because an exit only speaks for its own side -- a long exit
+    must not flatten an open short. Entries are written after exits so an entry
+    wins a same-bar conflict: an entry states a direction, an exit only says the
+    previous one has expired. No registered strategy can produce that conflict
+    today, so both properties are pinned by unit test rather than by any live
+    surface.
     """
     book = pd.Series(np.nan, index=entries.index, dtype="float64")
     book[exits] = 0.0
@@ -150,6 +149,11 @@ def stability_score(points: list[SweepPoint]) -> float:
     A broad plateau of modest results scores above a single spectacular cell
     surrounded by losses -- that spike is an overfit, and reporting its number as
     "the" result is the most common way a trend backtest lies.
+
+    Spread alone is not enough to say that. A surface of two strong cells and
+    six dead ones has both a higher mean and a small enough spread to beat a
+    plateau on ``mean / (1 + spread)``; multiplying by the fraction of cells
+    that are positive at all is what puts the plateau back on top.
     """
     if len(points) < 2:
         return 0.0

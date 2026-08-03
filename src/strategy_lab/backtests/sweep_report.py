@@ -37,9 +37,8 @@ def _cell_color(sharpe: float, scale: float) -> str:
     """Diverging fill: teal above zero, red below, strength by |Sharpe|.
 
     Scaled against the surface's own extreme rather than an absolute number, so
-    the question the page answers is "how does this cell compare to its
-    neighbours" -- a plateau fills as one solid block, a spike as a single bright
-    cell in a dark field.
+    the page answers "how does this cell compare to its neighbours" -- a plateau
+    fills as one solid block, a spike as a single bright cell in a dark field.
     """
     weight = min(abs(sharpe) / scale, 1.0) if scale > 0 else 0.0
     alpha = _ALPHA_MIN + (_ALPHA_MAX - _ALPHA_MIN) * weight
@@ -50,10 +49,9 @@ def _cell_color(sharpe: float, scale: float) -> str:
 def _axes(points: list[SweepPoint]) -> tuple[str | None, list[str]]:
     """Split the swept parameters into a row axis and one or more column axes.
 
-    One dimension lays out as a single row, which is the plan's requirement and
-    also the only honest shape: there are no neighbours in a second direction to
-    show. Three or more fold every axis after the first into the column label
-    rather than silently dropping one.
+    One dimension lays out as a single row -- there are no neighbours in a
+    second direction to show. Three or more fold every axis after the first into
+    the column label rather than silently dropping one.
     """
     names = list(points[0].params)
     if len(names) <= 1:
@@ -64,9 +62,9 @@ def _axes(points: list[SweepPoint]) -> tuple[str | None, list[str]]:
 def _ordered(values: list) -> list:
     """Grid order, de-duplicated, preserving first appearance.
 
-    ``itertools.product`` already emits the grid in the caller's declared order,
-    so this keeps the axis reading the way the grid was written even when the
-    values are not sortable against each other.
+    Not sorted: ``itertools.product`` already emits the caller's declared order,
+    which reads the way the grid was written and works for values that are not
+    sortable against each other.
     """
     seen: list = []
     for value in values:
@@ -81,9 +79,7 @@ def _grid_table(points: list[SweepPoint], scale: float) -> str:
     def col_key(point: SweepPoint) -> tuple:
         return tuple(point.params[name] for name in col_axes)
 
-    # The axis names live once in the corner cell; every header and row label
-    # carries only its value, so the grid reads as a grid rather than as a wall
-    # of repeated parameter names.
+    # Values only -- the axis names live once, in the corner cell.
     def col_label(key: tuple) -> str:
         return " · ".join(_fmt_param(v) for v in key)
 
@@ -170,8 +166,8 @@ def render_sweep_html(*, points: list[SweepPoint], config: dict) -> str:
 
     scale = max((abs(p.sharpe) for p in points), default=0.0)
     # allow_nan=False is deliberate: NaN is not valid JSON, and a browser that
-    # cannot parse the payload would silently drop the hover detail rather than
-    # complain. Failing here instead makes a NaN Sharpe loud.
+    # cannot parse the payload drops the hover detail silently rather than
+    # complaining. Failing here instead makes a NaN Sharpe loud.
     payload = json.dumps(
         [
             {

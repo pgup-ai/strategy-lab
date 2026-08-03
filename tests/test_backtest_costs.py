@@ -2,13 +2,14 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pandas as pd
 import pytest
 
 from conftest import synthetic_ohlcv
 from strategy_lab.backtests.costs import CostModel
-from strategy_lab.backtests.engine import ExitMode, run_backtest
+from strategy_lab.backtests.engine import ExitMode, _funding_notional, run_backtest
 from strategy_lab.market_data.base import MarketDataIdentity
 from strategy_lab.strategies import get_strategy
 
@@ -57,10 +58,15 @@ def _equity(result) -> pd.Series:
     return frame["equity"]
 
 
-def test_funding_changes_the_equity_curve(tmp_path):
+def test_the_equity_curve_on_disk_is_the_net_one(tmp_path):
+    """Funding never enters the simulation, so the whole gap between the two
+    runs' curves is the funding charged -- exactly, not merely in the right
+    direction. ``equity_curve.csv`` is what a reader plots and compares."""
     without = _run(tmp_path / "a")
     with_funding = _run(tmp_path / "b", funding=_funding(_frame()))
-    assert not _equity(without).equals(_equity(with_funding))
+    gap = _equity(without).to_numpy() - _equity(with_funding).to_numpy()
+    assert gap[-1] == pytest.approx(_stats(with_funding)["Funding Paid"])
+    assert gap[-1] > 0
 
 
 def _gap_is_exactly_the_funding(result) -> bool:
@@ -162,19 +168,11 @@ def test_the_stress_table_agrees_with_the_headline_run(tmp_path):
 
 def test_reported_funding_matches_the_settlement_arithmetic(tmp_path):
     """Reconcile against a hand computation: notional held into each settlement bar x rate."""
-    from strategy_lab.backtests.costs import apply_funding
-
-    rate = 0.0001
-    result = _run(tmp_path, funding=_funding(_frame(), rate=rate))
+    result = _run(tmp_path, funding=_funding(_frame()))
     ledger = pd.read_csv(result.funding_path, index_col=0)
     expected = (ledger["notional"] * ledger["rate"]).sum()
     assert _stats(result)["Funding Paid"] == pytest.approx(expected)
     assert ledger["cash_flow"].sum() == pytest.approx(-expected)
-
-    flat = apply_funding(
-        positions=pd.Series(0.0, index=_frame().index), funding=_funding(_frame(), rate=rate)
-    )
-    assert flat.abs().sum() == 0
 
 
 def test_the_base_run_is_in_the_table_even_when_not_asked_for(tmp_path):
@@ -199,10 +197,6 @@ def test_funding_is_charged_on_the_position_held_into_the_bar():
     """Fills land at a bar's close, so the book a settlement at bar *t*'s open
     meets is the one established at bar *t-1*. Charging bar *t*'s own position
     would settle funding against a trade made after the settlement happened."""
-    from types import SimpleNamespace
-
-    from strategy_lab.backtests.engine import _funding_notional
-
     df = synthetic_ohlcv(n=4, seed=3, freq="4h")
     entered_at_bar_one = pd.Series([0.0, 2.0, 2.0, 0.0], index=df.index)
     notional = _funding_notional(SimpleNamespace(assets=lambda: entered_at_bar_one), df)
