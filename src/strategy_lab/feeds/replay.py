@@ -20,17 +20,17 @@ class ReplayFeed:
     This is the injection point that makes backtest, replay, and live share one
     strategy code path: the runner cannot tell this apart from a websocket.
 
-    Known limitations, both pinned by tests in ``tests/test_replay_feed.py``:
+    Duplicate timestamps are collapsed last-wins, deliberately: the protocol forbids
+    yielding one bar identity twice, and a redelivered bar is the corrected one. See
+    :func:`_ordered`.
+
+    Known limitation, pinned by a test in ``tests/test_replay_feed.py``:
 
     - **Subscriptions are drained sequentially, not interleaved by time.**
       ``stream([a, b])`` yields every bar of ``a`` and only then the first bar of
       ``b``. A live feed multiplexes both by arrival time, so a multi-symbol replay
       is chronologically wrong here. Phase 1a is single-symbol; fix this alongside
       the live feed rather than guessing at the merge semantics now.
-    - **Duplicate index entries are replayed twice**, which the protocol forbids.
-      Unreachable via :meth:`from_database` (``market_candles`` is unique on
-      ``(exchange, market_type, symbol, timeframe, timestamp)``), reachable with a
-      hand-built ``frames`` dict.
     """
 
     frames: dict[FrameKey, pd.DataFrame] = field(default_factory=dict)
@@ -71,7 +71,7 @@ class ReplayFeed:
             if df is None or df.empty:
                 continue
             bar_ms = timeframe_to_millis(sub.timeframe)
-            for timestamp, row in df.sort_index().iterrows():
+            for timestamp, row in _ordered(df).iterrows():
                 bar = _row_to_bar(timestamp, row, sub.instrument, sub.timeframe, bar_ms)
                 self._last_event_ms = bar.ts_close_ms
                 yield BarEvent(bar=bar, ts_event_ms=bar.ts_close_ms, ts_recv_ms=None)
@@ -81,7 +81,7 @@ class ReplayFeed:
         if df is None or df.empty:
             return
         bar_ms = timeframe_to_millis(sub.timeframe)
-        for timestamp, row in df.sort_index().iterrows():
+        for timestamp, row in _ordered(df).iterrows():
             ts_open_ms = _epoch_ms(timestamp)
             if start_ms <= ts_open_ms <= end_ms:
                 yield _row_to_bar(timestamp, row, sub.instrument, sub.timeframe, bar_ms)
@@ -113,6 +113,23 @@ def _row_to_bar(
         volume=_decimal(row["volume"]),
         is_closed=True,
     )
+
+
+def _ordered(df: pd.DataFrame) -> pd.DataFrame:
+    """Ascending, one row per timestamp, last occurrence winning.
+
+    The protocol forbids yielding the same (instrument, timeframe, ts_open_ms,
+    is_closed) twice, and a websocket redelivers bars after a reconnect — so honouring
+    that here is what makes ReplayFeed a usable reference for the live adapters. Last
+    wins because the redelivered copy is the corrected one; this matches
+    ``normalize_candle_frame`` in ``db/candles.py``.
+
+    ``kind="stable"`` is load-bearing, not decoration: ``sort_index()`` defaults to
+    quicksort, which reorders equal keys, so without it "last" would mean an arbitrary
+    one of the duplicates rather than the last row the caller supplied.
+    """
+    ordered = df.sort_index(kind="stable")
+    return ordered.loc[~ordered.index.duplicated(keep="last")]
 
 
 def _epoch_ms(timestamp: pd.Timestamp) -> int:

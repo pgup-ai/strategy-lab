@@ -260,6 +260,47 @@ def test_backfill_on_an_unknown_subscription_stops_cleanly():
 
 
 # --------------------------------------------------------------------------------------
+# Duplicate identities
+# --------------------------------------------------------------------------------------
+
+
+def test_duplicate_timestamps_are_collapsed_last_wins():
+    """The protocol forbids yielding one bar identity twice, so a redelivered bar
+    replaces the earlier copy rather than being emitted alongside it. This is the
+    websocket-reconnect case the clause exists for; the corrected copy arrives last.
+
+    The frame is deliberately >16 rows. numpy falls back to insertion sort (which is
+    stable) below that, so a 4-row version of this test passes even with an unstable
+    sort and proves nothing. At 17 rows a default sort_index() keeps the STALE row.
+    """
+    bars = 20
+    df = synthetic_ohlcv(n=bars)
+    corrected = df.iloc[[1]].copy()
+    corrected.loc[:, ["open", "high", "low", "close", "volume"]] = [110.0, 115.0, 105.0, 112.0, 9.0]
+    events = collect(ReplayFeed(frames={(INSTRUMENT, "15m"): pd.concat([df, corrected])}), [SUB])
+
+    timestamps = [event.bar.ts_open_ms for event in events]
+    assert timestamps == sorted(timestamps)
+    assert len(timestamps) == bars
+    assert len(set(timestamps)) == bars
+
+    replaced = events[1].bar
+    assert replaced.ts_open_ms == df.index[1].value // 1_000_000
+    assert (replaced.close, replaced.high, replaced.volume) == (
+        Decimal("112.0"),
+        Decimal("115.0"),
+        Decimal("9.0"),
+    )
+
+
+def test_duplicate_timestamps_are_collapsed_in_backfill_too():
+    df = synthetic_ohlcv(n=3)
+    feed = ReplayFeed(frames={(INSTRUMENT, "15m"): pd.concat([df, df.iloc[[1]]])})
+    bars = drain_backfill(feed, SUB, 0, 2**63 - 1)
+    assert [bar.ts_open_ms for bar in bars] == [ts.value // 1_000_000 for ts in df.index]
+
+
+# --------------------------------------------------------------------------------------
 # Postgres entry point
 # --------------------------------------------------------------------------------------
 
@@ -318,17 +359,3 @@ def test_multiple_subscriptions_are_replayed_sequentially_not_interleaved():
     assert timestamps != sorted(timestamps), "expected the sequential-drain ordering bug"
 
 
-def test_duplicate_index_entries_are_replayed_twice():
-    """KNOWN CONTRACT VIOLATION: the protocol forbids repeating a bar identity.
-
-    Unreachable through ReplayFeed.from_database - market_candles has a UNIQUE
-    constraint on (exchange, market_type, symbol, timeframe, timestamp) - but a
-    hand-built frames dict can hit it, so the behaviour is pinned here rather than
-    left as folklore.
-    """
-    df = synthetic_ohlcv(n=3)
-    duplicated = pd.concat([df, df.iloc[[1]]]).sort_index()
-    events = collect(ReplayFeed(frames={(INSTRUMENT, "15m"): duplicated}), [SUB])
-    timestamps = [event.bar.ts_open_ms for event in events]
-    assert len(timestamps) == 4
-    assert len(set(timestamps)) == 3
