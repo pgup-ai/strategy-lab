@@ -310,7 +310,7 @@ whipsaw cost, average holding period, winner/loser ratio, and drawdown.
 
 | ID | Hypothesis | Result |
 |---|---|---|
-| C1 | OI direction confirms trend quality (price↑/OI↑ ≠ price↑/OI↓) | — |
+| C1 | OI direction confirms trend quality (price↑/OI↑ ≠ price↑/OI↓) | **BLOCKED — not backtestable.** Binance serves only ~30 days of OI history (`startTime` 40d back → `-1130 parameter 'startTime' is invalid`, measured 2026-08-03). Perp klines and funding go back to 2019; OI does not. Options: accumulate forward from today and revisit in ~1 year, buy historical OI, or drop C1. Do **not** substitute a 30-day sample for a historical study. |
 | C2 | Funding is a *confirmation* variable at moderate levels and a *contrarian* one only at extremes | — |
 | C3 | Breakouts after volatility compression outperform ordinary breakouts | — |
 | C4 | Cross-coin breadth leads individual-coin trend confirmation | — |
@@ -371,6 +371,7 @@ Newest first. One entry per meaningful step — what was done, what was learned,
 
 | Date | Entry |
 |---|---|
+| 2026-08-03 | R0–R2 implementation plan written ([docs/plans/2026-08-03-mde-r0-r2.md](../plans/2026-08-03-mde-r0-r2.md)). Measured Binance history depth first: klines and funding reach 2019, **OI only ~30 days** → C1 moved to BLOCKED. |
 | 2026-08-03 | Charter written. Repo decision: one repo, two contracts. Next step fixed as R0 baselines. |
 | 2026-08-03 | Phase 1a merged (PR #4): event engine, replay determinism proven on 83,348 real bars, append-only signal store. |
 
@@ -388,6 +389,8 @@ Decisions and their reasoning. Amend with a new row rather than editing history.
 | M4 | Derivatives on smoothed state, never on price | Higher-order price differentiation amplifies noise to randomness | 2026-08-03 |
 | M5 | Jerk / 3rd order deferred indefinitely | Unusable without heavy filtering | 2026-08-03 |
 | M6 | Rules before ML | A rule state machine is explainable and is the honest baseline for any statistical model | 2026-08-03 |
+| M7 | Backfill perp klines + funding; collect OI forward only | Measured, not assumed: Binance caps OI history at ~30 days while klines and funding reach 2019. Better to know C1 is blocked now than to discover it in month 4. | 2026-08-03 |
+| M8 | Cost stress scales fees and slippage, never funding | Funding is a market rate, not an execution cost — multiplying it models a different market rather than a worse fill | 2026-08-03 |
 
 ### Carried from Phase 0 (design doc §11)
 
