@@ -1,10 +1,19 @@
+"""Shared vocabulary types for the event-driven engine.
+
+- All timestamps are UTC epoch milliseconds as ``int`` — never naive
+  datetimes, never local time.
+- Prices and quantities are ``Decimal`` in core and storage; float64 appears
+  only later, inside the pandas indicator layer.
+- This package is stdlib-only: no I/O, no network, no third-party imports.
+"""
+
 from __future__ import annotations
 
 from dataclasses import dataclass
 from decimal import Decimal
 from enum import StrEnum
 
-_PRICE_FIELDS = ("open", "high", "low", "close", "volume")
+_DECIMAL_FIELDS = ("open", "high", "low", "close", "volume")
 
 
 class Side(StrEnum):
@@ -56,7 +65,7 @@ class Bar:
     trades: int | None = None
 
     def __post_init__(self) -> None:
-        for field_name in _PRICE_FIELDS:
+        for field_name in _DECIMAL_FIELDS:
             value = getattr(self, field_name)
             if not isinstance(value, Decimal):
                 raise TypeError(f"{field_name} must be Decimal, got {type(value).__name__}")
