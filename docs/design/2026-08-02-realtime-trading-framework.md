@@ -80,6 +80,14 @@ per-bar call, 50,000-bar buffer      2.81 ms/call  →  full replay ≈  2.3 min
 per-bar call, 83,348-bar buffer      4.32 ms/call  →  full replay ≈  6.0 min
 ```
 
+> **Corrected after implementation.** The 6-minute figure above extrapolates the
+> per-call cost and understates reality: the measured end-to-end replay of all 83,348
+> bars took **~43 minutes**, because each bar also rebuilds the buffer's DataFrame on
+> top of the strategy call. The whole-history vectorized path measured **0.39 s** over
+> the same range. The conclusion is unchanged and in fact stronger — the ratio is
+> ~6,600×, not the ~60,000× claimed below from the raw per-call numbers, but either way
+> the backtest must keep the bulk path.
+
 So: **live is free** (4 ms once per bar interval), **replay is affordable on bounded
 windows**, and **backtest must use the bulk path** — 5.9 ms versus 6 minutes is a 60,000×
 difference, and it grows quadratically (5 years of 1m bars would be hours).

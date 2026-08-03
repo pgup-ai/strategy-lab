@@ -38,10 +38,12 @@ class StrategyRunner:
     and nothing in this class would notice. ``tests/test_lookahead.py`` is the
     check that keeps that honest.
 
-    Cost, measured on the real 83,348-bar BTC/USDT 15m set: one whole-history
-    call is 5.9 ms, one call against an 83k-bar buffer is 4.3 ms. Per bar that is
-    free live and ~6 minutes for a full bar-by-bar replay of that history, which
-    is why the backtest keeps its bulk path.
+    Cost, measured end to end on the real 83,348-bar BTC/USDT 15m set: the
+    whole-history call takes 0.39 s, a full bar-by-bar replay of the same range
+    takes ~43 minutes. Per bar the strategy call is ~4.3 ms, which is free live
+    (one bar per timeframe interval) and quadratic in replay, since every bar
+    re-runs the strategy over the whole buffer. That gap is why the backtest
+    keeps its bulk path and why ``--limit-bars`` exists on ``replay``.
     """
 
     def __init__(
