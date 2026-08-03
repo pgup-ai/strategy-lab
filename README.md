@@ -4,11 +4,14 @@ Local Python research repo for crypto and stock strategy backtesting.
 
 The current stack is intentionally small:
 
-- Postgres 16 in Docker for reproducible OHLCV storage
+- Postgres 16 in Docker for reproducible OHLCV storage, plus an append-only
+  `runs`/`signals` store for replay and (later) live signal history
 - `ccxt` for crypto candles
 - `yfinance` for stock candles
 - `pandas` and `numpy` for strategy research
 - `vectorbt` for fast signal-based backtests and plots
+- a small event-driven engine (`core/`, `feeds/`, `engine/`) so the same
+  strategy code can run in backtest, replay, and (later) live
 
 ## Layout
 
@@ -226,6 +229,60 @@ Each run writes a snapshot under `reports/`:
   per-trade table (PnL, holding period, click a row to zoom to that trade)
 
 That report directory is the reproducibility boundary for comparing strategy changes.
+
+## Replay
+
+`replay` drives stored candles bar-by-bar through the event-driven engine in
+`src/strategy_lab/engine/`, calling the exact same `strategy.generate_signals(df)`
+the vectorized `backtest` command calls — but once per closed bar over an
+expanding buffer, reading only the last row, instead of once over the whole
+range. It is the execution path live trading will use, and
+`tests/test_replay_determinism.py` proves the two paths agree exactly, signal
+for signal.
+
+`replay` persists to `runs`/`signals` tables that only `strategy-lab migrate`
+creates — `init-db` does not. Run `migrate` once; on a brand-new database run
+`init-db` first, since `migrate` widens `market_candles` to `NUMERIC` and needs
+the table to already exist. `migrate` is idempotent and safe to re-run:
+
+```bash
+strategy-lab init-db      # fresh database only
+strategy-lab migrate      # once — creates runs/signals, widens market_candles
+```
+
+```bash
+strategy-lab replay \
+  --exchange binance \
+  --market-type spot \
+  --symbol BTC/USDT \
+  --timeframe 15m \
+  --strategy turnaround_v1 \
+  --limit-bars 2000
+```
+
+```text
+Run 99fe4a0f-9086-4047-ab0e-75fc5d84027d: emitted 916 signals, wrote 916.
+```
+
+Every invocation mints a fresh `run_id`, so replaying the same range twice
+stores two independent runs rather than zero rows the second time — that is
+the append-only audit trail working as intended, not a bug. Some
+strategy/window combinations legitimately emit nothing: `turnaround_v2`, the
+CLI default, fires only 126 times across the *entire* 83,348-bar stored
+BTC/USDT 15m history, so a quiet run by itself is not a sign anything is
+broken.
+
+Replay is O(n²) by construction: every bar re-evaluates the strategy over the
+whole buffer seen so far, not just the new bar. On that same 83,348-bar
+series, `turnaround_v2` produces the same 126 signals from both paths, but
+`backtest` takes 0.39 s and `replay` takes roughly 43 minutes to do it
+bar-by-bar. Use `--limit-bars` for anything beyond a few thousand bars, and
+keep using the vectorized `backtest` command — not `replay` — for
+whole-history research; `replay` exists to prove the live path matches
+backtest, not to replace it for day-to-day iteration.
+
+See [the Phase 1a design doc](docs/design/2026-08-02-realtime-trading-framework.md)
+for the full rationale.
 
 ## Live Report Serving
 
