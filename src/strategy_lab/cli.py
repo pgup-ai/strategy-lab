@@ -10,6 +10,8 @@ from strategy_lab.backtests import ExitMode, run_backtest
 from strategy_lab.db import init_db, list_candle_sets, load_candles, upsert_candles
 from strategy_lab.db.candles import normalize_candle_frame
 from strategy_lab.market_data.base import MarketDataIdentity
+from strategy_lab.market_data.binance_futures import OPEN_INTEREST_HISTORY_DAYS
+from strategy_lab.market_data.binance_futures import SOURCE as BINANCE_FUTURES_SOURCE
 from strategy_lab.strategies import get_strategy, list_strategies
 from strategy_lab.universe.etfs import ETF_UNIVERSE
 
@@ -58,6 +60,164 @@ def fetch_crypto(
     )
     count = upsert_candles(records)
     typer.echo(f"Upserted {count} candles for {exchange}/{market_type}/{symbol}/{timeframe}.")
+
+
+@app.command("fetch-perp")
+def fetch_perp(
+    symbol: str = typer.Option("BTC/USDT", help="Contract symbol, for example BTC/USDT."),
+    timeframe: str = typer.Option("4h", help="Candle timeframe, for example 4h."),
+    since: str = typer.Option("2019-09-01", help="UTC start time. History begins 2019-09-09."),
+    until: str | None = typer.Option(None, help="UTC end time. Defaults to now."),
+    exchange: str = typer.Option("binance", help="Venue id used in the stored identity."),
+    dry_run: bool = typer.Option(False, "--dry-run", help="Fetch and report, but store nothing."),
+) -> None:
+    """Backfill Binance USD-M perp candles into `market_candles`.
+
+    Stored under `market_type="perp"`, through the same
+    `normalize_candle_frame` + `upsert_candles` path as spot and equity candles,
+    so perp prices get the same Decimal binding rather than a second code path
+    that would have to relearn it.
+    """
+    client = _futures_client(exchange=exchange)
+    df = _fetch(lambda: client.fetch_klines(symbol, timeframe, since=since, until=until))
+    identity = MarketDataIdentity(
+        exchange=exchange, market_type="perp", symbol=symbol, timeframe=timeframe
+    )
+    if df.empty:
+        _raise_empty_fetch(f"{exchange}/perp/{symbol}/{timeframe}", since, until)
+
+    records = normalize_candle_frame(
+        df,
+        exchange=identity.exchange,
+        market_type=identity.market_type,
+        symbol=identity.symbol,
+        timeframe=identity.timeframe,
+        source=BINANCE_FUTURES_SOURCE,
+    )
+    label = f"{exchange}/perp/{symbol}/{timeframe}"
+    if dry_run:
+        typer.echo(f"Dry run: {len(records)} candles for {label}, nothing written.")
+        return
+
+    count = upsert_candles(records)
+    typer.echo(
+        f"Upserted {count} candles for {label} "
+        f"({df.index.min()} -> {df.index.max()})."
+    )
+
+
+@app.command("fetch-funding")
+def fetch_funding(
+    symbol: str = typer.Option("BTC/USDT", help="Contract symbol, for example BTC/USDT."),
+    since: str = typer.Option("2019-09-01", help="UTC start time. History begins 2019-09-10."),
+    until: str | None = typer.Option(None, help="UTC end time. Defaults to now."),
+    exchange: str = typer.Option("binance", help="Venue id used in the stored identity."),
+    dry_run: bool = typer.Option(False, "--dry-run", help="Fetch and report, but store nothing."),
+) -> None:
+    """Backfill perp funding rates into `funding_rates`.
+
+    Settlement times are stored exactly as the venue reports them. The interval
+    is per-contract -- 8h for most Binance perps but not all and not always --
+    so nothing here assumes or enforces one.
+    """
+    client = _futures_client(exchange=exchange)
+    rows = _fetch(lambda: client.fetch_funding(symbol, since=since, until=until))
+    label = f"{exchange}/perp/{symbol}"
+    if not rows:
+        _raise_empty_fetch(f"funding for {label}", since, until)
+
+    if dry_run:
+        typer.echo(f"Dry run: {len(rows)} funding rows for {label}, nothing written.")
+        return
+
+    count = _upsert_funding(rows)
+    first = _utc(rows[0]["funding_time_ms"])
+    last = _utc(rows[-1]["funding_time_ms"])
+    typer.echo(f"Upserted {count} funding rows for {label} ({first} -> {last}).")
+
+
+@app.command("fetch-open-interest")
+def fetch_open_interest(
+    symbol: str = typer.Option("BTC/USDT", help="Contract symbol, for example BTC/USDT."),
+    period: str = typer.Option("4h", help="Snapshot period: 5m, 15m, 30m, 1h, 2h, 4h, 6h, 12h, 1d."),
+    exchange: str = typer.Option("binance", help="Venue id used in the stored identity."),
+    dry_run: bool = typer.Option(False, "--dry-run", help="Fetch and report, but store nothing."),
+) -> None:
+    """Collect open-interest snapshots into `open_interest`.
+
+    There is deliberately no `--since`: Binance serves only ~30 days of OI
+    history, so this accumulates forward from whenever it is first run and can
+    never be backfilled. Run it on a schedule if OI is wanted as a series.
+    """
+    typer.secho(
+        f"Warning: Binance serves only ~{OPEN_INTEREST_HISTORY_DAYS} days of open-interest "
+        "history, so this cannot be backfilled -- it accumulates forward from the first run. "
+        "Do not read a short OI series as history.",
+        fg=typer.colors.YELLOW,
+    )
+    client = _futures_client(exchange=exchange)
+    rows = _fetch(lambda: client.fetch_open_interest(symbol, period=period))
+    label = f"{exchange}/perp/{symbol}/{period}"
+    if not rows:
+        _raise_empty_fetch(f"open interest for {label}", None, None)
+
+    if dry_run:
+        typer.echo(f"Dry run: {len(rows)} open-interest rows for {label}, nothing written.")
+        return
+
+    count = _upsert_open_interest(rows)
+    first = _utc(rows[0]["ts_ms"])
+    last = _utc(rows[-1]["ts_ms"])
+    typer.echo(f"Upserted {count} open-interest rows for {label} ({first} -> {last}).")
+
+
+# These four exist so the fetch tests can substitute the venue and storage,
+# matching `_create_run`/`_write_signals` below.
+def _futures_client(**kwargs):
+    from strategy_lab.market_data.binance_futures import BinanceFuturesClient
+
+    return BinanceFuturesClient(**kwargs)
+
+
+def _upsert_funding(rows):
+    from strategy_lab.db.funding import upsert_funding
+
+    return upsert_funding(rows)
+
+
+def _upsert_open_interest(rows):
+    from strategy_lab.db.funding import upsert_open_interest
+
+    return upsert_open_interest(rows)
+
+
+def _fetch(call):
+    """Turn a venue error into a clean non-zero exit rather than a traceback."""
+    from strategy_lab.market_data.binance_futures import BinanceFuturesError
+
+    try:
+        return call()
+    except (BinanceFuturesError, ValueError) as exc:
+        raise typer.BadParameter(str(exc)) from exc
+
+
+def _raise_empty_fetch(label: str, since: str | None, until: str | None) -> None:
+    """An empty fetch exits non-zero on purpose.
+
+    Reporting "stored 0" and exiting 0 is how a hole in a series gets mistaken
+    for a market that did not trade.
+    """
+    window = f" for {since} -> {until or 'now'}" if since else ""
+    raise typer.BadParameter(
+        f"The venue returned no rows for {label}{window}. "
+        "Check the symbol and that the requested window is within the venue's history."
+    )
+
+
+def _utc(ms: int) -> str:
+    import pandas as pd
+
+    return str(pd.Timestamp(ms, unit="ms", tz="UTC"))
 
 
 @app.command("fetch-stock")
