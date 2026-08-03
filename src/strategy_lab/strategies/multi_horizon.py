@@ -54,13 +54,17 @@ class MultiHorizon:
 
         long_state = (score > self.entry_threshold).fillna(False)
         short_state = (score < -self.entry_threshold).fillna(False)
-        if not self.allow_shorts:
-            short_state = pd.Series(False, index=df.index)
+
+        # ``short_state`` is the raw blended-score flip, and stays that way: the
+        # blend turning negative closes a long whether or not shorts are enabled.
+        # Only the entry is gated -- gating the flip itself left a long-only run
+        # with no exit at all.
+        short_entries = short_state if self.allow_shorts else pd.Series(False, index=df.index)
 
         return SignalSet(
             long_entries=long_state,
             long_exits=short_state,
-            short_entries=short_state,
+            short_entries=short_entries,
             short_exits=long_state,
             metadata={
                 "lookbacks": list(self.lookbacks),

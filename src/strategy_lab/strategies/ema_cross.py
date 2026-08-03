@@ -31,13 +31,17 @@ class EmaCross:
 
         long_state = (fast > slow).fillna(False)
         short_state = (fast < slow).fillna(False)
-        if not self.allow_shorts:
-            short_state = pd.Series(False, index=df.index)
+
+        # ``short_state`` is the raw crossover state, and stays that way: the
+        # fast EMA losing the slow one closes a long whether or not shorts are
+        # enabled. Only the entry is gated -- gating the state itself left a
+        # long-only run with no exit at all.
+        short_entries = short_state if self.allow_shorts else pd.Series(False, index=df.index)
 
         return SignalSet(
             long_entries=long_state,
             long_exits=short_state,
-            short_entries=short_state,
+            short_entries=short_entries,
             short_exits=long_state,
             metadata={
                 "fast_span": self.fast_span,

@@ -31,13 +31,17 @@ class Tsmom:
         trailing_return = df["close"].pct_change(self.lookback)
         long_state = (trailing_return > 0).fillna(False)
         short_state = (trailing_return < 0).fillna(False)
-        if not self.allow_shorts:
-            short_state = pd.Series(False, index=df.index)
+
+        # ``short_state`` is the raw trend flip, and stays that way: leaving a
+        # long is independent of whether you act on the flip by shorting. Only
+        # the entry is gated. Gating the flip itself left a long-only run with no
+        # exit at all -- buy-and-hold wearing a strategy's name.
+        short_entries = short_state if self.allow_shorts else pd.Series(False, index=df.index)
 
         return SignalSet(
             long_entries=long_state,
             long_exits=short_state,
-            short_entries=short_state,
+            short_entries=short_entries,
             short_exits=long_state,
             metadata={
                 "lookback": self.lookback,

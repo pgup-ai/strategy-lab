@@ -53,6 +53,38 @@ def test_baseline_is_registered(name):
     assert get_strategy(name).name == name
 
 
+@pytest.mark.parametrize("name", BASELINES)
+def test_disabling_shorts_does_not_disable_the_long_exit(name):
+    """Leaving a long is independent of whether you act on the flip by shorting.
+
+    The US ETF half of the program is long-only by design, so a baseline that
+    never closes a position under ``--no-allow-shorts`` is buy-and-hold wearing a
+    strategy's name -- it cannot be the floor the program is gated on. Three of
+    these four derive ``long_exits`` from the short state, which is exactly the
+    wiring that made zeroing the short state take the long exit with it.
+    """
+    with_shorts = get_strategy(name, allow_shorts=True)
+    long_only = get_strategy(name, allow_shorts=False)
+    df = reversal_frame(with_shorts.warmup_bars + 300)
+
+    shorted_signals = with_shorts.generate_signals(df)
+    long_only_signals = long_only.generate_signals(df)
+
+    tail = slice(with_shorts.warmup_bars, None)
+    assert shorted_signals.long_exits[tail].any(), (
+        "this frame produces no long exits even with shorts on; it cannot test anything"
+    )
+    assert not long_only_signals.short_entries.any(), "long-only took a short entry"
+    assert long_only_signals.long_exits[tail].any(), (
+        f"{name} never closes a long when shorts are disabled"
+    )
+    # The stronger property the assertion above is a consequence of: the exit is
+    # the trend flip itself, so disabling shorts must not move it by one bar.
+    pd.testing.assert_series_equal(
+        long_only_signals.long_exits, shorted_signals.long_exits, check_names=False
+    )
+
+
 def test_tsmom_goes_long_in_a_sustained_uptrend():
     strategy = get_strategy("tsmom")
     df = trending_frame(n=strategy.warmup_bars + 400)

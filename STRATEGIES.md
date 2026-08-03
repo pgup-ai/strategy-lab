@@ -170,9 +170,9 @@ rather than round-tripped.
 
 - **Entry**: long when close exceeds the prior `entry_span`-bar high; short when it falls
   below the prior `entry_span`-bar low.
-- **Exits provided**: reverse break of the shorter `exit_span` channel — independent of
-  the entry state, which makes this the only R0 baseline that still exits when shorts are
-  disabled (see the caveat below).
+- **Exits provided**: reverse break of the shorter `exit_span` channel — a separate
+  signal rather than the inverse of the entry state, which is what lets the exit be
+  faster than the entry.
 - **Params**: `entry_span=96`, `exit_span=48`, `warmup_bars=96`.
 - **Note**: every channel is `.rolling(n).max().shift(1)`. The `shift(1)` is load-bearing
   but *not* a lookahead guard — bar *t*'s own high is known at bar *t*'s close, so the
@@ -199,15 +199,21 @@ backtests quietly overfit.
   by at most 1.1e-15, against a smallest observed |score| of 5.9e-3. Signals are identical
   on every bar, which is why `warmup_bars` is the longest lookback and not a multiple.
 
-### ⚠ Caveat: `--no-allow-shorts` removes the long exit
+### `--no-allow-shorts` gates the short entry only, never the long exit
 
-`tsmom`, `ema_cross` and `multi_horizon` all wire `long_exits = short_state`. Passing
-`--no-allow-shorts` forces `short_state` to all-False, which silently takes the long exit
-with it: measured on 5,000 synthetic bars, `opposite_signal_only` drops from 2,889 to
-**0** long exits for `tsmom` (3,191 → 0 for `ema_cross`, 2,745 → 0 for `multi_horizon`).
-A long-only run in that mode never closes a position. Either keep shorts enabled, or use
-`continuation_failure`/`trend_structure`, which supply engine-side exits. `donchian` is
-unaffected because its exits come from the reverse channel rather than the entry state.
+`tsmom`, `ema_cross` and `multi_horizon` all wire `long_exits = short_state`, so the
+trend flip is both "close the long" and "open the short". Only the second is optional:
+`allow_shorts=False` zeroes `short_entries` and leaves `long_exits` on the raw flip.
+Measured on 5,000 synthetic bars, all four baselines emit **identical** `long_exits` with
+shorts on and off (2,889 for `tsmom`, 3,191 `ema_cross`, 275 `donchian`, 2,745
+`multi_horizon`), so a long-only run under `opposite_signal_only` is a real long/cash
+strategy rather than buy-and-hold.
+
+This was wrong until 2026-08-03: the flip state itself was gated, which took the long
+exit with it and dropped all three to **0** long exits under `--no-allow-shorts`.
+`donchian` was never affected — its exits come from the reverse channel rather than the
+entry state, which is the Turtle asymmetry paying off structurally.
+`test_disabling_shorts_does_not_disable_the_long_exit` pins all four.
 
 ---
 
@@ -228,7 +234,7 @@ R0 baselines (verified against the engine on 5,000 synthetic bars, 2026-08-03):
 | `exit_mode` | tsmom / ema_cross / multi_horizon | donchian |
 |---|---|---|
 | `continuation_failure` (default) | opposite state OR N adverse closes | channel exit OR N adverse closes |
-| `opposite_signal_only` | ✅ canonical *with shorts on*; ⚠ **never exits a long** under `--no-allow-shorts` | ✅ canonical — channel exit, unaffected by `--no-allow-shorts` |
+| `opposite_signal_only` | ✅ canonical — opposite state, unaffected by `--no-allow-shorts` | ✅ canonical — channel exit, unaffected by `--no-allow-shorts` |
 | `trend_failure` | ✗ raises (no trend-failure series) | ✗ raises (no trend-failure series) |
 | `setup_invalidation_stop` | ✗ raises (no setup stop) | ✗ raises (no setup stop) |
 | `trend_structure` | long-only (raises if short entries exist — pass `--no-allow-shorts`); SMA40 via fallback | same; note it *replaces* the channel exit |
