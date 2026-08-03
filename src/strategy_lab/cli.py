@@ -22,6 +22,15 @@ def init_db_command() -> None:
     typer.echo("Initialized database schema.")
 
 
+@app.command("migrate")
+def migrate_command() -> None:
+    """Apply idempotent schema upgrades to an existing database."""
+    from strategy_lab.storage.migrations import run_migrations
+
+    count = run_migrations()
+    typer.echo(f"Applied {count} migration statements.")
+
+
 @app.command("fetch-crypto")
 def fetch_crypto(
     symbol: str = typer.Option("BTC/USDT", help="Exchange symbol, for example BTC/USDT."),

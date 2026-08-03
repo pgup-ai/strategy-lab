@@ -39,6 +39,9 @@ strategy_lab = ["backtests/assets/*.js"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src", "."]
+markers = [
+  "db: requires a reachable Postgres instance",
+]
 
 [tool.ruff]
 line-length = 100

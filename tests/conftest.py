@@ -28,3 +28,32 @@ def synthetic_ohlcv(n: int = 400, seed: int = 7, freq: str = "15min") -> pd.Data
 @pytest.fixture
 def ohlcv() -> pd.DataFrame:
     return synthetic_ohlcv()
+
+
+def _postgres_reachable() -> bool:
+    import socket
+    from urllib.parse import urlparse
+
+    from strategy_lab.config import settings
+
+    parsed = urlparse(settings.database_url.replace("postgresql+psycopg", "postgresql"))
+    sock = socket.socket()
+    sock.settimeout(1.5)
+    try:
+        sock.connect((parsed.hostname or "localhost", parsed.port or 5432))
+        return True
+    except OSError:
+        return False
+    finally:
+        sock.close()
+
+
+def pytest_collection_modifyitems(config, items):
+    if _postgres_reachable():
+        return
+    skip_db = pytest.mark.skip(
+        reason="Postgres not reachable; start it with docker compose up -d postgres"
+    )
+    for item in items:
+        if "db" in item.keywords:
+            item.add_marker(skip_db)

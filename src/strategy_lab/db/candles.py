@@ -6,9 +6,9 @@ import pandas as pd
 from sqlalchemy import (
     Column,
     DateTime,
-    Float,
     Index,
     MetaData,
+    Numeric,
     String,
     Table,
     UniqueConstraint,
@@ -31,11 +31,11 @@ candles_table = Table(
     Column("symbol", String(64), nullable=False),
     Column("timeframe", String(16), nullable=False),
     Column("timestamp", DateTime(timezone=True), nullable=False),
-    Column("open", Float, nullable=False),
-    Column("high", Float, nullable=False),
-    Column("low", Float, nullable=False),
-    Column("close", Float, nullable=False),
-    Column("volume", Float, nullable=False),
+    Column("open", Numeric(38, 18), nullable=False),
+    Column("high", Numeric(38, 18), nullable=False),
+    Column("low", Numeric(38, 18), nullable=False),
+    Column("close", Numeric(38, 18), nullable=False),
+    Column("volume", Numeric(38, 18), nullable=False),
     Column("source", String(64), nullable=False),
     Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
     Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
@@ -174,13 +174,20 @@ def load_candles(
         query = query.where(candles_table.c.timestamp <= _utc_timestamp(end).to_pydatetime())
 
     query = query.order_by(candles_table.c.timestamp)
-    df = pd.read_sql(query, engine)
+    # coerce_float=False keeps pandas from quietly float-ing the Decimals for us, so
+    # the conversion below is the real (and only) Decimal -> float64 boundary rather
+    # than an implicit pandas default we would be trusting by accident.
+    df = pd.read_sql(query, engine, coerce_float=False)
     if df.empty:
         return pd.DataFrame(columns=["open", "high", "low", "close", "volume"]).set_index(
             pd.DatetimeIndex([], name="timestamp")
         )
 
     df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True)
+    # Storage is NUMERIC (Decimal); every strategy and indicator does float64 pandas
+    # math. This is the one documented place where Decimal becomes float.
+    for column in ("open", "high", "low", "close", "volume"):
+        df[column] = df[column].astype("float64")
     return df.set_index("timestamp")
 
 
