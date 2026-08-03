@@ -4,7 +4,12 @@ The DDL of record lives in :mod:`strategy_lab.storage.migrations` -- these Table
 objects exist so application code can build typed inserts and selects, not to
 create the schema. They deliberately use their own ``MetaData`` so that
 ``db.candles.init_db``'s ``create_all`` cannot emit these tables without the
-CHECK constraints and the append-only trigger that the migrations attach.
+CHECK constraints and the append-only triggers that the migrations attach.
+
+Because these objects are for query building rather than DDL, they deliberately
+mirror only what a query needs: the ``signals`` -> ``runs`` foreign key and the
+``ix_signals_run`` index exist in the database but are not repeated here. Read
+migrations.py, not this file, to know the real shape of the schema.
 """
 
 from __future__ import annotations

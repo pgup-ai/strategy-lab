@@ -58,13 +58,14 @@ MIGRATIONS: tuple[str, ...] = (
 
 
 # pg_trigger.tgtype bitmask: ROW=1, BEFORE=2, INSERT=4, DELETE=8, UPDATE=16,
-# TRUNCATE=32. The append-only trigger is ROW|BEFORE|DELETE|UPDATE, and must stay
-# clear of INSERT -- appending a signal is the one mutation that has to work.
-APPEND_ONLY_TGTYPE = 1 | 2 | 8 | 16  # == 27
+# TRUNCATE=32. Both guards must stay clear of INSERT -- appending a signal is the
+# one mutation that has to work.
+APPEND_ONLY_TGTYPE = 1 | 2 | 8 | 16  # ROW|BEFORE|DELETE|UPDATE == 27
+NO_TRUNCATE_TGTYPE = 2 | 32  # BEFORE|TRUNCATE, statement-level (no ROW bit) == 34
 
 
-def _append_only_trigger_migration() -> str:
-    """Install the append-only trigger, but only when it isn't already correct.
+def _guarded_trigger_migration(name: str, tgtype: int, events: str, level: str) -> str:
+    """Install one trigger on ``signals``, but only when it isn't already correct.
 
     The obvious spelling -- ``DROP TRIGGER IF EXISTS`` followed by an
     unconditional ``CREATE TRIGGER`` -- is safe but not a no-op: measured here,
@@ -86,15 +87,15 @@ BEGIN
   IF NOT EXISTS (
     SELECT 1 FROM pg_trigger
     WHERE tgrelid = 'signals'::regclass
-      AND tgname = 'trg_signals_append_only'
+      AND tgname = '{name}'
       AND NOT tgisinternal
-      AND tgtype = {APPEND_ONLY_TGTYPE}
+      AND tgtype = {tgtype}
       AND tgfoid = 'signals_reject_mutation'::regproc
   ) THEN
-    DROP TRIGGER IF EXISTS trg_signals_append_only ON signals;
-    CREATE TRIGGER trg_signals_append_only
-      BEFORE UPDATE OR DELETE ON signals
-      FOR EACH ROW EXECUTE FUNCTION signals_reject_mutation();
+    DROP TRIGGER IF EXISTS {name} ON signals;
+    CREATE TRIGGER {name}
+      BEFORE {events} ON signals
+      FOR EACH {level} EXECUTE FUNCTION signals_reject_mutation();
   END IF;
 END $$
 """.strip()
@@ -107,6 +108,23 @@ END $$
 # `side` is part of uq_signals_identity on purpose. Strategies like turnaround_v1
 # wire long_exits = short_entries, so one bar legitimately emits both `exit_long`
 # and `enter_short` -- two distinct signals that must both persist.
+#
+# Two triggers make `signals` append-only: a row-level one rejecting UPDATE and
+# DELETE, and a statement-level one rejecting TRUNCATE (which bypasses row-level
+# triggers entirely -- without it, `TRUNCATE signals` silently erases the whole
+# audit trail). There is therefore no ordinary SQL path to remove a signal, and
+# that is the point: a bad run must not be quietly rewritten to look good.
+#
+# Removing signals stays possible, but only deliberately. To clean up test rows:
+#
+#     ALTER TABLE signals DISABLE TRIGGER USER;
+#     DELETE FROM signals WHERE run_id = '...';
+#     ALTER TABLE signals ENABLE TRIGGER USER;
+#
+# That requires table ownership and cannot happen by reflex. Re-enable the
+# triggers in the same transaction -- leaving them disabled silently removes the
+# guarantee, and `migrate` will not notice, because the guard below matches on
+# the trigger's definition and not on whether it is enabled.
 SIGNAL_MIGRATIONS: tuple[str, ...] = (
     """
     CREATE TABLE IF NOT EXISTS runs (
@@ -152,11 +170,20 @@ SIGNAL_MIGRATIONS: tuple[str, ...] = (
     """
     CREATE OR REPLACE FUNCTION signals_reject_mutation() RETURNS trigger AS $$
     BEGIN
-      RAISE EXCEPTION 'signals is append-only; % is not permitted', TG_OP;
+      RAISE EXCEPTION 'signals is append-only; % is not permitted', TG_OP
+        USING HINT = 'Signals are an audit trail of what the system decided. '
+                     'To remove rows deliberately: ALTER TABLE signals DISABLE '
+                     'TRIGGER USER; DELETE ...; ALTER TABLE signals ENABLE '
+                     'TRIGGER USER;';
     END;
     $$ LANGUAGE plpgsql
     """,
-    _append_only_trigger_migration(),
+    _guarded_trigger_migration(
+        "trg_signals_append_only", APPEND_ONLY_TGTYPE, "UPDATE OR DELETE", "ROW"
+    ),
+    _guarded_trigger_migration(
+        "trg_signals_no_truncate", NO_TRUNCATE_TGTYPE, "TRUNCATE", "STATEMENT"
+    ),
 )
 
 
