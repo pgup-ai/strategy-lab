@@ -724,6 +724,50 @@ git commit -m "test: add lookahead poison probe covering all registered strategi
 
 Per decision D4: `Float` → `NUMERIC(38,18)`, plus the columns the live feed needs.
 
+> ## ⚠️ The SQL written below in Step 4 SILENTLY CORRUPTS DATA. Do not run it.
+>
+> `ALTER COLUMN x TYPE NUMERIC(38,18)` uses Postgres' implicit `float8 → numeric` cast,
+> which formats with `%.15g` (`DBL_DIG` = 15 significant digits). A float64 needs **17**
+> to round-trip, so the last two digits are discarded. Verified directly:
+>
+> ```
+> 187.6199951171875::float8::numeric        -> 187.619995117188   ✗ lossy
+> 187.6199951171875::float8::text::numeric  -> 187.6199951171875  ✓ exact
+> ```
+>
+> Running the literal Step 4 statements against this database altered **~14,700 rows** of
+> Yahoo equity data (max relative drift 4.96e-15) while leaving crypto untouched — crypto
+> prices are short decimals that fit in 15 digits, whereas dividend-adjusted equity closes
+> like `87.84837341308594` do not. Signal *counts* survived, but bit-exact reproducibility
+> of the documented ETF research did not. The rows were restored from a pre-migration
+> `pg_dump`.
+>
+> **The correct form casts through text**, because `float8::text` emits the shortest
+> round-trip representation:
+>
+> ```sql
+> ALTER TABLE market_candles ALTER COLUMN close TYPE NUMERIC(38,18)
+>   USING close::text::numeric
+> ```
+>
+> Post-migration verification, all 103,841 rows: `close::float8::text::numeric = close`
+> with **zero** mismatches on both exchanges.
+>
+> **Take a `pg_dump` before running any type-changing migration.** That backup is the only
+> reason this was recoverable — the discarded digits cannot be reconstructed from the
+> corrupted values.
+>
+> Two related findings from the same task:
+>
+> - **`pd.read_sql` defaults to `coerce_float=True`**, so it was already converting Decimal
+>   to float64 and the explicit `astype` loop in `load_candles` was dead code — the
+>   "documented Decimal boundary" was really a pandas default that could change under us.
+>   `load_candles` now passes `coerce_float=False` so the explicit coercion is load-bearing,
+>   with a regression test asserting `float64` dtype.
+> - **`USING` forces a full table rewrite under an ACCESS EXCLUSIVE lock on every run.**
+>   Harmless at 103k rows (sub-second), but it makes `migrate` O(table) forever. The type
+>   changes are now guarded so they only fire when the column is not already `numeric`.
+
 - [ ] **Step 1: Register the `db` marker and skip logic**
 
 In `pyproject.toml`, extend the pytest section:
