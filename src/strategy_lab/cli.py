@@ -9,7 +9,7 @@ from strategy_lab.db import init_db, list_candle_sets, load_candles, upsert_cand
 from strategy_lab.db.candles import normalize_candle_frame
 from strategy_lab.market_data.base import MarketDataIdentity
 from strategy_lab.strategies import get_strategy, list_strategies
-from strategy_lab.universe.etfs import EFT_UNIVERSE, EtfDefinition
+from strategy_lab.universe.etfs import ETF_UNIVERSE
 
 
 app = typer.Typer(help="Fetch candles, store them locally, and run reproducible backtests.")
@@ -90,7 +90,7 @@ def fetch_etf_universe(
     if symbols:
         target = [s.strip().upper() for s in symbols.split(",") if s.strip()]
     else:
-        target = [etf.symbol for etf in EFT_UNIVERSE]
+        target = [etf.symbol for etf in ETF_UNIVERSE]
 
     client = YahooFinanceClient()
     for symbol in target:
@@ -129,7 +129,10 @@ def backtest(
     ),
     exit_mode: ExitMode = typer.Option(
         ExitMode.CONTINUATION_FAILURE,
-        help="Exit behavior: continuation failure, trend failure, setup invalidation stop, or opposite signal only.",
+        help=(
+            "Exit behavior: continuation failure, trend failure, trend structure "
+            "(long-only), setup invalidation stop, or opposite signal only."
+        ),
     ),
     failure_bars: int = typer.Option(
         4,

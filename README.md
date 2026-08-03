@@ -78,6 +78,14 @@ strategy-lab fetch-stock \
   --period 2y
 ```
 
+Weekly candles for the whole configured ETF universe (see `src/strategy_lab/universe/etfs.py`):
+
+```bash
+strategy-lab fetch-etf-universe \
+  --timeframe 1w \
+  --start 2020-01-01
+```
+
 ## Backtest
 
 ```bash
@@ -178,7 +186,23 @@ The `trend_structure` exit mode exits on either:
 - long: close falls below the 40-week SMA (trend break)
 - long: continuation failure (4 consecutive lower closes by default)
 
-No short exits and no opposite signal exits.
+No short exits and no opposite signal exits — the engine rejects `trend_structure` runs
+whose strategy emits short entries, so pair it with `--no-allow-shorts` or a long-only
+strategy.
+
+For the ATR-sized weekly trend rider (exits are built into the strategy, so use the
+pass-through exit mode):
+
+```bash
+strategy-lab backtest \
+  --exchange yahoo \
+  --market-type equity \
+  --symbols SPY,QQQ,SMH,XLF,XLK \
+  --timeframe 1w \
+  --strategy trend_rider_v1_deepseek_v4_pro \
+  --exit-mode opposite_signal_only \
+  --no-allow-shorts
+```
 
 Stock example:
 
@@ -203,27 +227,16 @@ That report directory is the reproducibility boundary for comparing strategy cha
 
 ## Strategies
 
-`turnaround_v1` is the base reversal logic:
+- `turnaround_v1` — base three-candle reversal logic, no filters (control)
+- `turnaround_v2` — v1 plus EMA200 trend and EMA20 extension filters (crypto intraday)
+- `trend_following_deepseek_v4` — weekly long-only ETF trend following; exits delegated
+  to the engine's `trend_structure` mode
+- `trend_rider_v1_deepseek_v4_pro` — weekly long-only ETF trend following with ATR
+  volatility gate, ATR position sizing, and fully internal exits; run with
+  `--exit-mode opposite_signal_only`
 
-- long after two red candles followed by a green candle
-- short after two green candles followed by a red candle
-
-`turnaround_v2` adds the first-phase filters:
-
-- long only above EMA200 trend
-- short only below EMA200 trend
-- long only when price is below EMA20 extension threshold
-- short only when price is above EMA20 extension threshold
-- fees and slippage are applied in the backtest runner
-- continuation failure exits are applied by default in the backtest runner
-
-`trend_following_deepseek_v4` is a weekly-focused long-only strategy:
-
-- turnaround entry (2 red + 1 green) within a macro uptrend
-- long-only above 40-week SMA trend filter
-- entry only when price is below 10-week SMA extension threshold
-- no opposite signal exits — exits are handled entirely by the engine
-- designed for weekly timeframes with equity ETFs (SPY, QQQ, etc.)
+See [STRATEGIES.md](STRATEGIES.md) for the source of truth: per-strategy logic,
+parameters, canonical run commands, the exit-mode compatibility matrix, and known issues.
 
 Indicators and signals are derived at backtest time. The database stores raw candles only.
 
