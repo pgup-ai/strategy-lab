@@ -38,7 +38,7 @@ strategy_lab = ["backtests/assets/*.js"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-pythonpath = ["src"]
+pythonpath = ["src", "."]
 
 [tool.ruff]
 line-length = 100
