@@ -91,6 +91,39 @@ def test_price_fields_carry_the_float64_shortest_repr() -> None:
         assert float(record[name]) == value, name
 
 
+def test_duplicate_timestamps_are_collapsed_last_wins() -> None:
+    """A revised candle for a timestamp already in the batch must be the one stored.
+
+    Fetch windows overlap by design, so a paginated re-fetch routinely hands this
+    function a corrected bar appended after the stale copy of the same timestamp.
+    Matches ``ReplayFeed._ordered``: last wins because the redelivered copy is the
+    corrected one.
+
+    The frame is deliberately >16 rows. numpy falls back to insertion sort (which is
+    stable) below that, so a 9-row version of this test passes even with an unstable
+    sort and proves nothing. At 21 rows a default sort_index() keeps the STALE row.
+    """
+    bars = 20
+    df = pd.DataFrame(
+        {name: [100.0] * bars for name in OHLCV_COLUMNS},
+        index=pd.date_range("2024-01-01", periods=bars, freq="15min", tz="UTC", name="timestamp"),
+    )
+    corrected = df.iloc[[1]].copy()
+    corrected.loc[:, "close"] = 999.0
+
+    records = normalize_candle_frame(
+        pd.concat([df, corrected]),
+        exchange="binance",
+        market_type="spot",
+        symbol="BTC/USDT",
+        timeframe="15m",
+        source="binance",
+    )
+
+    assert len(records) == bars
+    assert records[1]["close"] == Decimal("999.0")
+
+
 def test_missing_prices_fail_loudly() -> None:
     """A None price must raise, not be coerced into some plausible-looking number."""
     df = pd.DataFrame(

@@ -83,7 +83,11 @@ def normalize_candle_frame(
         normalized = normalized.set_index("timestamp")
 
     normalized.index = pd.to_datetime(normalized.index, utc=True)
-    normalized = normalized.sort_index()
+    # Last wins because a re-fetch's redelivered copy is the corrected one, matching
+    # ``ReplayFeed._ordered``. ``kind="stable"`` is what makes "last" mean it:
+    # sort_index() defaults to quicksort, which reorders equal keys above ~16 rows,
+    # so without it an arbitrary duplicate survives and the correction is dropped.
+    normalized = normalized.sort_index(kind="stable")
     normalized = normalized.loc[~normalized.index.duplicated(keep="last")]
 
     records: list[dict] = []
