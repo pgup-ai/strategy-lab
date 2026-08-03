@@ -245,3 +245,23 @@ def test_refetching_does_not_degrade_already_correct_rows(scratch_database_url) 
     # check_exact is mandatory: the default rtol=1e-5 is ~11 orders of magnitude
     # looser than the corruption being tested and passes straight through it.
     pd.testing.assert_frame_equal(before, after, check_exact=True)
+
+
+@pytest.mark.db
+def test_an_empty_range_has_the_same_shape_as_a_populated_one() -> None:
+    """A range with no candles must not hand back a differently-typed frame.
+
+    The populated path coerces to float64 on a UTC index. A bare
+    ``pd.DataFrame(columns=...)`` would return object dtype and a tz-naive index,
+    so an empty range would silently poison a concat or an indicator that the
+    same code handles fine when rows exist.
+    """
+    empty = load_candles(
+        exchange="nosuch", market_type="spot", symbol="NOPE/USDT", timeframe="15m"
+    )
+    assert empty.empty
+    assert list(empty.columns) == list(OHLCV_COLUMNS)
+    for column in OHLCV_COLUMNS:
+        assert empty[column].dtype == "float64", f"{column} is {empty[column].dtype}"
+    assert empty.index.name == "timestamp"
+    assert str(empty.index.tz) == "UTC"

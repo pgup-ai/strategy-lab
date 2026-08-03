@@ -105,6 +105,16 @@ class StrategyRunner:
         All four are read, not the first that matches: strategies that wire
         ``long_exits = short_entries`` reverse on a single bar, and collapsing
         that into one signal would lose either the flatten or the reversal.
+
+        The remaining ``SignalSet`` fields -- ``trend_failure_long_exits``,
+        ``trend_failure_short_exits``, ``position_size`` -- are deliberately not
+        emitted. They are exit *ingredients*, and which of them fire is an
+        ``ExitMode`` decision the backtest engine makes, not a property of the
+        strategy: ``trend_following_deepseek_v4`` needs ``trend_structure`` while
+        ``trend_rider_v1_deepseek_v4_pro`` needs ``opposite_signal_only``.
+        Emitting them unconditionally here would produce a signal stream matching
+        no single backtest configuration. The runner gains an ``ExitMode`` in
+        Phase 1b, when signals start driving positions rather than being recorded.
         """
         stop_fraction = _last_float(signal_set.setup_stop_loss)
         emitted: list[Signal] = []

@@ -22,6 +22,8 @@ from sqlalchemy.dialects.postgresql import insert
 from strategy_lab.config import settings
 
 
+OHLCV_COLUMNS = ("open", "high", "low", "close", "volume")
+
 metadata = MetaData()
 
 candles_table = Table(
@@ -70,7 +72,7 @@ def normalize_candle_frame(
     timeframe: str,
     source: str,
 ) -> list[dict]:
-    required = {"open", "high", "low", "close", "volume"}
+    required = set(OHLCV_COLUMNS)
     missing = required.difference(df.columns)
     if missing:
         raise ValueError(f"Missing candle columns: {sorted(missing)}")
@@ -208,12 +210,17 @@ def load_candles(
     # first, as an implicit default we would then be trusting by accident.
     df = pd.read_sql(query, engine, coerce_float=False)
     if df.empty:
-        return pd.DataFrame(columns=["open", "high", "low", "close", "volume"]).set_index(
-            pd.DatetimeIndex([], name="timestamp")
+        # Same shape as the populated path -- float64 columns on a UTC index. A
+        # bare pd.DataFrame(columns=...) hands back object dtype and a tz-naive
+        # index, so an empty range would silently poison a concat or an indicator
+        # that the same code handles fine when rows exist.
+        return pd.DataFrame(
+            {name: pd.Series(dtype="float64") for name in OHLCV_COLUMNS},
+            index=pd.DatetimeIndex([], tz="UTC", name="timestamp"),
         )
 
     df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True)
-    for column in ("open", "high", "low", "close", "volume"):
+    for column in OHLCV_COLUMNS:
         df[column] = df[column].astype("float64")
     return df.set_index("timestamp")
 
