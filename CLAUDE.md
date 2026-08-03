@@ -33,7 +33,9 @@ Data flow: `market_data/` fetchers (ccxt for crypto, yfinance for stocks) →
 `db.candles.normalize_candle_frame` → Postgres `market_candles` (raw OHLCV only, no
 derived data) → `load_candles` → `strategy.generate_signals(df)` → `SignalSet` →
 `backtests.engine.run_backtest` → vectorbt `Portfolio.from_signals` → timestamped
-directory under `reports/` (`config.json` there is the full reproducibility record).
+directory under `reports/` (`config.json` there is the full reproducibility record;
+`plot.html` is a self-contained TradingView-style report rendered by
+`backtests/report.py`, which inlines the vendored Lightweight Charts asset).
 
 Key design decisions that span multiple files:
 

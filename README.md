@@ -221,7 +221,9 @@ Each run writes a snapshot under `reports/`:
 - `stats.json`
 - `trades.csv`
 - `equity_curve.csv`
-- `plot.html`
+- `plot.html` — self-contained TradingView-style dark report: candlesticks with
+  volume, entry/exit price markers, a crosshair-synced equity pane, and a
+  per-trade table (PnL, holding period, click a row to zoom to that trade)
 
 That report directory is the reproducibility boundary for comparing strategy changes.
 
