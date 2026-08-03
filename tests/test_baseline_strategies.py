@@ -26,6 +26,26 @@ def trending_frame(n: int = 600, slope: float = 0.002) -> pd.DataFrame:
     )
 
 
+def reversal_frame(up_bars: int, down_bars: int = 300) -> pd.DataFrame:
+    """An uptrend spliced onto a sustained downtrend, as one continuous price path."""
+    up_leg = trending_frame(n=up_bars, slope=0.002)
+    down_leg = trending_frame(n=down_bars, slope=-0.004)
+    down_leg.index = pd.date_range(
+        up_leg.index[-1] + pd.Timedelta("15min"),
+        periods=down_bars,
+        freq="15min",
+        tz="UTC",
+        name="timestamp",
+    )
+    # A single factor applied to every OHLC column, so the legs join without a
+    # price gap and each bar keeps its high/low ordering. Rescaling close alone
+    # would leave the other three columns at the pre-splice level.
+    scale = up_leg["close"].iloc[-1] / down_leg["close"].iloc[0]
+    for column in ("open", "high", "low", "close"):
+        down_leg[column] = down_leg[column] * scale
+    return pd.concat([up_leg, down_leg])
+
+
 @pytest.mark.parametrize("name", BASELINES)
 def test_baseline_is_registered(name):
     assert name in list_strategies()
@@ -71,23 +91,7 @@ def test_tsmom_reads_the_lookback_window_not_the_newest_bar():
 
 def test_tsmom_flips_short_when_the_trend_reverses():
     strategy = get_strategy("tsmom")
-    up = trending_frame(n=strategy.warmup_bars + 300, slope=0.002)
-    down = trending_frame(n=300, slope=-0.004)
-    down.index = pd.date_range(
-        up.index[-1] + pd.Timedelta("15min"),
-        periods=len(down),
-        freq="15min",
-        tz="UTC",
-        name="timestamp",
-    )
-    # Splice the down leg onto the end of the up leg as one continuous price
-    # path. A single factor applied to every OHLC column keeps each bar's
-    # high/low ordering intact; rescaling close alone would not.
-    scale = up["close"].iloc[-1] / down["close"].iloc[0]
-    for column in ("open", "high", "low", "close"):
-        down[column] = down[column] * scale
-
-    signals = strategy.generate_signals(pd.concat([up, down]))
+    signals = strategy.generate_signals(reversal_frame(strategy.warmup_bars + 300))
     assert signals.short_entries.iloc[-100:].any(), "expected short exposure after a reversal"
 
 
@@ -105,3 +109,56 @@ def test_ema_cross_is_long_while_fast_leads_slow():
     tail = slice(strategy.warmup_bars, None)
     assert signals.long_entries[tail].all(), "fast EMA must lead slow throughout a clean uptrend"
     assert not signals.short_entries[tail].any()
+
+
+def test_donchian_exit_channel_is_shorter_than_entry_channel():
+    """The asymmetry is the point: enter slowly, leave faster, so trends can be ridden."""
+    strategy = get_strategy("donchian")
+    assert strategy.exit_span < strategy.entry_span
+
+
+def test_donchian_breaks_out_long_on_a_new_channel_high():
+    strategy = get_strategy("donchian")
+    df = trending_frame(n=strategy.warmup_bars + 300)
+    signals = strategy.generate_signals(df)
+
+    tail = slice(strategy.warmup_bars, None)
+    assert signals.long_entries[tail].any()
+    assert not signals.short_entries[tail].any()
+
+
+def test_donchian_uses_only_prior_bars_for_the_channel():
+    """The channel must exclude the current bar.
+
+    Two failure modes, opposite in shape, so both directions are pinned here.
+    Drop ``shift(1)`` and the bar's own high joins the window, which -- because
+    ``high >= close`` by construction -- makes ``close > channel high``
+    unsatisfiable and the strategy never trades. Build the channel from
+    ``close`` instead of ``high`` with no shift and the reverse happens: every
+    bar ties its own window maximum and the comparison degenerates.
+    """
+    strategy = get_strategy("donchian")
+    df = trending_frame(n=strategy.warmup_bars + 200)
+    signals = strategy.generate_signals(df)
+
+    tail = slice(strategy.warmup_bars, None)
+    assert signals.long_entries[tail].any(), "channel appears to include the current bar's high"
+    assert not signals.long_entries[tail].all(), "channel appears to include the current bar"
+
+
+def test_donchian_exits_on_a_reverse_break_of_the_faster_channel():
+    """Both exit series must actually fire, not merely be declared shorter.
+
+    The exits are built exactly like the entries, so a dropped ``shift(1)`` on
+    an exit channel is silent: ``low <= close`` within a bar makes
+    ``close < exit_low`` unsatisfiable and a long would be held forever. Every
+    other donchian test -- and the lookahead probe, and the determinism check --
+    passes with that mutation, so this is the only thing standing behind the
+    exit half of the strategy.
+    """
+    strategy = get_strategy("donchian")
+    signals = strategy.generate_signals(reversal_frame(strategy.warmup_bars + 300))
+
+    tail = slice(strategy.warmup_bars, None)
+    assert signals.short_exits[tail].any(), "a rising close never cleared the exit channel high"
+    assert signals.long_exits.iloc[-100:].any(), "a falling close never broke the exit channel low"
