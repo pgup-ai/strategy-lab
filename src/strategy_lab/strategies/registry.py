@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from strategy_lab.strategies.ema_cross import EmaCross
 from strategy_lab.strategies.trend_following_deepseek_v4 import TrendFollowingDeepseekV4
 from strategy_lab.strategies.trend_rider_v1_deepseek_v4_pro import TrendRiderV1DeepseekV4Pro
 from strategy_lab.strategies.tsmom import Tsmom
@@ -14,6 +15,7 @@ def list_strategies() -> list[str]:
         "trend_following_deepseek_v4",
         "trend_rider_v1_deepseek_v4_pro",
         "tsmom",
+        "ema_cross",
     ]
 
 
@@ -28,4 +30,6 @@ def get_strategy(name: str, *, allow_shorts: bool = True):
         return TrendRiderV1DeepseekV4Pro(allow_shorts=allow_shorts)
     if name == "tsmom":
         return Tsmom(allow_shorts=allow_shorts)
+    if name == "ema_cross":
+        return EmaCross(allow_shorts=allow_shorts)
     raise ValueError(f"Unknown strategy {name!r}. Available: {', '.join(list_strategies())}")

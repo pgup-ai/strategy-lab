@@ -89,3 +89,19 @@ def test_tsmom_flips_short_when_the_trend_reverses():
 
     signals = strategy.generate_signals(pd.concat([up, down]))
     assert signals.short_entries.iloc[-100:].any(), "expected short exposure after a reversal"
+
+
+def test_ema_cross_warmup_covers_ewm_convergence():
+    """ewm(adjust=False) decays its seed rather than dropping it, so warmup is ~20x span."""
+    strategy = get_strategy("ema_cross")
+    assert strategy.warmup_bars >= 20 * strategy.slow_span
+
+
+def test_ema_cross_is_long_while_fast_leads_slow():
+    strategy = get_strategy("ema_cross")
+    df = trending_frame(n=strategy.warmup_bars + 300)
+    signals = strategy.generate_signals(df)
+
+    tail = slice(strategy.warmup_bars, None)
+    assert signals.long_entries[tail].all(), "fast EMA must lead slow throughout a clean uptrend"
+    assert not signals.short_entries[tail].any()
