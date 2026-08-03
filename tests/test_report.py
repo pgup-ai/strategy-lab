@@ -113,6 +113,13 @@ def test_render_report_embeds_library_candles_and_trade_markers() -> None:
     assert "SPY" in html
     payload = _payload(html)
     assert len(payload["candles"]) == len(df)
+    assert payload["identity"] == {
+        "exchange": "yahoo",
+        "market_type": "equity",
+        "symbol": "SPY",
+        "timeframe": "1w",
+    }
+    assert set(payload["colors"]) == {"upDim", "downDim"}
     shapes = [m["shape"] for m in payload["markers"]]
     assert shapes == ["arrowUp", "arrowDown"]
     assert payload["markers"][0]["time"] == int(df.index[1].timestamp())

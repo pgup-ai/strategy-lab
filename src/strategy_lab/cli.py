@@ -181,6 +181,19 @@ def backtest(
         typer.echo(f"Wrote report for {symbol}: {result.report_dir}")
 
 
+@app.command("serve")
+def serve_command(
+    report_root: Path = typer.Option(Path("reports"), help="Backtest report folder to serve."),
+    host: str = typer.Option("127.0.0.1", help="Bind host."),
+    port: int = typer.Option(8750, help="Bind port."),
+) -> None:
+    """Serve reports with a candle-refresh API that live-updates report charts."""
+    from strategy_lab.server import run_server
+
+    typer.echo(f"Serving {report_root} at http://{host}:{port} (Ctrl+C to stop)")
+    run_server(report_root=report_root, host=host, port=port)
+
+
 @app.command("strategies")
 def strategies_command() -> None:
     """List available strategy modules."""

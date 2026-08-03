@@ -21,6 +21,7 @@ strategy-lab fetch-stock --symbol SPY --timeframe 1w --start 2020-01-01
 strategy-lab fetch-etf-universe    # batch-fetch the configured ETF universe (weekly)
 strategy-lab backtest --exchange yahoo --market-type equity --symbols SPY \
   --timeframe 1w --strategy trend_following_deepseek_v4 --exit-mode trend_structure
+strategy-lab serve                 # serve reports/ with the live candle-refresh API
 ```
 
 `backtest` only reads candles already stored in Postgres — fetch first. Database URL

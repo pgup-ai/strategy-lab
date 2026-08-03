@@ -66,7 +66,9 @@ def _pnl_class(value: float) -> str:
     return "up" if value >= 0 else "down"
 
 
-def _build_payload(df: pd.DataFrame, trades: pd.DataFrame, equity: pd.Series) -> dict:
+def _build_payload(
+    df: pd.DataFrame, trades: pd.DataFrame, equity: pd.Series, identity: dict
+) -> dict:
     times = [int(ts.timestamp()) for ts in df.index]
     opens, highs = df["open"].astype(float), df["high"].astype(float)
     lows, closes = df["low"].astype(float), df["close"].astype(float)
@@ -131,6 +133,13 @@ def _build_payload(df: pd.DataFrame, trades: pd.DataFrame, equity: pd.Series) ->
         "zoom": zoom_ranges,
         "barSeconds": bar_seconds,
         "intraday": bar_seconds < 86_400,
+        "identity": {
+            "exchange": str(identity.get("exchange", "")),
+            "market_type": str(identity.get("market_type", "")),
+            "symbol": str(identity.get("symbol", "")),
+            "timeframe": str(identity.get("timeframe", "")),
+        },
+        "colors": {"upDim": _UP_DIM, "downDim": _DOWN_DIM},
     }
 
 
@@ -207,7 +216,9 @@ def render_report_html(
     date_range = f"{df.index.min():%Y-%m-%d} → {df.index.max():%Y-%m-%d}"
 
     payload = json.dumps(
-        _build_payload(df, trades, equity), separators=(",", ":"), allow_nan=False
+        _build_payload(df, trades, equity, identity),
+        separators=(",", ":"),
+        allow_nan=False,
     ).replace("</", "<\\/")
 
     lib_source = (_ASSET_DIR / _LIB_FILENAME).read_text(encoding="utf-8")
@@ -297,6 +308,16 @@ _TEMPLATE = """<!DOCTYPE html>
   .pill.short { color: var(--down); background: rgba(239, 83, 80, 0.12); }
   .status { font-size: 11px; color: var(--ink-dim); }
   .status.open { color: #ff9800; }
+  #live {
+    display: none; align-items: center; gap: 6px; margin-left: 12px;
+    background: var(--panel); border: 1px solid var(--border-soft); border-radius: 999px;
+    color: var(--ink-dim); font-size: 11px; padding: 4px 10px; cursor: pointer;
+  }
+  #live.visible { display: inline-flex; }
+  #live .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--ink-dim); }
+  #live.on .dot { background: var(--up); animation: pulse 2s ease-in-out infinite; }
+  #live.err .dot { background: var(--down); }
+  @keyframes pulse { 50% { opacity: 0.35; } }
   footer { padding: 0 20px 20px; color: var(--ink-dim); font-size: 11px; }
 </style>
 </head>
@@ -304,6 +325,9 @@ _TEMPLATE = """<!DOCTYPE html>
 <header>
   <h1>__SYMBOL__</h1>
   <span class="meta">__META__</span>
+  <button id="live" type="button" title="Refresh now">
+    <span class="dot"></span><span id="live-text">delayed feed</span>
+  </button>
   <span class="range">__RANGE__</span>
 </header>
 <div class="chips">
@@ -482,6 +506,70 @@ __ROWS__
   }
   fitAll();
   requestAnimationFrame(fitAll);
+
+  var livePill = document.getElementById('live');
+  var liveText = document.getElementById('live-text');
+  var liveEnabled = false;
+
+  function setLive(state, text) {
+    livePill.className = 'visible ' + state;
+    liveText.textContent = text;
+  }
+
+  function applyBars(bars) {
+    var last = P.candles[P.candles.length - 1];
+    bars.forEach(function (bar) {
+      if (last && bar.time < last.time) return;
+      var candle = {
+        time: bar.time, open: bar.open, high: bar.high,
+        low: bar.low, close: bar.close
+      };
+      candleSeries.update(candle);
+      volumeSeries.update({
+        time: bar.time, value: bar.volume,
+        color: bar.close >= bar.open ? P.colors.upDim : P.colors.downDim
+      });
+      if (last && bar.time === last.time) {
+        P.candles[P.candles.length - 1] = candle;
+      } else {
+        P.candles.push(candle);
+      }
+      byTimeClose[bar.time] = candle;
+      byTimeVolume[bar.time] = bar.volume;
+      last = P.candles[P.candles.length - 1];
+    });
+    renderLegend(P.candles[P.candles.length - 1]);
+  }
+
+  function refresh() {
+    var last = P.candles[P.candles.length - 1];
+    var params = new URLSearchParams(P.identity);
+    if (last) params.set('after', String(last.time));
+    return fetch('/api/candles?' + params.toString())
+      .then(function (res) {
+        if (!res.ok) throw new Error('HTTP ' + res.status);
+        return res.json();
+      })
+      .then(function (data) {
+        applyBars(data.bars || []);
+        setLive('on', 'delayed · ' + new Date().toLocaleTimeString());
+      });
+  }
+
+  if (location.protocol.indexOf('http') === 0) {
+    refresh()
+      .then(function () {
+        liveEnabled = true;
+        setInterval(function () {
+          refresh().catch(function () { setLive('err', 'feed error'); });
+        }, 60000);
+      })
+      .catch(function () { /* no API behind this page: stay static */ });
+    livePill.addEventListener('click', function () {
+      if (!liveEnabled) return;
+      refresh().catch(function () { setLive('err', 'feed error'); });
+    });
+  }
 })();
 </script>
 </body>
