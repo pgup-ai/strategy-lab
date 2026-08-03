@@ -51,9 +51,8 @@ class MarketDataFeed(Protocol):
     """Contract shared by live exchange feeds and the Postgres replay feed.
 
     Implementations MUST yield bars in ascending ts_open_ms order and MUST NOT
-    yield the same (instrument, timeframe, ts_open_ms, is_closed) twice. Venue
-    quirks — descending REST responses, backward pagination, split recent/history
-    endpoints — are the adapter's problem, not the caller's.
+    yield the same (instrument, timeframe, ts_open_ms, is_closed) twice. The venue
+    quirks listed above are the adapter's problem, not the caller's.
 
     Note for anyone writing the second implementation: ``isinstance(feed,
     MarketDataFeed)`` only proves the member *names* exist. It does not check

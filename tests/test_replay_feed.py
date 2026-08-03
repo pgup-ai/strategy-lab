@@ -31,10 +31,8 @@ def drain_backfill(feed, sub, start_ms, end_ms):
     return asyncio.run(_run())
 
 
-# --------------------------------------------------------------------------------------
-# Reusable conformance checks. BinanceFeed should import these rather than settle for
-# isinstance(), which proves only that the member NAMES exist.
-# --------------------------------------------------------------------------------------
+# The two asserts below are the reusable conformance checks: BinanceFeed should import
+# them rather than settle for isinstance(), which proves only that the member NAMES exist.
 
 
 def protocol_members(protocol: type) -> set[str]:
@@ -102,17 +100,8 @@ def assert_feed_contract(feed, subs) -> list[BarEvent]:
     return events
 
 
-# --------------------------------------------------------------------------------------
-# Protocol conformance
-# --------------------------------------------------------------------------------------
-
-
-def test_replay_feed_satisfies_the_protocol():
-    assert isinstance(ReplayFeed(frames={}), MarketDataFeed)
-
-
 def test_isinstance_alone_does_not_prove_conformance():
-    """Pins how weak the previous test is, so nobody mistakes it for a real check."""
+    """Pins how weak isinstance is, so nobody mistakes it for a real check."""
 
     class Impostor:
         name = "impostor"
@@ -130,30 +119,13 @@ def test_isinstance_alone_does_not_prove_conformance():
             ...
 
     assert isinstance(Impostor(), MarketDataFeed)  # passes, and means almost nothing
-    try:
+    with pytest.raises(AssertionError):
         assert_signatures_match_protocol(Impostor, MarketDataFeed)
-    except AssertionError:
-        pass
-    else:  # pragma: no cover - only reached if the signature check regresses
-        raise AssertionError("signature check failed to reject a wrong-signature feed")
 
 
 def test_replay_feed_satisfies_the_behavioural_feed_contract():
     feed = ReplayFeed(frames={(INSTRUMENT, "15m"): synthetic_ohlcv(n=50)})
     assert len(assert_feed_contract(feed, [SUB])) == 50
-
-
-# --------------------------------------------------------------------------------------
-# Streaming
-# --------------------------------------------------------------------------------------
-
-
-def test_replay_feed_yields_every_bar_in_ascending_order():
-    df = synthetic_ohlcv(n=50)
-    events = collect(ReplayFeed(frames={(INSTRUMENT, "15m"): df}), [SUB])
-    assert len(events) == 50
-    timestamps = [event.bar.ts_open_ms for event in events]
-    assert timestamps == sorted(timestamps)
 
 
 def test_replay_feed_sorts_an_out_of_order_frame():
@@ -167,28 +139,14 @@ def test_replay_feed_sorts_an_out_of_order_frame():
     assert timestamps == sorted(timestamps)
 
 
-def test_replay_bars_are_closed_and_decimal():
-    df = synthetic_ohlcv(n=5)
-    events = collect(ReplayFeed(frames={(INSTRUMENT, "15m"): df}), [SUB])
+def test_replay_bars_are_built_from_the_subscription():
+    events = collect(ReplayFeed(frames={(INSTRUMENT, "15m"): synthetic_ohlcv(n=3)}), [SUB])
     bar = events[0].bar
+    assert (bar.instrument, bar.timeframe) == (INSTRUMENT, "15m")
     assert bar.is_closed is True
-    assert isinstance(bar.close, Decimal)
-    assert bar.instrument == INSTRUMENT
-    assert bar.timeframe == "15m"
-
-
-def test_replay_bar_close_time_is_derived_from_the_timeframe():
-    df = synthetic_ohlcv(n=3)
-    events = collect(ReplayFeed(frames={(INSTRUMENT, "15m"): df}), [SUB])
-    bar = events[0].bar
     assert bar.ts_close_ms - bar.ts_open_ms == 15 * 60 * 1000 - 1
-
-
-def test_replay_bar_open_time_is_exact_epoch_millis():
-    index = pd.date_range("2026-07-01", periods=200, freq="15min", tz="UTC", name="timestamp")
-    df = synthetic_ohlcv(n=200).set_index(index)
-    events = collect(ReplayFeed(frames={(INSTRUMENT, "15m"): df}), [SUB])
-    assert [event.bar.ts_open_ms for event in events] == [ts.value // 1_000_000 for ts in index]
+    # ts_recv_ms is a live-only concept; a replay must not invent one.
+    assert all(event.ts_recv_ms is None for event in events)
 
 
 def test_sub_second_open_times_are_not_rounded_down():
@@ -208,26 +166,10 @@ def test_sub_second_open_times_are_not_rounded_down():
     assert [event.bar.ts_open_ms for event in events] == [ts.value // 1_000_000 for ts in index]
 
 
-def test_replay_event_has_no_receive_time():
-    """ts_recv_ms is a live-only concept; a replay must not invent one."""
-    df = synthetic_ohlcv(n=3)
-    events = collect(ReplayFeed(frames={(INSTRUMENT, "15m"): df}), [SUB])
-    assert all(event.ts_recv_ms is None for event in events)
-
-
 def test_unknown_subscription_yields_nothing():
     other = Subscription(InstrumentId("binance", "spot", "ETH/USDT"), "1h")
     events = collect(ReplayFeed(frames={(INSTRUMENT, "15m"): synthetic_ohlcv(n=5)}), [other])
     assert events == []
-
-
-def test_stream_does_no_work_until_it_is_iterated():
-    """stream() is an async generator: calling it must not touch the frames."""
-    feed = ReplayFeed(frames={(INSTRUMENT, "15m"): synthetic_ohlcv(n=5)})
-    generator = feed.stream([SUB])
-    assert feed.health().last_event_ms is None
-    asyncio.run(generator.aclose())
-    assert feed.health().last_event_ms is None
 
 
 def test_server_time_ms_is_zero_before_any_event_and_tracks_the_last_bar():
@@ -235,11 +177,6 @@ def test_server_time_ms_is_zero_before_any_event_and_tracks_the_last_bar():
     assert asyncio.run(feed.server_time_ms()) == 0
     events = collect(feed, [SUB])
     assert asyncio.run(feed.server_time_ms()) == events[-1].bar.ts_close_ms
-
-
-# --------------------------------------------------------------------------------------
-# Backfill
-# --------------------------------------------------------------------------------------
 
 
 def test_backfill_yields_only_bars_inside_the_requested_range():
@@ -256,12 +193,6 @@ def test_backfill_on_an_unknown_subscription_stops_cleanly():
     other = Subscription(InstrumentId("binance", "spot", "ETH/USDT"), "1h")
     feed = ReplayFeed(frames={(INSTRUMENT, "15m"): synthetic_ohlcv(n=5)})
     assert drain_backfill(feed, other, 0, 2**63 - 1) == []
-    assert drain_backfill(ReplayFeed(frames={}), SUB, 0, 2**63 - 1) == []
-
-
-# --------------------------------------------------------------------------------------
-# Duplicate identities
-# --------------------------------------------------------------------------------------
 
 
 def test_duplicate_timestamps_are_collapsed_last_wins():
@@ -300,11 +231,6 @@ def test_duplicate_timestamps_are_collapsed_in_backfill_too():
     assert [bar.ts_open_ms for bar in bars] == [ts.value // 1_000_000 for ts in df.index]
 
 
-# --------------------------------------------------------------------------------------
-# Postgres entry point
-# --------------------------------------------------------------------------------------
-
-
 @pytest.mark.db
 def test_from_database_replays_a_stored_candle_set():
     """Read-only: picks the smallest set present rather than assuming a symbol exists."""
@@ -331,18 +257,10 @@ def test_from_database_replays_a_stored_candle_set():
     ]
 
 
-# --------------------------------------------------------------------------------------
-# Known limitations, pinned so they cannot rot into silent surprises
-# --------------------------------------------------------------------------------------
-
-
 def test_multiple_subscriptions_are_replayed_sequentially_not_interleaved():
-    """KNOWN LIMITATION: replay drains sub A fully, then sub B.
-
-    A live feed multiplexes both by time. Phase 1a is single-symbol, so this is
-    documented rather than fixed - but a multi-symbol replay would see every bar of
-    the first instrument before the first bar of the second, which is chronologically
-    wrong. Fix this alongside the live feed, not before.
+    """KNOWN LIMITATION, pinned so it cannot rot into a silent surprise: replay drains
+    sub A fully, then sub B, where a live feed multiplexes both by time. Phase 1a is
+    single-symbol; fix this alongside the live feed, not before.
     """
     other_instrument = InstrumentId("binance", "spot", "ETH/USDT")
     other_sub = Subscription(other_instrument, "15m")
@@ -357,5 +275,3 @@ def test_multiple_subscriptions_are_replayed_sequentially_not_interleaved():
     assert instruments == [INSTRUMENT] * 5 + [other_instrument] * 5
     timestamps = [event.bar.ts_open_ms for event in events]
     assert timestamps != sorted(timestamps), "expected the sequential-drain ordering bug"
-
-

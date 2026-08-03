@@ -4,8 +4,9 @@ A backtest calls ``generate_signals`` once over the whole history and reads ever
 row. Replay and live call it per bar against an expanding buffer and read only
 the last row. Those agree only if the strategy is causal -- row *t* of its output
 depends on rows <= *t* of its input and nothing later. Every strategy here is
-assumed causal, the backtest keeps its bulk path because it is ~60,000x faster,
-and this module is the check that the assumption actually holds.
+assumed causal, the backtest keeps its bulk path because it is ~6,600x faster end
+to end (the measurement is in ``StrategyRunner``'s docstring), and this module is
+the check that the assumption actually holds.
 
 A failure here is a bug in the engine or the strategy, never a reason to relax
 the comparison: the whole point of the equality is that it is exact.
@@ -54,6 +55,7 @@ MIN_SIGNALS = 10
 def frame_for(strategy, span: int) -> pd.DataFrame:
     return synthetic_ohlcv(n=strategy.warmup_bars + span)
 
+
 # Declared independently of the runner so this stays an oracle rather than a
 # mirror -- if the runner relabelled or reordered its sides, an imported constant
 # would relabel the expectation with it and the comparison would prove nothing.
@@ -87,8 +89,7 @@ def vectorized_signals(strategy, df: pd.DataFrame) -> list[tuple[int, Side]]:
             continue
         ts_ms = timestamp.value // 1_000_000
         for field_name, side in _SIDE_BY_FIELD:
-            series = getattr(signal_set, field_name, None)
-            if series is not None and bool(series.iloc[position]):
+            if bool(getattr(signal_set, field_name).iloc[position]):
                 out.append((ts_ms, side))
     return out
 

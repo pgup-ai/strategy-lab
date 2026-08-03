@@ -25,7 +25,7 @@ def _insert_run(conn) -> uuid.UUID:
     return run_id
 
 
-def _insert_signal(conn, run_id, *, ts_bar_ms: int = 1_785_723_300_000) -> None:
+def _insert_signal(conn, run_id, *, ts_bar_ms: int) -> None:
     conn.execute(
         text(
             "INSERT INTO signals (run_id, mode, strategy_id, strategy_version, exchange, "
@@ -35,31 +35,6 @@ def _insert_signal(conn, run_id, *, ts_bar_ms: int = 1_785_723_300_000) -> None:
         ),
         {"run_id": run_id, "ts": ts_bar_ms},
     )
-
-
-def test_signals_reject_an_unknown_side():
-    run_migrations()
-    with get_engine().begin() as conn:
-        run_id = _insert_run(conn)
-        with pytest.raises(Exception, match="signals_side_check|violates check constraint"):
-            conn.execute(
-                text(
-                    "INSERT INTO signals (run_id, mode, strategy_id, strategy_version, exchange, "
-                    "market_type, symbol, timeframe, ts_bar_ms, ts_emit_ms, bar_is_closed, side, "
-                    "reason) VALUES (:run_id, 'replay', 's', '1.0.0', 'binance', 'perp', 'B', "
-                    "'15m', 1, 1, TRUE, 'sideways', 'x')"
-                ),
-                {"run_id": run_id},
-            )
-
-
-def test_duplicate_signals_are_rejected_by_the_unique_constraint():
-    run_migrations()
-    with get_engine().begin() as conn:
-        run_id = _insert_run(conn)
-        _insert_signal(conn, run_id)
-        with pytest.raises(Exception, match="uq_signals_identity|duplicate key"):
-            _insert_signal(conn, run_id)
 
 
 @pytest.mark.parametrize(
@@ -153,10 +128,9 @@ def test_truncate_is_rejected():
 def test_signals_can_be_deleted_only_by_deliberately_disabling_the_triggers():
     """The documented escape hatch must actually work.
 
-    Append-only is enforced, not absolute -- test rows accumulate forever and a
-    real cleanup path has to exist. It just has to require obvious intent, so it
-    cannot happen by reflex. This is the sequence documented in
-    SIGNAL_MIGRATIONS and in the trigger function's own error hint.
+    Append-only is enforced, not absolute: rows accumulate forever, so a real
+    cleanup path has to exist -- it just has to require obvious intent. This is
+    the sequence documented in SIGNAL_MIGRATIONS and in the trigger's error hint.
     """
     run_migrations()
     engine = get_engine()

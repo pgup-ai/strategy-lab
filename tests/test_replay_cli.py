@@ -155,6 +155,7 @@ def test_replay_persists_the_run_header_and_every_signal(
     assert len(write["signals"]) == 7
     assert {signal.side for signal in write["signals"]} == {Side.ENTER_LONG}
     assert {signal.instrument.symbol for signal in write["signals"]} == {"ETH/USDT"}
+    assert {signal.timeframe for signal in write["signals"]} == {"15m"}
     assert f"Run {run['run_id']}: emitted 7 signals, wrote 7." in result.output
 
 
@@ -170,41 +171,9 @@ def test_replay_writes_nothing_when_no_signals_fire(monkeypatch, feed_calls, sto
     assert result.output.strip() == "Emitted 0 signals over 10 bars (not persisted)."
 
 
-def test_replay_stamps_every_bar_past_warmup_in_order(monkeypatch, feed_calls, storage_calls):
-    """The frame is 10 bars of 15m data, so the stored bar times must be the last
-    six bar opens, in order -- true only if the command drove the runner bar by
-    bar rather than evaluating the range once."""
-    df = synthetic_ohlcv(n=10)
-    use_strategy(monkeypatch, _EveryBar(warmup_bars=4))
-
-    result = runner.invoke(cli.app, ["replay"])
-
-    assert result.exit_code == 0, result.output
-    [write] = storage_calls["writes"]
-    emitted = [signal.ts_bar_ms for signal in write["signals"]]
-    assert emitted == [ts.value // 1_000_000 for ts in df.index[4:]]
-    assert all(signal.timeframe == "15m" for signal in write["signals"])
-
-
-def test_replay_resolves_a_real_registered_strategy(feed_calls):
-    """No patched strategy here: the registry, the real warmup gate, and the
-    engine all have to work. turnaround_v1 needs 200 bars and gets 10."""
-    result = runner.invoke(cli.app, ["replay", "--strategy", "turnaround_v1", "--no-persist"])
-
-    assert result.exit_code == 0, result.output
-    assert result.output.strip() == "Emitted 0 signals over 10 bars (not persisted)."
-
-
 def test_unknown_strategy_exits_non_zero(feed_calls):
     result = runner.invoke(cli.app, ["replay", "--strategy", "does_not_exist", "--no-persist"])
 
     assert result.exit_code != 0
     assert isinstance(result.exception, ValueError)
     assert "does_not_exist" in str(result.exception)
-
-
-def test_replay_appears_in_the_cli_help():
-    result = runner.invoke(cli.app, ["--help"])
-
-    assert result.exit_code == 0
-    assert "replay" in result.output

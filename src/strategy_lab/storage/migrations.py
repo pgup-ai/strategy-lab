@@ -12,20 +12,16 @@ PRICE_SCALE = 18
 def _price_column_migration(column: str) -> str:
     """Widen one price column to NUMERIC, but only if it isn't already.
 
-    Two things are load-bearing here.
+    ``USING <col>::text::numeric``: Postgres' implicit float8 -> numeric cast
+    formats via "%.15g" (DBL_DIG), silently dropping the 16th-17th significant
+    digits a float64 needs to round-trip. Going through text uses the shortest
+    round-tripping representation instead. Measured on this repo's data, the
+    bare cast altered ~14.7k of 20.9k equity rows; the text cast alters none.
 
-    The ``USING`` clause: Postgres' implicit float8 -> numeric cast formats via
-    "%.15g" (DBL_DIG), which silently drops the 16th-17th significant digits a
-    float64 needs to round-trip. Going through text uses the shortest
-    round-trip representation instead, so every stored float64 survives
-    exactly. Measured on this repo's data: the bare cast altered ~14.7k of
-    20.9k equity rows; the text cast alters none.
-
-    The surrounding guard: ``USING`` forces a full table rewrite under an
-    ACCESS EXCLUSIVE lock, so firing it unconditionally would make every
-    ``migrate`` rewrite the whole table. That is invisible at 100k rows and a
-    multi-second stall once live 1m candles arrive. The guard makes a
-    re-run genuinely a no-op rather than merely a harmless one.
+    The surrounding guard: ``USING`` forces a full table rewrite under an ACCESS
+    EXCLUSIVE lock, so firing it unconditionally would make every ``migrate``
+    rewrite the whole table -- invisible at 100k rows, a multi-second stall once
+    live 1m candles arrive.
     """
     return f"""
 DO $$
@@ -67,15 +63,11 @@ NO_TRUNCATE_TGTYPE = 2 | 32  # BEFORE|TRUNCATE, statement-level (no ROW bit) == 
 def _guarded_trigger_migration(name: str, tgtype: int, events: str, level: str) -> str:
     """Install one trigger on ``signals``, but only when it isn't already correct.
 
-    The obvious spelling -- ``DROP TRIGGER IF EXISTS`` followed by an
-    unconditional ``CREATE TRIGGER`` -- is safe but not a no-op: measured here,
-    the trigger's pg_trigger.oid changes on every re-run, and the pair takes an
-    ACCESS EXCLUSIVE lock on ``signals`` that Postgres holds until the migration
-    transaction commits. Every later statement in that transaction therefore
-    runs with all readers and writers of ``signals`` blocked -- the same trap
-    the market_candles NUMERIC conversion is guarded against, and worse here
-    because a live session is writing signals exactly when someone runs
-    ``migrate``.
+    ``DROP TRIGGER IF EXISTS`` plus an unconditional ``CREATE TRIGGER`` is safe
+    but not a no-op: the pair takes an ACCESS EXCLUSIVE lock on ``signals`` that
+    Postgres holds until the migration transaction commits, so every later
+    statement runs with all readers and writers of ``signals`` blocked -- and a
+    live session may be writing signals exactly when someone runs ``migrate``.
 
     The guard compares the function and the event mask as well as the name, so a
     trigger that is missing, points at the wrong function, or fires on the wrong
@@ -110,21 +102,18 @@ END $$
 # and `enter_short` -- two distinct signals that must both persist.
 #
 # Two triggers make `signals` append-only: a row-level one rejecting UPDATE and
-# DELETE, and a statement-level one rejecting TRUNCATE (which bypasses row-level
-# triggers entirely -- without it, `TRUNCATE signals` silently erases the whole
-# audit trail). There is therefore no ordinary SQL path to remove a signal, and
-# that is the point: a bad run must not be quietly rewritten to look good.
-#
-# Removing signals stays possible, but only deliberately. To clean up test rows:
+# DELETE, and a statement-level one rejecting TRUNCATE, which bypasses row-level
+# triggers entirely. A bad run must not be quietly rewritten to look good, so
+# there is no ordinary SQL path to remove a signal. Deliberate cleanup stays
+# possible, but cannot happen by reflex:
 #
 #     ALTER TABLE signals DISABLE TRIGGER USER;
 #     DELETE FROM signals WHERE run_id = '...';
 #     ALTER TABLE signals ENABLE TRIGGER USER;
 #
-# That requires table ownership and cannot happen by reflex. Re-enable the
-# triggers in the same transaction -- leaving them disabled silently removes the
-# guarantee, and `migrate` will not notice, because the guard below matches on
-# the trigger's definition and not on whether it is enabled.
+# Re-enable them in the same transaction -- `migrate` will not notice they are
+# off, because the guard above matches on the trigger's definition and not on
+# whether it is enabled.
 SIGNAL_MIGRATIONS: tuple[str, ...] = (
     """
     CREATE TABLE IF NOT EXISTS runs (

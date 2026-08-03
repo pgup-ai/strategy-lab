@@ -1,14 +1,8 @@
 """Injectable time source for the event-driven engine.
 
-- The engine must never call ``time.time()`` (or any wall-clock API) directly;
-  it reads time only through a ``Clock`` so that replays stay reproducible.
-- ``LiveClock`` is the only place in this package permitted to read the
-  system clock.
-- ``SimClock`` is monotonic by construction: ``advance_to`` with a timestamp
-  at or before the current time is a no-op, it never rewinds. This lets a
-  websocket reconnect replay already-seen bars without perturbing time.
-- All timestamps are UTC epoch milliseconds as ``int``, matching
-  ``strategy_lab.core.types``.
+The engine must never call ``time.time()`` (or any wall-clock API) directly; it
+reads time only through a ``Clock``, so that a replay's clock comes from its own
+events and stays reproducible. Timestamps are UTC epoch milliseconds as ``int``.
 """
 
 from __future__ import annotations
@@ -31,7 +25,11 @@ class LiveClock:
 
 
 class SimClock:
-    """Deterministic clock driven by event timestamps. Monotonic by construction."""
+    """Deterministic clock driven by event timestamps.
+
+    ``advance_to`` never rewinds: a websocket reconnect replays already-seen bars,
+    whose timestamps are older than the clock's, and time must not follow them back.
+    """
 
     def __init__(self, start_ms: int = 0) -> None:
         self._now_ms = start_ms

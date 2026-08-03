@@ -109,26 +109,22 @@ def normalize_candle_frame(
 def _to_numeric(value) -> Decimal:
     """Bind a price as NUMERIC, not as float8.
 
-    The columns are ``NUMERIC(38,18)``. SQLAlchemy's ``Numeric`` has no bind
-    processor on a dialect with native decimal support, so a Python ``float``
-    reaches psycopg as a float8 parameter and Postgres applies its implicit
-    ``float8 -> numeric`` cast on the way in -- the *same* "%.15g" cast that
-    ``storage/migrations.py`` contorts itself to avoid, dropping the 16th-17th
-    significant digits a float64 needs to round-trip. Measured against the
-    stored data: 58,996 of 519,205 values (11.4%, and 73.7% of AAPL 1h) came
-    back changed, and because ``upsert_candles`` is ON CONFLICT DO UPDATE over
-    deliberately overlapping fetch windows, every re-fetch rewrote correct rows
-    with degraded ones.
+    SQLAlchemy's ``Numeric`` has no bind processor on a dialect with native
+    decimal support, so a Python ``float`` reaches psycopg as a float8 parameter
+    and Postgres applies its implicit ``float8 -> numeric`` cast on the way in --
+    the *same* "%.15g" cast ``storage/migrations.py`` contorts itself to avoid,
+    dropping the 16th-17th significant digits a float64 needs to round-trip.
+    Measured against the stored data: 58,996 of 519,205 values (11.4%, and 73.7%
+    of AAPL 1h) came back changed, and because ``upsert_candles`` is ON CONFLICT
+    DO UPDATE over deliberately overlapping fetch windows, every re-fetch rewrote
+    correct rows with degraded ones.
 
     ``float()`` first, then ``str()``: ``str`` on a float is the shortest
-    representation that round-trips, which is exactly what makes the migration's
-    ``::text::numeric`` correct. ``Decimal(value)`` directly would instead expand
-    to the binary value's full exact expansion (``Decimal(0.1)`` is 55 digits)
-    and lose the tail to the column's scale of 18.
-
-    ``float()`` also keeps the pre-existing failure modes: NaN stays NaN (which
-    NUMERIC represents), and ``None`` still raises ``TypeError`` rather than
-    being written as some plausible-looking number.
+    representation that round-trips, which is what makes the migration's
+    ``::text::numeric`` correct. ``Decimal(value)`` directly would expand to the
+    binary value's full exact form (``Decimal(0.1)`` is 55 digits) and lose the
+    tail to the column's scale of 18. ``float()`` also keeps ``None`` raising
+    ``TypeError`` rather than being written as a plausible-looking number.
     """
     return Decimal(str(float(value)))
 
@@ -202,9 +198,10 @@ def load_candles(
         query = query.where(candles_table.c.timestamp <= _utc_timestamp(end).to_pydatetime())
 
     query = query.order_by(candles_table.c.timestamp)
-    # coerce_float=False keeps pandas from quietly float-ing the Decimals for us, so
-    # the conversion below is the real (and only) Decimal -> float64 boundary rather
-    # than an implicit pandas default we would be trusting by accident.
+    # Storage is NUMERIC (Decimal) and every strategy and indicator does float64
+    # pandas math, so the astype below is the one documented Decimal -> float64
+    # boundary. coerce_float=False keeps pandas from quietly doing that conversion
+    # first, as an implicit default we would then be trusting by accident.
     df = pd.read_sql(query, engine, coerce_float=False)
     if df.empty:
         return pd.DataFrame(columns=["open", "high", "low", "close", "volume"]).set_index(
@@ -212,8 +209,6 @@ def load_candles(
         )
 
     df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True)
-    # Storage is NUMERIC (Decimal); every strategy and indicator does float64 pandas
-    # math. This is the one documented place where Decimal becomes float.
     for column in ("open", "high", "low", "close", "volume"):
         df[column] = df[column].astype("float64")
     return df.set_index("timestamp")

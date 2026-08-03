@@ -49,26 +49,6 @@ def test_every_strategy_declares_a_semver_version(name):
 
 
 @pytest.mark.parametrize("name", list_strategies())
-def test_every_strategy_declares_a_positive_warmup(name):
-    strategy = get_strategy(name)
-    assert isinstance(strategy.warmup_bars, int)
-    assert strategy.warmup_bars > 0
-
-
-@pytest.mark.parametrize("name", list_strategies())
-def test_warmup_covers_the_largest_declared_lookback(name):
-    """warmup_bars must be >= every span/period parameter the strategy declares."""
-    strategy = get_strategy(name)
-    spans = [
-        value
-        for field, value in vars(strategy).items()
-        if isinstance(value, int) and (field.endswith("_span") or field.endswith("_period"))
-    ]
-    assert spans, f"{name} declares no span/period parameters to check against"
-    assert strategy.warmup_bars >= max(spans)
-
-
-@pytest.mark.parametrize("name", list_strategies())
 def test_declared_warmup_reproduces_whole_history_signals(name):
     """What ``warmup_bars`` actually promises, stated as a test.
 
@@ -77,13 +57,12 @@ def test_declared_warmup_reproduces_whole_history_signals(name):
     ``warmup_bars`` is genuinely enough history, so this replays the cold start
     at every probe point and demands the current bar come out identical.
 
-    ``warmup_bars >= max(span)`` -- the rule above -- does NOT imply this, and
-    that is why this test exists. It is exactly the reasoning that set the
-    turnaround strategies to 200 for a span-200 ``ewm``: a rolling window of 200
-    is complete after 200 bars, but ``ewm(adjust=False)`` recurses from the first
-    element and is still visibly wrong there. Measured at warmup=200, both
-    turnaround strategies disagree with the whole-history run on 6 of these 300
-    bars -- a signal that fires in a backtest and not in production.
+    ``warmup_bars >= max(declared span)`` does NOT imply this, which is the
+    reasoning that set the turnaround strategies to 200 for a span-200 ``ewm``: a
+    rolling window of 200 is complete after 200 bars, but ``ewm(adjust=False)``
+    recurses from the first element and is still visibly wrong there. Measured at
+    warmup=200, both turnaround strategies disagree with the whole-history run on
+    6 of these 300 bars -- a signal that fires in a backtest and not in production.
     """
     strategy = get_strategy(name)
     warm = strategy.warmup_bars

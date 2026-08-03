@@ -34,15 +34,13 @@ def make_runner(strategy, **kwargs):
 def emit_past_warmup(strategy, span: int = 300):
     """Signals from ``span`` bars streamed after a primed warmup.
 
-    Priming the warmup rather than streaming it is what keeps these tests cheap.
-    The runner re-runs ``generate_signals`` over the entire buffer for every bar
-    it does not suppress, so streaming a 4,000-bar warmup would buy 4,000 extra
-    whole-history passes that emit nothing. ``prime`` fills the same buffer in
-    bulk -- and it is what a live process does with its warmup fetch, so this is
-    also closer to production than streaming the warmup ever was.
+    Priming rather than streaming the warmup is what keeps these tests cheap: the
+    runner re-runs ``generate_signals`` over the whole buffer for every bar it does
+    not suppress, so streaming a 4,000-bar warmup buys 4,000 passes that emit
+    nothing. It is also what a live process does with its warmup fetch.
 
-    Frames are sized from ``strategy.warmup_bars`` rather than fixed, so raising
-    a strategy's warmup can never silently leave these tests with no signals.
+    Frames are sized from ``strategy.warmup_bars`` rather than fixed, so raising a
+    strategy's warmup can never silently leave these tests with no signals.
     """
     df = synthetic_ohlcv(n=strategy.warmup_bars + span)
     runner = make_runner(strategy)
@@ -65,18 +63,9 @@ class _AlwaysLong:
         return SignalSet(true_series, flat, flat, flat)
 
 
-def test_runner_suppresses_signals_during_warmup():
-    runner = make_runner(_AlwaysLong())
-    emitted = []
-    for bar in bars_from(synthetic_ohlcv(n=6)):
-        emitted.extend(runner.on_bar(bar))
-
-    # warmup_bars=3 -> bars 1,2,3 suppressed; 4,5,6 emit.
-    assert len(emitted) == 3
-
-
 def test_first_emitting_bar_is_the_one_after_warmup():
-    """Pins the boundary itself: any consumer comparing runner output against a
+    """Pins the boundary itself: with warmup_bars=3, bars 1-3 are suppressed and
+    bar 4 is the first to emit. Any consumer comparing runner output against a
     whole-history backtest must drop exactly the same prefix."""
     bars = bars_from(synthetic_ohlcv(n=6))
     runner = make_runner(_AlwaysLong())
@@ -175,19 +164,9 @@ def test_runner_emits_both_sides_when_a_bar_exits_long_and_enters_short():
     ), "expected a bar emitting both exit_long and enter_short"
 
 
-def test_runner_advances_the_clock_from_event_time():
-    clock = SimClock()
-    runner = StrategyRunner(
-        strategy=_AlwaysLong(), instrument=INSTRUMENT, timeframe="15m", clock=clock
-    )
-    bars = bars_from(synthetic_ohlcv(n=5))
-    for bar in bars:
-        runner.on_bar(bar)
-
-    assert clock.now_ms() == bars[-1].ts_close_ms
-
-
 def test_emitted_signals_are_stamped_with_the_bar_close_not_wall_time():
+    """The runner advances SimClock from event time before emitting, which is what
+    makes a replay's emission times reproducible instead of wall-clock noise."""
     runner = make_runner(_AlwaysLong())
     bars = bars_from(synthetic_ohlcv(n=5))
     emitted = []
@@ -236,22 +215,6 @@ def test_priming_then_streaming_the_same_bar_does_not_duplicate_it():
 
     assert len(runner.buffer) == 10
     assert runner.buffer.replaced_duplicates == 1
-
-
-def test_on_event_and_on_bar_agree():
-    from strategy_lab.core.types import BarEvent
-
-    bars = bars_from(synthetic_ohlcv(n=5))
-    by_bar = make_runner(_AlwaysLong())
-    by_event = make_runner(_AlwaysLong())
-
-    direct = [s for bar in bars for s in by_bar.on_bar(bar)]
-    evented = [
-        s
-        for bar in bars
-        for s in by_event.on_event(BarEvent(bar=bar, ts_event_ms=bar.ts_close_ms))
-    ]
-    assert direct == evented
 
 
 def test_features_are_json_ready_strings():

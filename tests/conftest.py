@@ -25,11 +25,6 @@ def synthetic_ohlcv(n: int = 400, seed: int = 7, freq: str = "15min") -> pd.Data
     )
 
 
-@pytest.fixture
-def ohlcv() -> pd.DataFrame:
-    return synthetic_ohlcv()
-
-
 def _postgres_reachable() -> bool:
     import socket
     from urllib.parse import urlparse

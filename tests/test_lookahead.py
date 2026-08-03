@@ -80,7 +80,7 @@ POISON_PROFILES = (
 
 
 def probe_frame(warm: int, seed: int = 7) -> pd.DataFrame:
-    """A frame with PROBE_SPAN usable probe points past ``warm``."""
+    """A frame with PROBE_SPAN probe-able bars past ``warm``."""
     return synthetic_ohlcv(n=warm + PROBE_SPAN, seed=seed)
 
 
@@ -153,7 +153,7 @@ def test_registered_strategies_do_not_look_ahead(name):
     assert offenders == [], f"{name} used future data at (profile, bar index) {offenders}"
 
 
-# --- The probe must be able to fail. These three strategies prove it. ---
+# The probe is only worth having if it can fail. These three strategies prove it can.
 
 
 @dataclass(frozen=True)
@@ -220,7 +220,7 @@ def test_directional_profile_adds_detection_margin():
     """The second profile earns its place on candle-direction lookahead.
 
     Note the flat profile is NOT blind to this cheat -- measured over 40 seeds it always
-    detects it at least once, so the gate was never walkable at PROBE_BARS. What the
+    detects it at least once, so the gate was never walkable at PROBE_SPAN. What the
     directional profile buys is margin: it fires at strictly more probe points (40/40
     seeds), which is what keeps detection robust if the frame or step is ever tightened.
     """

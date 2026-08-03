@@ -28,22 +28,20 @@ class StrategyRunner:
     On every closed bar it calls ``strategy.generate_signals(full_buffer)`` and
     reads the LAST row. Because the strategy is causal -- row *t* of its output
     depends only on rows <= *t* of its input -- that value equals what a
-    whole-history backtest would produce for the same bar. That equality is the
-    whole point: it is what makes backtest, replay, and live one code path
-    instead of three implementations that drift.
+    whole-history backtest would produce for the same bar, which is what makes
+    backtest, replay, and live one code path instead of three that drift.
 
-    The adapter is therefore only as sound as the causality it assumes. A
-    strategy that peeked forward (``shift(-1)``, ``bfill``, a centred rolling
-    window) would still run here, just with different output than the backtest,
-    and nothing in this class would notice. ``tests/test_lookahead.py`` is the
-    check that keeps that honest.
+    The adapter is therefore only as sound as the causality it assumes. A strategy
+    that peeked forward (``shift(-1)``, ``bfill``, a centred rolling window) would
+    still run here, just disagreeing with the backtest, and nothing in this class
+    would notice. ``tests/test_lookahead.py`` keeps that honest.
 
     Cost, measured end to end on the real 83,348-bar BTC/USDT 15m set: the
     whole-history call takes 0.39 s, a full bar-by-bar replay of the same range
-    takes ~43 minutes. Per bar the strategy call is ~4.3 ms, which is free live
-    (one bar per timeframe interval) and quadratic in replay, since every bar
-    re-runs the strategy over the whole buffer. That gap is why the backtest
-    keeps its bulk path and why ``--limit-bars`` exists on ``replay``.
+    ~43 minutes. Per bar that is ~4.3 ms, free live (one bar per timeframe
+    interval) but quadratic in replay, since every bar re-runs the strategy over
+    the whole buffer. That gap is why the backtest keeps its bulk path and why
+    ``--limit-bars`` exists on ``replay``.
     """
 
     def __init__(
@@ -65,15 +63,14 @@ class StrategyRunner:
     def prime(self, history: pd.DataFrame) -> None:
         """Load warmup history without emitting signals.
 
-        Rows become bars through the same ``_row_to_bar`` the replay feed uses,
-        so a primed bar and a streamed bar are byte-identical for the same row --
-        including ``ts_open_ms``, which must be the exact millisecond rather than
-        approximately right: it is the bar's identity for dedup and for the
-        replay/live equivalence check.
+        Rows become bars through the same ``_row_to_bar`` the replay feed uses, so
+        a primed bar and a streamed bar are byte-identical for the same row --
+        including ``ts_open_ms``, which is the bar's identity for dedup and so must
+        be the exact millisecond rather than approximately right.
 
-        Sorting is stable so that when the same timestamp appears twice, the last
-        row the caller supplied is the one the buffer keeps -- the same last-wins
-        rule as ``ReplayFeed._ordered`` and ``normalize_candle_frame``.
+        Sorting is stable so that a repeated timestamp keeps the last row the
+        caller supplied -- the same last-wins rule as ``ReplayFeed._ordered`` and
+        ``normalize_candle_frame``.
         """
         bar_ms = timeframe_to_millis(self.timeframe)
         for timestamp, row in history.sort_index(kind="stable").iterrows():
@@ -86,19 +83,16 @@ class StrategyRunner:
         if not bar.is_closed and not self.allow_forming_bars:
             return ()
 
-        # Duck-typed on purpose: SimClock advances from event time so a replay is
-        # reproducible, LiveClock has no advance_to and keeps reading the wall
-        # clock. The Clock protocol only promises now_ms, so this stays a
-        # capability check rather than an isinstance test that would reject test
-        # doubles and any future deterministic clock.
+        # A capability check, not an isinstance test: SimClock advances from event
+        # time so a replay is reproducible, LiveClock has no advance_to and keeps
+        # reading the wall clock. The Clock protocol only promises now_ms, so
+        # isinstance here would reject test doubles and any future clock.
         if hasattr(self.clock, "advance_to"):
             self.clock.advance_to(bar.ts_close_ms)
 
         self.buffer.append(bar)
-        # Bar N is the first to emit, where N = warmup_bars + 1: a strategy
-        # declaring 4000 warmup bars is trusted from bar 4001 on. Any consumer
-        # comparing runner output against a whole-history backtest has to drop
-        # the same prefix.
+        # Bar warmup_bars+1 is the first to emit. Any consumer comparing runner
+        # output against a whole-history backtest has to drop the same prefix.
         if len(self.buffer) <= self.strategy.warmup_bars:
             return ()
 
@@ -116,8 +110,7 @@ class StrategyRunner:
         emitted: list[Signal] = []
 
         for field_name, side in _SIDE_BY_FIELD:
-            series = getattr(signal_set, field_name, None)
-            if series is None or not bool(series.iloc[-1]):
+            if not bool(getattr(signal_set, field_name).iloc[-1]):
                 continue
             emitted.append(
                 Signal(

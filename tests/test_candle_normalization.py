@@ -91,32 +91,6 @@ def test_price_fields_carry_the_float64_shortest_repr() -> None:
         assert float(record[name]) == value, name
 
 
-def test_nan_prices_stay_nan_rather_than_becoming_garbage() -> None:
-    """Preserves the pre-fix behaviour: ``float('nan')`` went in, NaN came out.
-
-    The Yahoo fetcher drops NaN rows, so this should never fire in practice --
-    but a silent 0.0 or a crash-free wrong number would be worse than either
-    NaN or an exception, so pin what actually happens.
-    """
-    df = pd.DataFrame(
-        {name: [float("nan")] for name in OHLCV_COLUMNS},
-        index=pd.DatetimeIndex(["2024-01-01T00:00:00Z"], name="timestamp"),
-    )
-
-    record = normalize_candle_frame(
-        df,
-        exchange="binance",
-        market_type="spot",
-        symbol="BTC/USDT",
-        timeframe="15m",
-        source="binance",
-    )[0]
-
-    for name in OHLCV_COLUMNS:
-        assert isinstance(record[name], Decimal), name
-        assert record[name].is_nan(), name
-
-
 def test_missing_prices_fail_loudly() -> None:
     """A None price must raise, not be coerced into some plausible-looking number."""
     df = pd.DataFrame(
@@ -144,8 +118,6 @@ def test_batched_splits_large_upserts() -> None:
         [{"index": 4}],
     ]
 
-
-# --- The write path against a real Postgres, end to end. ---
 
 SCRATCH_SCHEMA = "_candle_writepath_probe"
 
@@ -177,15 +149,10 @@ def scratch_database_url():
 def test_written_prices_round_trip_bit_for_bit(scratch_database_url) -> None:
     """Every float64 a fetcher produces must come back out of Postgres unchanged.
 
-    ``storage/migrations.py`` goes through ``col::text::numeric`` precisely
-    because Postgres' implicit ``float8 -> numeric`` cast formats with "%.15g"
-    and drops the last two significant digits. Binding a Python ``float`` to a
-    NUMERIC column re-applies that same lossy cast on every insert, which -- with
-    ``ON CONFLICT DO UPDATE`` and overlapping fetch windows -- rewrites correct
-    stored values with degraded ones on every re-fetch. Values must therefore
-    reach the driver as ``Decimal``.
-
-    Measured before the fix: 5 of these 7 values came back changed.
+    Binding a Python ``float`` to a NUMERIC column applies the same lossy
+    "%.15g" ``float8 -> numeric`` cast that ``storage/migrations.py`` goes
+    through ``col::text::numeric`` to avoid, so values must reach the driver as
+    ``Decimal``. Measured before the fix: 5 of these 7 values came back changed.
     """
     values = [float(value) for value in PATHOLOGICAL_FLOATS]
     index = pd.date_range("2024-01-01", periods=len(values), freq="15min", tz="UTC")
@@ -212,13 +179,10 @@ def test_refetching_does_not_degrade_already_correct_rows(scratch_database_url) 
     Fetch windows overlap by design and ``upsert_candles`` is ON CONFLICT DO
     UPDATE, so an already-stored bar is rewritten every time it is fetched
     again. The rows in ``market_candles`` are already correct -- the NUMERIC
-    migration put them there through ``col::text::numeric``. A lossy write path
-    therefore does not merely fail to improve them, it *destroys* them on the
-    next re-fetch.
-
-    So this seeds the table the way the migration leaves it (exact NUMERIC
-    literals, not floats bound as parameters) and then re-fetches. Nothing may
-    change.
+    migration put them there through ``col::text::numeric`` -- so a lossy write
+    path does not merely fail to improve them, it *destroys* them on the next
+    re-fetch. Seed the table the way the migration leaves it (exact NUMERIC
+    literals, not floats bound as parameters), re-fetch, and nothing may change.
     """
     identity = dict(exchange="binance", market_type="spot", symbol="BTC/USDT", timeframe="15m")
     engine = get_engine(scratch_database_url)

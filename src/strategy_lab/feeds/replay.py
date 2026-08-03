@@ -15,22 +15,15 @@ FrameKey = tuple[InstrumentId, str]
 
 @dataclass
 class ReplayFeed:
-    """Replays stored candles as BarEvents. Satisfies the same protocol as a live feed.
+    """Replays stored candles as BarEvents; the runner cannot tell this from a websocket.
 
-    This is the injection point that makes backtest, replay, and live share one
-    strategy code path: the runner cannot tell this apart from a websocket.
+    Duplicate timestamps are collapsed last-wins -- see :func:`_ordered`.
 
-    Duplicate timestamps are collapsed last-wins, deliberately: the protocol forbids
-    yielding one bar identity twice, and a redelivered bar is the corrected one. See
-    :func:`_ordered`.
-
-    Known limitation, pinned by a test in ``tests/test_replay_feed.py``:
-
-    - **Subscriptions are drained sequentially, not interleaved by time.**
-      ``stream([a, b])`` yields every bar of ``a`` and only then the first bar of
-      ``b``. A live feed multiplexes both by arrival time, so a multi-symbol replay
-      is chronologically wrong here. Phase 1a is single-symbol; fix this alongside
-      the live feed rather than guessing at the merge semantics now.
+    Known limitation, pinned by a test in ``tests/test_replay_feed.py``: subscriptions
+    are drained sequentially, not interleaved by time. ``stream([a, b])`` yields every
+    bar of ``a`` before the first bar of ``b``, so a multi-symbol replay is
+    chronologically wrong here. Phase 1a is single-symbol; fix this alongside the live
+    feed rather than guessing at the merge semantics now.
     """
 
     frames: dict[FrameKey, pd.DataFrame] = field(default_factory=dict)

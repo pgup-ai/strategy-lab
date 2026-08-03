@@ -1,15 +1,12 @@
 """SQLAlchemy table objects for the run/signal audit trail.
 
-The DDL of record lives in :mod:`strategy_lab.storage.migrations` -- these Table
-objects exist so application code can build typed inserts and selects, not to
-create the schema. They deliberately use their own ``MetaData`` so that
-``db.candles.init_db``'s ``create_all`` cannot emit these tables without the
-CHECK constraints and the append-only triggers that the migrations attach.
-
-Because these objects are for query building rather than DDL, they deliberately
-mirror only what a query needs: the ``signals`` -> ``runs`` foreign key and the
-``ix_signals_run`` index exist in the database but are not repeated here. Read
-migrations.py, not this file, to know the real shape of the schema.
+The DDL of record lives in :mod:`strategy_lab.storage.migrations` -- read that,
+not this file, to know the real shape of the schema. These Table objects are for
+building typed inserts and selects, and deliberately use their own ``MetaData``
+so ``db.candles.init_db``'s ``create_all`` cannot emit these tables without the
+CHECK constraints and append-only triggers the migrations attach. They mirror
+only what a query needs: the ``signals`` -> ``runs`` foreign key and the
+``ix_signals_run`` index exist in the database but are not repeated here.
 """
 
 from __future__ import annotations

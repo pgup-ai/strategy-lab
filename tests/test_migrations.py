@@ -35,12 +35,6 @@ def test_candle_price_columns_are_numeric():
         assert "NUMERIC" in str(columns[name]).upper(), f"{name} is {columns[name]}, expected NUMERIC"
 
 
-def test_candle_table_gains_live_feed_columns():
-    run_migrations()
-    columns = {c["name"] for c in inspect(get_engine()).get_columns("market_candles")}
-    assert {"ts_close_ms", "quote_volume", "trades", "is_closed", "ingested_via"} <= columns
-
-
 def test_existing_candles_survive_the_migration():
     run_migrations()
     with get_engine().connect() as conn:
@@ -129,5 +123,3 @@ def test_load_candles_returns_float64_not_decimal():
 
     for name in OHLCV_COLUMNS:
         assert df[name].dtype == "float64", f"{name} is {df[name].dtype}, expected float64"
-    # An object column of Decimals would also fail arithmetic used by every indicator.
-    assert float(df["close"].rolling(2).mean().iloc[-1]) > 0

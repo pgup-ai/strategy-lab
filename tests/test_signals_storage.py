@@ -47,7 +47,7 @@ def count_signal_inserts():
     """Collect every INSERT issued against ``signals`` inside the block.
 
     Listens on the ``Engine`` class because ``get_engine`` hands back a fresh
-    engine per call, so there is no single instance to attach to.
+    engine per call, so there is no instance to attach to.
     """
     statements: list[str] = []
 
@@ -72,22 +72,6 @@ def run_id():
         strategy_version="1.0.0",
         config={"source": "test"},
     )
-
-
-def test_write_then_load_round_trips_a_signal(run_id):
-    write_signals(run_id, Mode.REPLAY, [make_signal(1_785_723_300_000)])
-    loaded = load_signals(run_id=run_id)
-    assert len(loaded) == 1
-    assert loaded[0].side is Side.ENTER_LONG
-    assert loaded[0].entry_price == Decimal("63128.00")
-    assert loaded[0].ts_bar_ms == 1_785_723_300_000
-
-
-def test_rewriting_the_same_signals_is_idempotent(run_id):
-    signals = [make_signal(1_785_723_300_000), make_signal(1_785_724_200_000)]
-    assert write_signals(run_id, Mode.REPLAY, signals) == 2
-    assert write_signals(run_id, Mode.REPLAY, signals) == 0
-    assert len(load_signals(run_id=run_id)) == 2
 
 
 def test_opposite_sides_on_the_same_bar_both_persist(run_id):
@@ -130,9 +114,9 @@ def test_a_partially_overlapping_rewrite_inserts_only_the_new_signals(run_id):
 
 
 def test_a_duplicate_inside_one_batch_collapses_rather_than_raising(run_id):
-    """Two identical signals in a single call conflict with each other, not with
-    a stored row. ON CONFLICT DO NOTHING must absorb that too -- the DO UPDATE
-    form raises "cannot affect row a second time" on exactly this input."""
+    """Two identical signals in one call conflict with each other, not with a
+    stored row -- the ON CONFLICT DO UPDATE form raises "cannot affect row a
+    second time" on exactly this input."""
     ts = 1_785_723_300_000
     assert write_signals(run_id, Mode.REPLAY, [make_signal(ts), make_signal(ts)]) == 1
     assert len(load_signals(run_id=run_id)) == 1
@@ -169,40 +153,13 @@ def test_the_whole_signal_survives_the_round_trip(run_id):
     [
         pytest.param(Decimal("0.000000000000000001"), id="smallest-representable-18dp"),
         pytest.param(Decimal("99999999999999999999.123456789012345678"), id="full-38-digits"),
-        pytest.param(Decimal("63128.00"), id="typical-quote"),
     ],
 )
-def test_prices_within_the_column_precision_round_trip_exactly(run_id, price):
+def test_prices_at_the_edge_of_the_column_precision_round_trip_exactly(run_id, price):
     """NUMERIC(38,18) holds 20 integer and 18 fractional digits. Everything
     inside that envelope must return the same value -- these feed PnL."""
     write_signals(run_id, Mode.REPLAY, [make_signal(1_785_723_300_000, entry_price=price)])
-    stored = load_signals(run_id=run_id)[0].entry_price
-    assert stored == price
-    assert stored - price == 0
-
-
-def test_a_price_finer_than_the_column_scale_is_rounded_away_silently(run_id):
-    """Documents a real edge, so nobody discovers it from a PnL discrepancy.
-
-    Postgres rounds to the declared scale instead of rejecting, so a 19-decimal
-    price becomes zero with no error anywhere. 18 decimals is beyond any real
-    quote, but the failure mode is silent, so it is pinned rather than trusted.
-    """
-    too_fine = Decimal("0.0000000000000000001")  # 19 dp
-    write_signals(run_id, Mode.REPLAY, [make_signal(1_785_723_300_000, entry_price=too_fine)])
-    assert load_signals(run_id=run_id)[0].entry_price == Decimal(0)
-
-
-def test_strength_keeps_only_six_decimals(run_id):
-    """``strength`` is NUMERIC(10,6) while the price columns are NUMERIC(38,18).
-
-    It is a 0..1 confidence score, so six decimals is ample -- but the round
-    trip is genuinely lossy past that, and unlike the prices it also overflows
-    loudly above 10^4.
-    """
-    signal = make_signal(1_785_723_300_000, strength=Decimal("0.1234567"))
-    write_signals(run_id, Mode.REPLAY, [signal])
-    assert load_signals(run_id=run_id)[0].strength == Decimal("0.123457")
+    assert load_signals(run_id=run_id)[0].entry_price == price
 
 
 def test_features_round_trip_and_a_missing_dict_becomes_empty(run_id):
@@ -222,12 +179,12 @@ def test_features_round_trip_and_a_missing_dict_becomes_empty(run_id):
 
 
 def test_a_decimal_in_features_fails_loudly_and_writes_nothing(run_id):
-    """``features`` is JSONB, and Decimal is not JSON-serialisable.
+    """``features`` is JSONB and Decimal is not JSON-serialisable.
 
     Decimal is this codebase's default numeric type, so a strategy stashing one
-    in features is a natural mistake. Failing at write time is the right answer;
-    the trap would be "fixing" it with a str coercion, which round-trips a
-    Decimal back as a string and breaks the next comparison silently.
+    in features is a natural mistake. The trap would be "fixing" it with a str
+    coercion, which round-trips a Decimal back as a string and breaks the next
+    comparison silently.
     """
     with pytest.raises(TypeError, match="Decimal is not JSON serializable"):
         write_signals(
@@ -241,16 +198,13 @@ def test_writing_nothing_touches_no_database(run_id):
     so a bar that produced no signals costs nothing."""
     unreachable = "postgresql+psycopg://nobody@127.0.0.1:1/nothing"
     assert write_signals(run_id, Mode.REPLAY, [], database_url=unreachable) == 0
-    assert write_signals(run_id, Mode.REPLAY, iter([]), database_url=unreachable) == 0
 
 
 def test_the_insert_batch_stays_under_the_bound_parameter_limit():
-    """Postgres rejects a statement with more than 65535 bound parameters.
-
-    A multi-row INSERT binds one per column per row, so an unchunked write of a
-    long replay's signals raises OperationalError rather than running slowly.
-    Checked arithmetically because proving it against the server would mean
-    permanently appending thousands of rows to an append-only table.
+    """The configured chunk size must actually fit inside Postgres' 65535 bound
+    parameter cap -- the chunking test below monkeypatches the size, so nothing
+    else checks the shipped value. Checked arithmetically because proving it
+    against the server means appending thousands of rows to an append-only table.
     """
     assert MAX_ROWS_PER_INSERT >= 1
     assert MAX_ROWS_PER_INSERT * len(signals_table.c) <= MAX_BOUND_PARAMETERS

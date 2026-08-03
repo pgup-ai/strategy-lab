@@ -207,8 +207,8 @@ def replay_command(
     """Replay stored candles bar-by-bar through the event engine.
 
     Same strategy object and same runner the live path will use; only the feed
-    differs. That is the point -- and it is why this is slow next to ``backtest``:
-    the strategy is re-evaluated on every bar rather than once over the range.
+    differs. That is also why this is slow next to ``backtest`` -- the strategy is
+    re-evaluated on every bar rather than once over the range -- and
     ``tests/test_replay_determinism.py`` is what says the two agree anyway.
     """
     from strategy_lab.core.clock import SimClock
@@ -260,15 +260,14 @@ def replay_command(
     typer.echo(f"Emitted {len(signals)} signals over {len(runner.buffer)} bars (not persisted).")
 
 
+# Both wrappers exist so a test can substitute storage without a database.
 def _create_run(**kwargs):
-    """Indirection so a test can substitute storage without a database."""
     from strategy_lab.storage.signals import create_run
 
     return create_run(**kwargs)
 
 
 def _write_signals(run_id, mode, signals):
-    """Indirection so a test can substitute storage without a database."""
     from strategy_lab.storage.signals import write_signals
 
     return write_signals(run_id, mode, signals)

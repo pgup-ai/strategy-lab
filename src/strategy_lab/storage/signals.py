@@ -1,17 +1,15 @@
 """Write and read the run/signal audit trail.
 
-``signals`` is append-only (see :mod:`strategy_lab.storage.migrations`), so the
-only supported mutation is an insert. Re-running a replay over a range that was
-already recorded must therefore be free rather than an error: every write goes
-through ``ON CONFLICT DO NOTHING`` on ``uq_signals_identity`` and reports how
-many rows were genuinely new.
+``signals`` is append-only (see :mod:`strategy_lab.storage.migrations`), so an
+insert is the only supported mutation, and re-recording a range that was already
+stored has to be free rather than an error: every write goes through ``ON
+CONFLICT DO NOTHING`` on ``uq_signals_identity``.
 """
 
 from __future__ import annotations
 
 import uuid
-from collections.abc import Iterable, Sequence
-from decimal import Decimal
+from collections.abc import Iterable
 
 from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert
@@ -20,12 +18,10 @@ from strategy_lab.core.types import InstrumentId, Mode, Side, Signal
 from strategy_lab.db.candles import get_engine
 from strategy_lab.storage.schema import runs_table, signals_table
 
-# Postgres' wire protocol caps a single statement at 65535 bound parameters, and
-# a multi-row INSERT binds one per column per row. Exceeding it is not a slow
-# path but an OperationalError, so a long replay flushing its signals in one
-# call would simply crash. Deriving the chunk from the table's column count
-# keeps the bound correct if a column is ever added; using every column rather
-# than just the ones _to_row writes leaves headroom on purpose.
+# Postgres caps a statement at 65535 bound parameters and a multi-row INSERT
+# binds one per column per row, so an unchunked write of a long replay's signals
+# raises OperationalError rather than merely running slowly. Deriving the chunk
+# from the column count keeps the bound correct if a column is ever added.
 MAX_BOUND_PARAMETERS = 65535
 MAX_ROWS_PER_INSERT = MAX_BOUND_PARAMETERS // len(signals_table.c)
 
@@ -65,17 +61,13 @@ def write_signals(
     """Insert signals, skipping duplicates. Returns the count actually inserted.
 
     ``RETURNING`` after ``ON CONFLICT DO NOTHING`` emits a row only for a tuple
-    that was really inserted, so the return value is the number of *new*
-    signals, not the number offered. A resumed replay that re-emits a range it
-    already stored therefore reports 0 and changes nothing.
+    that was really inserted, so a resumed replay re-offering a range it already
+    stored reports 0 instead of claiming it discovered those signals again.
 
-    Every ``Signal.features`` value must be JSON-serialisable. A ``Decimal``
-    there raises ``TypeError`` before anything is written -- deliberately, since
-    the alternative is coercing it to a string that would come back as a string
-    and quietly break the next comparison.
-
-    Large batches are split across statements but share one transaction, so a
-    failure part-way through rolls the whole call back.
+    A ``Decimal`` in ``Signal.features`` raises ``TypeError`` before anything is
+    written -- deliberately, since coercing it to a string would round-trip back
+    as a string and break the next comparison silently. Chunks share one
+    transaction, so a failure part-way through rolls the whole call back.
     """
     rows = [_to_row(run_id, mode, signal) for signal in signals]
     if not rows:
@@ -101,14 +93,12 @@ def load_signals(
     timeframe: str | None = None,
     database_url: str | None = None,
 ) -> list[Signal]:
-    """Read signals ordered by ``(ts_bar_ms, id)`` -- bar order, insertion order
-    within a bar, so a reversal bar's exit and entry keep the order they were
-    emitted in.
+    """Read signals ordered by ``(ts_bar_ms, id)`` -- bar order, then insertion
+    order within a bar, so a reversal bar's exit stays ahead of its entry.
 
-    Every filter is optional, but calling this with none of them selects the
-    whole table into memory. ``signals`` is append-only and never pruned, so
-    that set only ever grows; pass at least ``run_id`` outside of ad-hoc
-    inspection.
+    ``signals`` is append-only and never pruned, so calling this with no filters
+    selects an ever-growing table into memory; pass at least ``run_id`` outside
+    of ad-hoc inspection.
     """
     query = select(signals_table).order_by(signals_table.c.ts_bar_ms, signals_table.c.id)
     if run_id is not None:
@@ -156,27 +146,16 @@ def _from_row(row) -> Signal:
         side=Side(row["side"]),
         bar_is_closed=row["bar_is_closed"],
         reason=row["reason"],
-        entry_price=_as_decimal(row["entry_price"]),
-        stop_loss=_as_decimal(row["stop_loss"]),
-        take_profit=_as_decimal(row["take_profit"]),
-        strength=_as_decimal(row["strength"]),
+        # NUMERIC columns arrive from psycopg as Decimal already.
+        entry_price=row["entry_price"],
+        stop_loss=row["stop_loss"],
+        take_profit=row["take_profit"],
+        strength=row["strength"],
         features=row["features"],
     )
 
 
-def _as_decimal(value) -> Decimal | None:
-    """Normalise a NUMERIC column to ``Decimal``.
-
-    Under psycopg this is already a no-op -- NUMERIC arrives as ``Decimal``, so
-    no test can distinguish this from returning the value untouched. It stays as
-    a guard for the day a column changes type or another driver hands back a
-    float or a string, and it routes through ``str`` because
-    ``Decimal(float)`` would expose the binary expansion.
-    """
-    return None if value is None else Decimal(str(value))
-
-
-__all__: Sequence[str] = [
+__all__ = [
     "MAX_BOUND_PARAMETERS",
     "MAX_ROWS_PER_INSERT",
     "create_run",

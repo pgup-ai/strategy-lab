@@ -1,8 +1,4 @@
-"""The bar history a strategy sees, and nothing else.
-
-This is the seam between the event loop (Decimal, epoch milliseconds) and the
-indicator layer (pandas, float64).
-"""
+"""The bar history a strategy sees, and nothing else."""
 
 from __future__ import annotations
 
@@ -25,10 +21,9 @@ class BarBuffer:
     "optimize" this into a bounded window without also proving the strategies
     that run on it are window-safe.
 
-    Values are stored as float64 -- this is the documented Decimal -> float
-    boundary, the same one ``db.candles.load_candles`` crosses. Money never
-    crosses back the other way: prices leaving the engine come from the ``Bar``,
-    not from the frame.
+    This is the seam between the event loop (Decimal) and the indicator layer
+    (float64), the same crossing ``db.candles.load_candles`` makes. Money never
+    crosses back: prices leaving the engine come from the ``Bar``, not the frame.
 
     Two feed pathologies are absorbed silently, because a reconnecting websocket
     produces both routinely: a bar older than the newest one is dropped, and a
@@ -73,8 +68,7 @@ class BarBuffer:
 
         Cached until the next ``append``; invalidating it there is what keeps a
         strategy from being handed a frame that is missing the bar it is being
-        asked about. Callers must treat the result as read-only -- it is the same
-        object every time until the buffer changes.
+        asked about. The cached object is shared, so callers must not mutate it.
         """
         if self._frame is None:
             index = pd.DatetimeIndex(self._timestamps, name="timestamp", tz="UTC")
