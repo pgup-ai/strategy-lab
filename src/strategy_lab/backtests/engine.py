@@ -12,6 +12,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
+from strategy_lab.backtests.report import render_report_html
 from strategy_lab.market_data.base import MarketDataIdentity
 from strategy_lab.strategies.base import SignalSet, Strategy
 from strategy_lab.timeframes import timeframe_to_pandas_freq
@@ -122,7 +123,16 @@ def run_backtest(
     equity.to_frame("equity").to_csv(equity_curve_path)
 
     plot_path = report_dir / "plot.html"
-    pf.plot().write_html(plot_path)
+    plot_path.write_text(
+        render_report_html(
+            df=df,
+            trades=trades,
+            equity=equity,
+            config=config,
+            stats=stats.to_dict(),
+        ),
+        encoding="utf-8",
+    )
 
     return BacktestResult(
         report_dir=report_dir,

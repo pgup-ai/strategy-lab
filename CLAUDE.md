@@ -21,6 +21,7 @@ strategy-lab fetch-stock --symbol SPY --timeframe 1w --start 2020-01-01
 strategy-lab fetch-etf-universe    # batch-fetch the configured ETF universe (weekly)
 strategy-lab backtest --exchange yahoo --market-type equity --symbols SPY \
   --timeframe 1w --strategy trend_following_deepseek_v4 --exit-mode trend_structure
+strategy-lab serve                 # serve reports/ with the live candle-refresh API
 ```
 
 `backtest` only reads candles already stored in Postgres — fetch first. Database URL
@@ -33,7 +34,9 @@ Data flow: `market_data/` fetchers (ccxt for crypto, yfinance for stocks) →
 `db.candles.normalize_candle_frame` → Postgres `market_candles` (raw OHLCV only, no
 derived data) → `load_candles` → `strategy.generate_signals(df)` → `SignalSet` →
 `backtests.engine.run_backtest` → vectorbt `Portfolio.from_signals` → timestamped
-directory under `reports/` (`config.json` there is the full reproducibility record).
+directory under `reports/` (`config.json` there is the full reproducibility record;
+`plot.html` is a self-contained TradingView-style report rendered by
+`backtests/report.py`, which inlines the vendored Lightweight Charts asset).
 
 Key design decisions that span multiple files:
 
