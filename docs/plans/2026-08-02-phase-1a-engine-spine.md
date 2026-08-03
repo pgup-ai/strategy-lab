@@ -21,6 +21,23 @@
 - **Prices and quantities are `Decimal` in `core`/`storage`; `float64` only inside the pandas indicator layer.** Convert with `Decimal(str(x))`, never `Decimal(float)`.
 - Tests must not require network. Tests requiring Postgres are marked `@pytest.mark.db` and skip cleanly when it is unreachable.
 
+### The tests in this plan are a floor, not a ceiling
+
+Every test below was written alongside the implementation it checks, which is exactly the
+condition under which tests document code instead of defending it. Task 1 proved the point:
+the seven tests as written passed unchanged against three separate mutations of the
+implementation, including one that deleted validation on four of five fields.
+
+So for each task, before reporting done, **mutate your own implementation and confirm the
+suite fails.** Pick the two or three changes that would most plausibly slip through review —
+an inverted comparison, a dropped element from a loop's collection, a branch that returns a
+constant — apply each, run the suite, and confirm red. Revert. If a mutant survives, the
+test is decorative: strengthen it before reporting.
+
+Strengthening tests beyond the literal text below is expected and welcome. Weakening an
+assertion to make a test pass is never acceptable — if implementation and test disagree,
+one of them has a bug, and you must say which.
+
 ---
 
 ## File structure
