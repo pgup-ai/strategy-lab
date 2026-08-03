@@ -84,6 +84,28 @@ def test_price_migration_preserves_float64_exactly():
             conn.execute(text(f"DROP TABLE IF EXISTS {scratch}"))
 
 
+def test_rerunning_migrations_does_not_rewrite_the_table():
+    """Idempotent must mean "no-op", not "harmlessly redoes the work".
+
+    The NUMERIC conversion uses a USING cast, which rewrites the whole table
+    under an ACCESS EXCLUSIVE lock. Unguarded, every migrate call pays that
+    cost -- fine at 100k rows, a multi-second exclusive-lock stall once live
+    1m candles arrive. A table rewrite allocates a new relfilenode, so an
+    unchanged relfilenode proves nothing was rewritten.
+    """
+    run_migrations()  # reach the migrated state first
+    with get_engine().connect() as conn:
+        before = conn.execute(text("SELECT pg_relation_filenode('market_candles')")).scalar_one()
+    run_migrations()
+    with get_engine().connect() as conn:
+        after = conn.execute(text("SELECT pg_relation_filenode('market_candles')")).scalar_one()
+
+    assert before == after, (
+        "migrate rewrote market_candles on a re-run; the NUMERIC conversion is "
+        "firing unconditionally instead of checking the column type first"
+    )
+
+
 def test_load_candles_returns_float64_not_decimal():
     """The Decimal -> float64 boundary: strategies do float64 pandas math.
 
