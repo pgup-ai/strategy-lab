@@ -94,7 +94,10 @@ Key design decisions that span multiple files:
   never convert back. Widening a `NUMERIC` column later must cast through
   text (`col::text::numeric`) — Postgres' implicit `float8 → numeric` cast
   silently drops the last two significant digits of a float64 (see
-  `storage/migrations.py`).
+  `storage/migrations.py`). The same cast fires on *every write* that binds a
+  Python `float` to a `NUMERIC` column, so `normalize_candle_frame` emits
+  `Decimal(str(float(x)))`; binding a bare `float` there quietly re-corrupts
+  what the migration fixed, on every re-fetch.
 - **`signals` is append-only**, enforced by two triggers — row-level `BEFORE
   UPDATE OR DELETE` and statement-level `BEFORE TRUNCATE` (`TRUNCATE` bypasses
   row-level triggers, so both are required). There is no ordinary SQL path to

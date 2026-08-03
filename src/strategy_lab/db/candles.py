@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterable
+from decimal import Decimal
 
 import pandas as pd
 from sqlalchemy import (
@@ -94,15 +95,42 @@ def normalize_candle_frame(
                 "symbol": symbol,
                 "timeframe": timeframe,
                 "timestamp": timestamp.to_pydatetime(),
-                "open": float(row["open"]),
-                "high": float(row["high"]),
-                "low": float(row["low"]),
-                "close": float(row["close"]),
-                "volume": float(row["volume"]),
+                "open": _to_numeric(row["open"]),
+                "high": _to_numeric(row["high"]),
+                "low": _to_numeric(row["low"]),
+                "close": _to_numeric(row["close"]),
+                "volume": _to_numeric(row["volume"]),
                 "source": source,
             }
         )
     return records
+
+
+def _to_numeric(value) -> Decimal:
+    """Bind a price as NUMERIC, not as float8.
+
+    The columns are ``NUMERIC(38,18)``. SQLAlchemy's ``Numeric`` has no bind
+    processor on a dialect with native decimal support, so a Python ``float``
+    reaches psycopg as a float8 parameter and Postgres applies its implicit
+    ``float8 -> numeric`` cast on the way in -- the *same* "%.15g" cast that
+    ``storage/migrations.py`` contorts itself to avoid, dropping the 16th-17th
+    significant digits a float64 needs to round-trip. Measured against the
+    stored data: 58,996 of 519,205 values (11.4%, and 73.7% of AAPL 1h) came
+    back changed, and because ``upsert_candles`` is ON CONFLICT DO UPDATE over
+    deliberately overlapping fetch windows, every re-fetch rewrote correct rows
+    with degraded ones.
+
+    ``float()`` first, then ``str()``: ``str`` on a float is the shortest
+    representation that round-trips, which is exactly what makes the migration's
+    ``::text::numeric`` correct. ``Decimal(value)`` directly would instead expand
+    to the binary value's full exact expansion (``Decimal(0.1)`` is 55 digits)
+    and lose the tail to the column's scale of 18.
+
+    ``float()`` also keeps the pre-existing failure modes: NaN stays NaN (which
+    NUMERIC represents), and ``None`` still raises ``TypeError`` rather than
+    being written as some plausible-looking number.
+    """
+    return Decimal(str(float(value)))
 
 
 def upsert_candles(
