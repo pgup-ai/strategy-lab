@@ -176,9 +176,52 @@ SIGNAL_MIGRATIONS: tuple[str, ...] = (
 )
 
 
+# Funding is a cash flow settled on the venue's own schedule and open interest is
+# a point-in-time snapshot, so neither is a candle field and neither belongs as a
+# column on `market_candles`. The settlement interval is per-contract -- 8h for
+# most Binance perps, but not all and not always -- so nothing here encodes one;
+# `funding_time_ms` is stored as the venue reported it and the spacing is a
+# property of the data rather than a rule the schema imposes.
+#
+# `CREATE TABLE/INDEX IF NOT EXISTS` are genuine no-ops on re-run: they take no
+# lock on an already-existing object and never rewrite one, which is what
+# `test_rerunning_migrations_does_not_rewrite_the_table` is defending.
+FUNDING_MIGRATIONS: tuple[str, ...] = (
+    """
+    CREATE TABLE IF NOT EXISTS funding_rates (
+      exchange        TEXT NOT NULL,
+      market_type     TEXT NOT NULL,
+      symbol          TEXT NOT NULL,
+      funding_time_ms BIGINT NOT NULL,
+      funding_rate    NUMERIC(38,18) NOT NULL,
+      mark_price      NUMERIC(38,18),
+      source          TEXT,
+      created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+      CONSTRAINT uq_funding_identity UNIQUE (exchange, market_type, symbol, funding_time_ms)
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS open_interest (
+      exchange           TEXT NOT NULL,
+      market_type        TEXT NOT NULL,
+      symbol             TEXT NOT NULL,
+      ts_ms              BIGINT NOT NULL,
+      open_interest      NUMERIC(38,18) NOT NULL,
+      open_interest_usd  NUMERIC(38,18),
+      source             TEXT,
+      created_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
+      CONSTRAINT uq_open_interest_identity UNIQUE (exchange, market_type, symbol, ts_ms)
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS ix_funding_rates_lookup "
+    "ON funding_rates (symbol, funding_time_ms)",
+    "CREATE INDEX IF NOT EXISTS ix_open_interest_lookup ON open_interest (symbol, ts_ms)",
+)
+
+
 def run_migrations(database_url: str | None = None) -> int:
     """Apply idempotent schema upgrades. Returns the number of statements executed."""
-    statements = MIGRATIONS + SIGNAL_MIGRATIONS
+    statements = MIGRATIONS + SIGNAL_MIGRATIONS + FUNDING_MIGRATIONS
     engine = get_engine(database_url)
     with engine.begin() as conn:
         for statement in statements:
