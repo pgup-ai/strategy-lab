@@ -15,6 +15,8 @@ from strategy_lab.strategies.base import (
 @dataclass(frozen=True)
 class TurnaroundV2:
     name: str = "turnaround_v2"
+    version: str = "1.0.0"
+    warmup_bars: int = 200
     ema_trend_span: int = 200
     ema_extension_span: int = 20
     long_extension: float = 0.99
