@@ -5,6 +5,7 @@ import pandas as pd
 import pytest
 
 from strategy_lab.strategies.registry import get_strategy, list_strategies
+from tests.conftest import synthetic_ohlcv
 
 BASELINES = ("tsmom", "ema_cross", "donchian", "multi_horizon")
 
@@ -162,3 +163,99 @@ def test_donchian_exits_on_a_reverse_break_of_the_faster_channel():
     tail = slice(strategy.warmup_bars, None)
     assert signals.short_exits[tail].any(), "a rising close never cleared the exit channel high"
     assert signals.long_exits.iloc[-100:].any(), "a falling close never broke the exit channel low"
+
+
+def test_multi_horizon_averages_several_lookbacks():
+    strategy = get_strategy("multi_horizon")
+    assert len(strategy.lookbacks) >= 3, "a single-lookback ensemble defeats the purpose"
+    assert strategy.warmup_bars >= max(strategy.lookbacks)
+
+
+def test_multi_horizon_is_long_when_every_horizon_agrees():
+    strategy = get_strategy("multi_horizon")
+    df = trending_frame(n=strategy.warmup_bars + 400)
+    signals = strategy.generate_signals(df)
+
+    tail = slice(strategy.warmup_bars, None)
+    assert signals.long_entries[tail].any()
+    assert not signals.short_entries[tail].any()
+
+
+def test_multi_horizon_score_is_scale_invariant():
+    """Denominating the same series in different units must not move the score."""
+    strategy = get_strategy("multi_horizon")
+    calm = trending_frame(n=strategy.warmup_bars + 200, slope=0.001)
+    rescaled = calm.copy()
+    for column in ("open", "high", "low", "close"):
+        rescaled[column] = rescaled[column] * 10
+
+    calm_score = strategy.generate_signals(calm).metadata["final_score"]
+    rescaled_score = strategy.generate_signals(rescaled).metadata["final_score"]
+    assert calm_score == pytest.approx(rescaled_score, rel=0.05)
+
+
+def test_multi_horizon_divides_the_blend_by_realized_volatility():
+    """Same trailing returns, far more noise, must not score the same.
+
+    Scaling every price by a constant proves nothing here, because
+    ``pct_change`` is scale-invariant on its own -- the blend survives that
+    unchanged even with the normalization deleted. What isolates the
+    denominator is holding the numerator fixed while moving volatility alone.
+
+    An alternating per-bar multiplier does that. Every lookback is even, so bars
+    ``t`` and ``t - lookback`` carry the same multiplier and the trailing return
+    is unchanged to the last bit, while bar-to-bar returns pick up a ~5% zigzag
+    that lifts realized volatility ~160x. Measured: the normalized score falls
+    to 0.6% of the calm one; without the division the two are equal to ten
+    decimal places.
+    """
+    strategy = get_strategy("multi_horizon")
+    assert all(lookback % 2 == 0 for lookback in strategy.lookbacks), (
+        "the alternating multiplier below only cancels out of an even lookback"
+    )
+
+    calm = trending_frame(n=strategy.warmup_bars + 200, slope=0.001)
+    noisy = calm.copy()
+    # Per-bar uniform scaling, so each bar keeps its own high/low ordering.
+    zigzag = np.where(np.arange(len(calm)) % 2 == 0, 1.0, 1.05)
+    for column in ("open", "high", "low", "close"):
+        noisy[column] = noisy[column] * zigzag
+
+    for lookback in strategy.lookbacks:
+        assert calm["close"].pct_change(lookback).iloc[-1] == pytest.approx(
+            noisy["close"].pct_change(lookback).iloc[-1], rel=1e-9
+        ), f"the {lookback}-bar trailing return moved; this would no longer isolate volatility"
+
+    calm_score = strategy.generate_signals(calm).metadata["final_score"]
+    noisy_score = strategy.generate_signals(noisy).metadata["final_score"]
+    assert abs(noisy_score) < 0.1 * abs(calm_score), (
+        f"identical trailing returns scored {noisy_score} at high volatility versus "
+        f"{calm_score} at low; the blend is not being divided by realized volatility"
+    )
+
+
+def test_multi_horizon_blend_is_a_t_statistic_under_the_null():
+    """On a driftless random walk the blended score must sit on the order of 1.
+
+    That is what ``/ (volatility * sqrt(lookback))`` is for: a trailing return
+    grows like ``sqrt(lookback)`` under the null, so dividing it out leaves each
+    horizon a unit-scale t-statistic and every horizon contributes comparably.
+    Both halves of that denominator are load-bearing and the test above only
+    covers one of them -- dropping ``sqrt(lookback)`` alone leaves volatility
+    normalization intact, so identical-return frames still score differently and
+    it passes. Measured RMS over these seeds: 0.71 correct, 6.07 with
+    ``sqrt(lookback)`` dropped (the 192-bar horizon then carries ~2.2x the weight
+    of the 24-bar one), 0.06 with the whole denominator dropped.
+    """
+    strategy = get_strategy("multi_horizon")
+    scores = [
+        strategy.generate_signals(
+            synthetic_ohlcv(n=strategy.warmup_bars + 200, seed=seed)
+        ).metadata["final_score"]
+        for seed in range(30)
+    ]
+    rms = float(np.sqrt(np.mean(np.square(scores))))
+    assert 0.25 < rms < 2.5, (
+        f"blended score has RMS {rms:.3f} on a driftless random walk; a correctly "
+        f"normalized t-statistic is order 1, so the denominator is wrong"
+    )
