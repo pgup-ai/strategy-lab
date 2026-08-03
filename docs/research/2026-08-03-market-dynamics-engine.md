@@ -371,6 +371,8 @@ Newest first. One entry per meaningful step — what was done, what was learned,
 
 | Date | Entry |
 |---|---|
+| 2026-08-03 | **R0 sweep run on 83,348 BTC/USDT 15m bars (2024-01-01 → 2026-05-18). No broad stable region on either baseline.** `donchian` 4×4 grid: stability **−0.029**, 2/16 cells positive, both in the `entry_span=384` corner — an edge-of-grid spike, not a plateau. `tsmom` 1×5 grid: stability **+0.017**, 2/5 positive (`lookback` 24 and 48, also the grid edge), collapsing to −0.92 Sharpe at 96. Both are **gross of costs**: at the engine's own default 10bp/side, the best `tsmom` cell goes from +78.9% to **−100%** (8,545 position changes), and the best `donchian` cell from +25.5% to −16.8%. Buy-and-hold over the same window returned **+81.4% at Sharpe 0.76**, beating every gross cell. Conclusion: these baselines show **no edge over holding on this data**, so the floor the program is gated on is currently buy-and-hold, not a trend rule. |
+| 2026-08-03 | Long-only exit collapse fixed: `tsmom`/`ema_cross`/`multi_horizon` derived `long_exits` from the same series they gated for `short_entries`, so `--no-allow-shorts` emitted 0 long exits (vs 2,889/3,191/2,745 with shorts on) — the long-only ETF half would have been buy-and-hold wearing a strategy's name. |
 | 2026-08-03 | R0–R2 implementation plan written ([docs/plans/2026-08-03-mde-r0-r2.md](../plans/2026-08-03-mde-r0-r2.md)). Measured Binance history depth first: klines and funding reach 2019, **OI only ~30 days** → C1 moved to BLOCKED. |
 | 2026-08-03 | Charter written. Repo decision: one repo, two contracts. Next step fixed as R0 baselines. |
 | 2026-08-03 | Phase 1a merged (PR #4): event engine, replay determinism proven on 83,348 real bars, append-only signal store. |

@@ -192,6 +192,119 @@ def backtest(
         typer.echo(f"Wrote report for {symbol}: {result.report_dir}")
 
 
+@app.command("sweep")
+def sweep_command(
+    symbol: str = typer.Option("BTC/USDT", help="Symbol to sweep."),
+    strategy_name: str = typer.Option("donchian", "--strategy", help="Strategy name."),
+    grid: str = typer.Option(
+        ...,
+        "--grid",
+        help='Parameter grid as JSON, e.g. \'{"entry_span":[48,96],"exit_span":[24,48]}\'.',
+    ),
+    exchange: str = typer.Option("binance", help="Data exchange/source."),
+    market_type: str = typer.Option("spot", help="spot, perp, or equity."),
+    timeframe: str = typer.Option("15m", help="Candle timeframe."),
+    start: str | None = typer.Option(None, help="Optional sweep start time."),
+    end: str | None = typer.Option(None, help="Optional sweep end time."),
+    report_root: Path = typer.Option(Path("reports"), help="Report output folder."),
+) -> None:
+    """Score a strategy across a parameter grid and render the stability surface.
+
+    A single tuned parameter proves nothing; the R0 gate is a broad region where
+    neighbouring parameters behave similarly. The stability score and the
+    heatmap both exist to make a lone spike look like the overfit it is rather
+    than like a result.
+    """
+    import json
+    from dataclasses import asdict
+    from datetime import UTC, datetime
+
+    from strategy_lab.backtests.engine import build_report_dir
+    from strategy_lab.backtests.sweep import stability_score, sweep_parameters
+    from strategy_lab.backtests.sweep_report import render_sweep_html
+
+    parsed_grid = _parse_grid(grid)
+    identity = MarketDataIdentity(
+        exchange=exchange, market_type=market_type, symbol=symbol, timeframe=timeframe
+    )
+    df = load_candles(
+        exchange=exchange,
+        market_type=market_type,
+        symbol=symbol,
+        timeframe=timeframe,
+        start=start,
+        end=end,
+    )
+    if df.empty:
+        _raise_missing_candles(identity)
+
+    try:
+        points = sweep_parameters(
+            df=df, strategy_name=strategy_name, grid=parsed_grid, timeframe=timeframe
+        )
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+
+    score = stability_score(points)
+    config = {
+        "identity": asdict(identity),
+        "strategy": strategy_name,
+        "grid": parsed_grid,
+        "data_start": str(df.index.min()),
+        "data_end": str(df.index.max()),
+        "candle_count": int(len(df)),
+        "generated_at": datetime.now(UTC).isoformat(),
+    }
+
+    report_dir = build_report_dir(report_root, identity, f"{strategy_name}_sweep")
+    report_dir.mkdir(parents=True, exist_ok=False)
+    (report_dir / "sweep.html").write_text(
+        render_sweep_html(points=points, config=config), encoding="utf-8"
+    )
+    (report_dir / "points.json").write_text(
+        json.dumps(
+            {
+                "config": config,
+                "stability_score": score,
+                "points": [asdict(point) for point in points],
+            },
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    positive = sum(1 for point in points if point.sharpe > 0)
+    best = max(points, key=lambda point: point.sharpe)
+    typer.echo(f"Wrote sweep for {symbol}: {report_dir}")
+    typer.echo(
+        f"Stability score: {score:.3f} "
+        f"({positive}/{len(points)} cells with positive Sharpe, best {best.sharpe:+.2f} "
+        f"at {best.params})"
+    )
+
+
+def _parse_grid(raw: str) -> dict[str, list]:
+    import json
+
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise typer.BadParameter(f"--grid is not valid JSON: {exc}") from exc
+
+    if not isinstance(parsed, dict) or not parsed:
+        raise typer.BadParameter(
+            '--grid must be a non-empty JSON object, e.g. \'{"lookback":[24,48,96]}\''
+        )
+    for name, values in parsed.items():
+        if not isinstance(values, list) or not values:
+            raise typer.BadParameter(
+                f"--grid entry {name!r} must be a non-empty list of values, got {values!r}"
+            )
+    return parsed
+
+
 @app.command("replay")
 def replay_command(
     exchange: str = typer.Option("binance", help="Data exchange/source."),

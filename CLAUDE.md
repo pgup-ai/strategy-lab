@@ -21,6 +21,8 @@ strategy-lab fetch-stock --symbol SPY --timeframe 1w --start 2020-01-01
 strategy-lab fetch-etf-universe    # batch-fetch the configured ETF universe (weekly)
 strategy-lab backtest --exchange yahoo --market-type equity --symbols SPY \
   --timeframe 1w --strategy trend_following_deepseek_v4 --exit-mode trend_structure
+strategy-lab sweep --symbol BTC/USDT --timeframe 15m --strategy donchian \
+  --grid '{"entry_span":[48,96,192],"exit_span":[24,48,96]}'
 strategy-lab serve                 # serve reports/ with the live candle-refresh API
 ```
 
@@ -49,6 +51,15 @@ live feed will drive it later through the same protocol, with no change to the
 runner or to strategy code. See
 [the Phase 1a design doc](docs/design/2026-08-02-realtime-trading-framework.md)
 for the full rationale.
+
+A third flow scores a strategy across a *grid* rather than at one setting:
+`sweep_parameters` (`backtests/sweep.py`) rebuilds the strategy per cell with
+`dataclasses.replace`, converts each `SignalSet` to a ±1 position with
+`positions_from_signals`, and reduces the surface to a `stability_score` that
+ranks a broad plateau above a lone spike. `backtests/sweep_report.py` renders it
+as a self-contained heatmap. This path is deliberately vectorbt-free and
+**gross of costs** — it answers "is this parameter region stable", not "what
+would this have earned".
 
 Key design decisions that span multiple files:
 

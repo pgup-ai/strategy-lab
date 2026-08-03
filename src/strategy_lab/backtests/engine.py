@@ -90,7 +90,7 @@ def run_backtest(
         **stop_kwargs,
     )
 
-    report_dir = _build_report_dir(report_root, identity, strategy.name)
+    report_dir = build_report_dir(report_root, identity, strategy.name)
     report_dir.mkdir(parents=True, exist_ok=False)
 
     config = {
@@ -249,7 +249,12 @@ def _stop_kwargs(
     }
 
 
-def _build_report_dir(report_root: Path, identity: MarketDataIdentity, strategy_name: str) -> Path:
+def build_report_dir(report_root: Path, identity: MarketDataIdentity, label: str) -> Path:
+    """Timestamped, identity-stamped output directory for one run's artifacts.
+
+    Shared with the parameter sweep so both write into the same, sortable
+    ``reports/`` layout; ``label`` is what distinguishes them.
+    """
     timestamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
     parts = [
         timestamp,
@@ -257,7 +262,7 @@ def _build_report_dir(report_root: Path, identity: MarketDataIdentity, strategy_
         identity.market_type,
         identity.symbol,
         identity.timeframe,
-        strategy_name,
+        label,
     ]
     return report_root / _slug("_".join(parts))
 
