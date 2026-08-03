@@ -29,6 +29,29 @@ def test_buffer_frame_matches_the_source_dataframe_exactly():
     pd.testing.assert_frame_equal(frame, df[frame.columns], check_freq=False)
 
 
+def test_buffer_retains_every_bar_rather_than_a_rolling_window():
+    """The full-history invariant, asserted directly rather than via its symptoms.
+
+    Nothing else in the suite catches a bounded buffer. A 250-bar cap produces 0
+    signal mismatches out of 8,000 sampled comparisons in the determinism suite
+    (relative ema200 error 6.6e-4) -- so a plausible "memory optimization" ships
+    green while silently making live signals disagree with backtest signals on the
+    ``ewm(adjust=False)`` strategies, which are recursive from bar 0. Asserting
+    unboundedness fails for a cap of *any* size and cannot rot when strategy
+    parameters change.
+    """
+    bars = 5000
+    df = synthetic_ohlcv(n=bars)
+    buffer = BarBuffer()
+    for bar in bars_from(df):
+        buffer.append(bar)
+
+    frame = buffer.frame()
+    assert len(buffer) == bars
+    assert len(frame) == bars
+    assert frame.index[0] == df.index[0]
+
+
 def test_empty_buffer_still_yields_a_utc_ohlcv_frame():
     """An empty DatetimeIndex defaults to tz-naive, which would make the frame's
     dtype depend on how many bars had arrived."""
