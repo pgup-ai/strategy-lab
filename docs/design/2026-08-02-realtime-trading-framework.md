@@ -385,8 +385,17 @@ Historical and live signals land in **one table**, distinguished only by `mode` 
 `(symbol, timeframe, ts_bar_ms, side)`. The `UNIQUE` constraint makes re-running a replay
 idempotent.
 
-Append-only is enforced by a `BEFORE UPDATE OR DELETE` trigger that raises, plus a
-`REVOKE UPDATE, DELETE` on the application role — not by convention.
+Append-only is enforced by database triggers, not by convention — **two** of them, because
+a `BEFORE UPDATE OR DELETE ... FOR EACH ROW` trigger alone does not make a table immutable.
+`TRUNCATE` bypasses row-level triggers entirely (verified against the live database), so it
+needs a second `BEFORE TRUNCATE ... FOR EACH STATEMENT` guard.
+
+The honest statement of the guarantee: **no signal row can be modified or removed by
+ordinary SQL.** `DROP TABLE` and `ALTER TABLE ... DISABLE TRIGGER` still work for a role
+with table ownership — that is deliberate. Deleting audit records must remain possible but
+must require unmistakable intent, so the documented cleanup path is an explicit
+`DISABLE TRIGGER` → `DELETE` → `ENABLE TRIGGER` sequence rather than a bare `DELETE` that
+someone could type by reflex.
 
 Also: `runs`, `orders`, `fills`, `positions_snapshot`, `equity_points`,
 `data_quality_findings`.
