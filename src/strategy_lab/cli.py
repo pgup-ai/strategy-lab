@@ -284,7 +284,9 @@ def fetch_etf_universe(
 
 @app.command("backtest")
 def backtest(
-    symbols: str = typer.Option("BTC/USDT", help="Comma-separated symbols."),
+    symbols: str = typer.Option(
+        "BTC/USDT", "--symbols", "--symbol", help="Comma-separated symbols."
+    ),
     strategy_name: str = typer.Option("turnaround_v2", "--strategy", help="Strategy name."),
     exchange: str = typer.Option("binance", help="Data exchange/source."),
     market_type: str = typer.Option("spot", help="spot, perp, or equity."),
@@ -316,10 +318,21 @@ def backtest(
         max=1.0,
         help="Fraction of capital deployed per trade.",
     ),
+    cost_stress: str = typer.Option(
+        "1",
+        "--cost-stress",
+        help="Comma-separated fee/slippage multiples to compare, for example 1,2,3.",
+    ),
+    funding: bool = typer.Option(
+        True,
+        "--funding/--no-funding",
+        help="Charge stored perp funding at its settlement times.",
+    ),
     report_root: Path = typer.Option(Path("reports"), help="Report output folder."),
 ) -> None:
     """Run a vectorbt backtest for one or more stored symbols."""
     strategy = get_strategy(strategy_name, allow_shorts=allow_shorts)
+    multiples = _parse_cost_stress(cost_stress)
     for symbol in _split_symbols(symbols):
         identity = MarketDataIdentity(
             exchange=exchange,
@@ -337,6 +350,7 @@ def backtest(
         )
         if df.empty:
             _raise_missing_candles(identity)
+        rates = _funding_rates(identity, df) if funding else None
         result = run_backtest(
             df=df,
             strategy=strategy,
@@ -348,8 +362,69 @@ def backtest(
             failure_bars=failure_bars,
             position_pct=position_pct,
             report_root=report_root,
+            funding=rates,
+            cost_stress=multiples,
         )
         typer.echo(f"Wrote report for {symbol}: {result.report_dir}")
+        _echo_costs(result)
+
+
+def _parse_cost_stress(raw: str) -> tuple[float, ...]:
+    try:
+        multiples = tuple(float(part) for part in raw.split(",") if part.strip())
+    except ValueError as exc:
+        raise typer.BadParameter(f"--cost-stress must be comma-separated numbers: {exc}") from exc
+    if not multiples or any(multiple <= 0 for multiple in multiples):
+        raise typer.BadParameter("--cost-stress values must all be > 0, for example 1,2,3")
+    return multiples
+
+
+def _funding_rates(identity: MarketDataIdentity, df) -> "object | None":
+    """Stored funding for a perp, bounded to the candle window.
+
+    A perp backtest that quietly skips funding reports a gross number that reads
+    exactly like a net one -- and on this instrument the carry is roughly the
+    size of buy-and-hold. Missing funding is therefore an error with an explicit
+    opt-out, not a silent zero.
+    """
+    if identity.market_type != "perp":
+        return None
+
+    from strategy_lab.db.funding import load_funding
+
+    rates = load_funding(
+        exchange=identity.exchange,
+        market_type=identity.market_type,
+        symbol=identity.symbol,
+        start=str(df.index.min()),
+        end=str(df.index.max()),
+    )
+    if rates.empty:
+        raise typer.BadParameter(
+            f"No stored funding for {identity.exchange}/perp/{identity.symbol} over "
+            f"{df.index.min()} -> {df.index.max()}.\n\n"
+            "A perp backtest without funding is gross of carry and not a tradeable "
+            "number. Fetch it first:\n"
+            f"strategy-lab fetch-funding --symbol {identity.symbol} --since 2019-09-01\n\n"
+            "Pass --no-funding to run gross of funding on purpose."
+        )
+    return rates["funding_rate"]
+
+
+def _echo_costs(result) -> None:
+    import json
+
+    breakdown = json.loads(result.costs_path.read_text())
+    base = next(row for row in breakdown["stress"] if row["multiple"] == 1.0)
+    typer.echo(
+        f"  gross {base['gross_return_pct']:+.2f}%  "
+        f"fees {base['fees_paid']:,.2f}  slippage {base['slippage_paid']:,.2f}  "
+        f"funding {base['funding_paid']:,.2f}  "
+        f"net {base['net_return_pct']:+.2f}%"
+    )
+    for row in breakdown["stress"]:
+        if row["multiple"] != 1.0:
+            typer.echo(f"  {row['multiple']:g}x costs: net {row['net_return_pct']:+.2f}%")
 
 
 @app.command("sweep")

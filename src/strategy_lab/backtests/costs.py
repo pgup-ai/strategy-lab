@@ -69,14 +69,54 @@ def apply_funding(*, positions: pd.Series, funding: pd.Series) -> pd.Series:
     themselves, so a contract that settles hourly, or changes interval
     mid-history, is handled without a code change.
     """
+    index = _sorted_index(positions)
+    values = np.zeros(len(index), dtype="float64")
+    slot, _, rate = _contained(index, funding)
+    if len(slot):
+        held = positions.to_numpy(dtype="float64")[slot]
+        # Coarse bars hold several settlements -- 8h funding under daily bars
+        # settles three times a day -- so accumulate rather than assign.
+        np.add.at(values, slot, -held * rate)
+    return pd.Series(values, index=index, dtype="float64")
+
+
+def funding_ledger(*, positions: pd.Series, funding: pd.Series) -> pd.DataFrame:
+    """One row per settlement actually charged -- the audit trail behind the total.
+
+    Same containment as :func:`apply_funding`, so the two cannot disagree about
+    which settlements were counted. Funding is the number that decides whether a
+    perp result is tradeable, and a single aggregate is not something a human can
+    check against the venue; this is.
+    """
+    index = _sorted_index(positions)
+    slot, settled, rate = _contained(index, funding)
+    held = positions.to_numpy(dtype="float64")[slot]
+    return pd.DataFrame(
+        {
+            "bar": index[slot],
+            "notional": held,
+            "rate": rate,
+            "cash_flow": -held * rate,
+        },
+        index=pd.Index(settled, name="settled_at"),
+    )
+
+
+def _sorted_index(positions: pd.Series) -> pd.DatetimeIndex:
     index = positions.index
     if not index.is_monotonic_increasing:
         raise ValueError("positions must be sorted by timestamp; containment uses a binary search")
+    return index
 
-    values = np.zeros(len(index), dtype="float64")
+
+def _contained(
+    index: pd.DatetimeIndex, funding: pd.Series
+) -> tuple[np.ndarray, pd.DatetimeIndex, np.ndarray]:
+    """Settlements that fall inside the position window, and the bar each lands on."""
     rates = funding.dropna()
     if rates.empty or len(index) == 0:
-        return pd.Series(values, index=index, dtype="float64")
+        empty = np.empty(0, dtype="int64")
+        return empty, index[:0], np.empty(0, dtype="float64")
 
     settled = pd.DatetimeIndex(rates.index)
     # side="right" minus one is the containing bar: the last bar whose open is
@@ -85,15 +125,7 @@ def apply_funding(*, positions: pd.Series, funding: pd.Series) -> pd.Series:
     # belongs to the previous one.
     slot = index.searchsorted(settled, side="right") - 1
     inside = (slot >= 0) & (settled < _window_end(index))
-    if not inside.any():
-        return pd.Series(values, index=index, dtype="float64")
-
-    held = positions.to_numpy(dtype="float64")[slot[inside]]
-    charged = -held * rates.to_numpy(dtype="float64")[inside]
-    # Coarse bars hold several settlements -- 8h funding under daily bars settles
-    # three times a day -- so accumulate rather than assign.
-    np.add.at(values, slot[inside], charged)
-    return pd.Series(values, index=index, dtype="float64")
+    return slot[inside], settled[inside], rates.to_numpy(dtype="float64")[inside]
 
 
 def _window_end(index: pd.DatetimeIndex) -> pd.Timestamp:
@@ -110,4 +142,4 @@ def _window_end(index: pd.DatetimeIndex) -> pd.Timestamp:
     return index[-1] + span
 
 
-__all__ = ["CostModel", "apply_funding"]
+__all__ = ["CostModel", "apply_funding", "funding_ledger"]

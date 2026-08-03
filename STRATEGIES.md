@@ -242,7 +242,19 @@ R0 baselines (verified against the engine on 5,000 synthetic bars, 2026-08-03):
 ## Engine behavior worth remembering
 
 - **Costs**: default `fees=0.0005` and `slippage=0.0005` per side, `cash=10_000`,
-  `position_pct=0.95`.
+  `position_pct=0.95`. `--cost-stress 1,2,3` re-prices the same signals at 2× and 3×
+  execution frictions and renders the comparison in the report.
+- **Funding is charged on perps, and it is first-order.** `backtest` loads stored
+  funding automatically for `--market-type perp` and *refuses to run* without it —
+  a gross-of-carry perp number reads exactly like a net one, and BTC funding averages
+  +11.65%/yr paid by longs. Pass `--no-funding` to opt out on purpose. It is charged as
+  a discrete cash flow at each venue settlement, matched to the bar whose interval
+  contains it (Binance stamps settlements up to 47 ms late; an equality match drops 43%
+  of them), against the notional held *into* that bar. Cost stress never scales it —
+  funding is a market rate, so tripling it models a different instrument.
+  When funding applies, `stats.json` gains `Funding Paid` and `Net Return [%]`,
+  `equity_curve.csv` becomes the net curve, and `funding.csv` is the per-settlement
+  audit trail. When it does not, every artifact is byte-identical to a pre-costs run.
 - **Sizing is non-compounding**: entry shares = initial cash × `position_pct` × scale ÷
   close. Sizes are anchored to *initial* cash, never to current equity.
 - **Data**: Yahoo OHLC is rescaled by adj close, so ETF series are dividend-adjusted
@@ -252,7 +264,9 @@ R0 baselines (verified against the engine on 5,000 synthetic bars, 2026-08-03):
   per instrument and stick to it.
 - **Reports**: every run writes `reports/<UTC>_<exchange>_<market>_<symbol>_<tf>_<strategy>/`
   with `config.json` (full parameter snapshot), `stats.json`, `trades.csv`,
-  `equity_curve.csv`, `plot.html`. `config.json` is the reproducibility boundary.
+  `equity_curve.csv`, `costs.json`, `plot.html`, plus `funding.csv` when funding
+  applies. `config.json` is the reproducibility boundary; `costs.json` is the
+  gross → fees → slippage → funding → net breakdown at every stress level.
 
 ## Known issues (review of 2026-08-02)
 

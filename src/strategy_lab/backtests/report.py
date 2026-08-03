@@ -16,6 +16,7 @@ _DOWN_DIM = "rgba(239, 83, 80, 0.45)"
 
 _STAT_KEYS = [
     ("Total Return [%]", "Total Return", "signed_pct"),
+    ("Net Return [%]", "Net Return", "signed_pct"),
     ("Benchmark Return [%]", "Benchmark", "signed_pct"),
     ("Win Rate [%]", "Win Rate", "pct"),
     ("Max Drawdown [%]", "Max Drawdown", "pct"),
@@ -64,6 +65,123 @@ def _fmt_stat(value: object, kind: str) -> str:
 
 def _pnl_class(value: float) -> str:
     return "up" if value >= 0 else "down"
+
+
+def _fmt_money(value: float) -> str:
+    return f"{value:,.2f}"
+
+
+def _fmt_multiple(value: float) -> str:
+    return f"{value:g}x"
+
+
+def _cost_chip(label: str, text: str, cls: str = "", extra: str = "") -> str:
+    return (
+        f'<div class="chip{extra}"><span class="chip-label">{escape(label)}</span>'
+        f'<span class="chip-value{cls}">{escape(text)}</span></div>'
+    )
+
+
+def _cost_flow(base: dict, funding_applied: bool) -> str:
+    """Gross minus each cost equals net, spelled out left to right.
+
+    Funding gets its own emphasised chip because it is the cost that decides
+    whether a perp result is tradeable, and the one a reader is most likely to
+    skip past on the way to the headline return.
+    """
+    funding_paid = float(base["funding_paid"])
+    funding_label = "Funding Received" if funding_paid < 0 else "Funding Paid"
+    funding_text = (
+        _fmt_money(abs(funding_paid))
+        if funding_applied
+        else "not modelled"
+    )
+    funding_cls = "" if not funding_applied else (" down" if funding_paid > 0 else " up")
+
+    parts = [
+        _cost_chip(
+            "Gross Return",
+            _fmt_stat(base["gross_return_pct"], "signed_pct"),
+            f" {_pnl_class(float(base['gross_return_pct']))}",
+        ),
+        '<span class="op">&minus;</span>',
+        _cost_chip("Fees", _fmt_money(float(base["fees_paid"]))),
+        '<span class="op">&minus;</span>',
+        _cost_chip("Slippage", _fmt_money(float(base["slippage_paid"]))),
+        '<span class="op">&minus;</span>',
+        _cost_chip(funding_label, funding_text, funding_cls, extra=" key"),
+        '<span class="op">=</span>',
+        _cost_chip(
+            "Net Return",
+            _fmt_stat(base["net_return_pct"], "signed_pct"),
+            f" {_pnl_class(float(base['net_return_pct']))}",
+            extra=" key",
+        ),
+    ]
+    return "\n".join(parts)
+
+
+def _stress_rows(stress: list[dict], funding_applied: bool) -> str:
+    rows = []
+    for row in stress:
+        multiple = float(row["multiple"])
+        net = float(row["net_return_pct"])
+        funding = (
+            _fmt_money(float(row["funding_paid"])) if funding_applied else "—"
+        )
+        marker = ' class="base"' if multiple == 1.0 else ""
+        rows.append(
+            f"<tr{marker}>"
+            f"<td>{escape(_fmt_multiple(multiple))}</td>"
+            f"<td>{escape(_fmt_money(float(row['fees_paid'])))}</td>"
+            f"<td>{escape(_fmt_money(float(row['slippage_paid'])))}</td>"
+            f"<td>{escape(funding)}</td>"
+            f'<td class="{_pnl_class(float(row["gross_return_pct"]))}">'
+            f"{escape(_fmt_stat(row['gross_return_pct'], 'signed_pct'))}</td>"
+            f'<td class="{_pnl_class(net)}">'
+            f"{escape(_fmt_stat(net, 'signed_pct'))}</td>"
+            "</tr>"
+        )
+    return "\n".join(rows)
+
+
+def _cost_section(costs: dict | None) -> str:
+    if not costs or not costs.get("stress"):
+        return ""
+
+    stress = costs["stress"]
+    funding_applied = bool(costs.get("funding_applied"))
+    base = next(row for row in stress if float(row["multiple"]) == 1.0)
+
+    note = (
+        "Funding is charged at each venue settlement against the notional held "
+        "into that bar. It is a market rate, so cost stress scales fees and "
+        "slippage only. The benchmark above is price-only: a perpetual long "
+        "pays this same funding for every bar it is held."
+        if funding_applied
+        else "No funding series was supplied, so these returns are gross of "
+        "carry. On a perpetual future that is not a tradeable number."
+    )
+    table = ""
+    if len(stress) > 1:
+        table = (
+            '<div class="table-wrap cost-table">'
+            "<table><thead><tr>"
+            "<th>Cost stress</th><th>Fees</th><th>Slippage</th><th>Funding</th>"
+            "<th>Gross Return</th><th>Net Return</th>"
+            "</tr></thead><tbody>"
+            f"{_stress_rows(stress, funding_applied)}"
+            "</tbody></table></div>"
+        )
+    warn = "" if funding_applied else ' <span class="warn">gross of funding</span>'
+    return (
+        '<section class="costs">'
+        f"<h2>Costs{warn}</h2>"
+        f'<div class="flow">{_cost_flow(base, funding_applied)}</div>'
+        f'<p class="note">{escape(note)}</p>'
+        f"{table}"
+        "</section>"
+    )
 
 
 def _build_payload(
@@ -181,16 +299,24 @@ def _trade_rows(trades: pd.DataFrame) -> str:
 
 
 def _stat_chips(stats: dict) -> str:
+    # A funding-bearing run reports two returns, and the first chip a reader
+    # sees must not be the one they cannot trade. When a net figure exists, the
+    # vectorbt total is relabelled as gross so the pair cannot be confused, and
+    # the net figure gets the emphasis.
+    net_return = "Net Return [%]" in stats
     chips = []
     for key, label, kind in _STAT_KEYS:
         if key not in stats:
             continue
+        if key == "Total Return [%]" and net_return:
+            label = "Gross of Funding"
         value = stats[key]
         cls = ""
         if kind == "signed_pct" and isinstance(value, (int, float)) and value == value:
             cls = f" {_pnl_class(float(value))}"
+        extra = " key" if key == "Net Return [%]" else ""
         chips.append(
-            f'<div class="chip"><span class="chip-label">{escape(label)}</span>'
+            f'<div class="chip{extra}"><span class="chip-label">{escape(label)}</span>'
             f'<span class="chip-value{cls}">{escape(_fmt_stat(value, kind))}</span></div>'
         )
     return "\n".join(chips)
@@ -203,6 +329,7 @@ def render_report_html(
     equity: pd.Series,
     config: dict,
     stats: dict,
+    costs: dict | None = None,
 ) -> str:
     identity = config.get("identity", {})
     symbol = str(identity.get("symbol", ""))
@@ -228,6 +355,7 @@ def render_report_html(
         .replace("__META__", escape(" · ".join(str(b) for b in meta_bits if b)))
         .replace("__RANGE__", escape(date_range))
         .replace("__CHIPS__", _stat_chips(stats))
+        .replace("__COSTS__", _cost_section(costs))
         .replace("__ROWS__", _trade_rows(trades))
         .replace("__PAYLOAD__", payload)
     )
@@ -266,6 +394,7 @@ _TEMPLATE = """<!DOCTYPE html>
   .chip-label { color: var(--ink-dim); font-size: 10px; text-transform: uppercase;
     letter-spacing: 0.7px; }
   .chip-value { font-size: 15px; font-weight: 600; }
+  .chips .chip.key { border-color: #4a5163; background: #232733; }
   .up { color: var(--up); } .down { color: var(--down); }
   .charts { padding: 0 20px; }
   .pane {
@@ -308,6 +437,19 @@ _TEMPLATE = """<!DOCTYPE html>
   .pill.short { color: var(--down); background: rgba(239, 83, 80, 0.12); }
   .status { font-size: 11px; color: var(--ink-dim); }
   .status.open { color: #ff9800; }
+  section.costs { padding: 18px 20px 0; }
+  section.costs .warn {
+    color: #ff9800; font-size: 11px; letter-spacing: 0.4px; margin-left: 6px;
+  }
+  .flow { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+  .flow .op { color: var(--ink-dim); font-size: 15px; padding: 0 2px; }
+  .flow .chip.key { border-color: #4a5163; background: #232733; }
+  .note { color: var(--ink-dim); font-size: 11.5px; margin: 10px 0 0; max-width: 76ch; }
+  .cost-table { margin-top: 12px; }
+  .cost-table table { min-width: 620px; }
+  .cost-table tbody tr { cursor: default; }
+  .cost-table tbody tr:hover { background: none; }
+  .cost-table tbody tr.base td { color: var(--ink); font-weight: 600; }
   #live {
     display: none; align-items: center; gap: 6px; margin-left: 12px;
     background: var(--panel); border: 1px solid var(--border-soft); border-radius: 999px;
@@ -340,6 +482,7 @@ __CHIPS__
   </div>
   <div class="pane" id="equity-pane"><span class="pane-tag">EQUITY</span></div>
 </div>
+__COSTS__
 <section class="trades">
   <h2>Trades</h2>
   <div class="table-wrap">

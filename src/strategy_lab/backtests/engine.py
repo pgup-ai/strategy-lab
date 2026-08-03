@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import math
 import re
+from collections.abc import Sequence
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from enum import Enum
@@ -12,6 +13,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
+from strategy_lab.backtests.costs import CostModel, apply_funding, funding_ledger
 from strategy_lab.backtests.report import render_report_html
 from strategy_lab.market_data.base import MarketDataIdentity
 from strategy_lab.strategies.base import SignalSet, Strategy
@@ -33,6 +35,8 @@ class BacktestResult:
     trades_path: Path
     equity_curve_path: Path
     plot_path: Path
+    costs_path: Path
+    funding_path: Path | None = None
 
 
 def run_backtest(
@@ -47,7 +51,26 @@ def run_backtest(
     failure_bars: int = 4,
     position_pct: float = 0.95,
     report_root: Path = Path("reports"),
+    cost_model: CostModel | None = None,
+    funding: pd.Series | None = None,
+    cost_stress: Sequence[float] = (1.0,),
 ) -> BacktestResult:
+    """Simulate ``strategy`` over ``df`` and write one run's artifacts.
+
+    ``cost_model`` supersedes the scalar ``fees``/``slippage`` pair, which stays
+    for callers that predate it; both describe the same per-fill frictions.
+
+    ``funding`` is a rate series indexed by the venue's settlement instants. When
+    supplied, it is charged against the notional held *into* each settlement bar
+    and ``equity_curve.csv`` becomes the net-of-funding curve -- the tradeable
+    one. When absent (equities, spot) the file is byte-identical to what this
+    function produced before costs existed, and ``stats.json`` gains no keys,
+    because a funding column on a market that has no funding is noise.
+
+    ``cost_stress`` lists the fee/slippage multiples to compare. 1.0 is always
+    present and is the headline run. Funding is never stressed: it is a market
+    rate, so tripling it models a different instrument rather than a worse fill.
+    """
     try:
         import vectorbt as vbt
     except ImportError as exc:
@@ -76,18 +99,47 @@ def run_backtest(
         position_scale=signals.position_size,
     )
 
-    pf = vbt.Portfolio.from_signals(
-        close=df["close"],
-        entries=signals.long_entries,
-        exits=long_exits,
-        short_entries=signals.short_entries,
-        short_exits=short_exits,
-        size=size,
-        init_cash=cash,
-        fees=fees,
-        slippage=slippage,
-        freq=timeframe_to_pandas_freq(identity.timeframe),
-        **stop_kwargs,
+    model = cost_model if cost_model is not None else CostModel(fee=fees, slippage=slippage)
+    multiples = _stress_multiples(cost_stress)
+
+    def _simulate(costs: CostModel):
+        return vbt.Portfolio.from_signals(
+            close=df["close"],
+            entries=signals.long_entries,
+            exits=long_exits,
+            short_entries=signals.short_entries,
+            short_exits=short_exits,
+            size=size,
+            init_cash=cash,
+            fees=costs.fee,
+            slippage=costs.slippage,
+            freq=timeframe_to_pandas_freq(identity.timeframe),
+            **stop_kwargs,
+        )
+
+    portfolios = {multiple: _simulate(model.stressed(multiple)) for multiple in multiples}
+    pf = portfolios[1.0]
+
+    flows = {
+        multiple: _funding_flow(portfolio, df, funding)
+        for multiple, portfolio in portfolios.items()
+    }
+    breakdown = [
+        _cost_breakdown(
+            multiple=multiple,
+            pf=portfolios[multiple],
+            flow=flows[multiple],
+            costs=model.stressed(multiple),
+            cash=cash,
+        )
+        for multiple in multiples
+    ]
+    headline = breakdown[multiples.index(1.0)]
+    funding_applied = funding is not None and not funding.empty
+    ledger = (
+        funding_ledger(positions=_funding_notional(pf, df), funding=funding)
+        if funding_applied
+        else None
     )
 
     report_dir = build_report_dir(report_root, identity, strategy.name)
@@ -103,6 +155,10 @@ def run_backtest(
         "exit_mode": exit_mode.value,
         "failure_bars": failure_bars,
         "position_pct": position_pct,
+        "cost_model": asdict(model),
+        "cost_stress": list(multiples),
+        "funding_applied": funding_applied,
+        "funding_settlements": int(len(ledger)) if ledger is not None else 0,
         "data_start": str(df.index.min()),
         "data_end": str(df.index.max()),
         "candle_count": int(len(df)),
@@ -110,16 +166,27 @@ def run_backtest(
     }
     _write_json(report_dir / "config.json", config)
 
-    stats = pf.stats()
+    costs_path = report_dir / "costs.json"
+    _write_json(costs_path, {"funding_applied": funding_applied, "stress": breakdown})
+
+    stats = pf.stats().to_dict()
+    if funding_applied:
+        stats["Funding Paid"] = headline["funding_paid"]
+        stats["Net Return [%]"] = headline["net_return_pct"]
     stats_path = report_dir / "stats.json"
-    _write_json(stats_path, stats.to_dict())
+    _write_json(stats_path, stats)
 
     trades_path = report_dir / "trades.csv"
     trades = pf.trades.records_readable
     trades.to_csv(trades_path, index=False)
 
+    funding_path = None
+    if ledger is not None:
+        funding_path = report_dir / "funding.csv"
+        ledger.to_csv(funding_path)
+
     equity_curve_path = report_dir / "equity_curve.csv"
-    equity = pf.value()
+    equity = pf.value() + flows[1.0].cumsum()
     equity.to_frame("equity").to_csv(equity_curve_path)
 
     plot_path = report_dir / "plot.html"
@@ -129,7 +196,8 @@ def run_backtest(
             trades=trades,
             equity=equity,
             config=config,
-            stats=stats.to_dict(),
+            stats=stats,
+            costs={"funding_applied": funding_applied, "stress": breakdown},
         ),
         encoding="utf-8",
     )
@@ -140,7 +208,99 @@ def run_backtest(
         trades_path=trades_path,
         equity_curve_path=equity_curve_path,
         plot_path=plot_path,
+        costs_path=costs_path,
+        funding_path=funding_path,
     )
+
+
+def _stress_multiples(cost_stress: Sequence[float]) -> list[float]:
+    """Sorted, de-duplicated multiples, always including the 1.0 headline run.
+
+    Without 1.0 the stress table would have nothing to be stressed *against*, and
+    a reader comparing a 3x row to no baseline learns nothing.
+    """
+    multiples = {1.0}
+    for multiple in cost_stress:
+        value = float(multiple)
+        if value <= 0:
+            raise ValueError(f"cost stress multiples must be > 0, got {multiple!r}")
+        multiples.add(value)
+    return sorted(multiples)
+
+
+def _funding_notional(pf, df: pd.DataFrame) -> pd.Series:
+    """Signed notional held *into* each bar, valued at that bar's open.
+
+    Fills land at the bar's close, so ``assets()`` at bar *t* is the position
+    held over bar *t+1* -- the shift is what makes the charge causal rather than
+    settling funding against a position taken after the settlement happened.
+
+    The open is the mark at the instant a settlement on a bar boundary occurs,
+    which is every settlement when bars divide the funding interval (4h bars, 8h
+    funding). Bars coarser than the interval carry several settlements and mark
+    them all at the bar's open; that approximation moves a charge by a fraction
+    of a percent of itself and is not worth a mark-price series that is NULL for
+    60% of stored history.
+    """
+    return (pf.assets().shift(1) * df["open"]).fillna(0.0)
+
+
+def _funding_flow(pf, df: pd.DataFrame, funding: pd.Series | None) -> pd.Series:
+    if funding is None or funding.empty:
+        return pd.Series(0.0, index=df.index, dtype="float64")
+    return apply_funding(positions=_funding_notional(pf, df), funding=funding)
+
+
+def _cost_breakdown(
+    *,
+    multiple: float,
+    pf,
+    flow: pd.Series,
+    costs: CostModel,
+    cash: float,
+) -> dict[str, float]:
+    """What the run earned before costs, what each cost took, and what is left.
+
+    Sizing is non-compounding -- entries are sized from *initial* cash, never
+    from current equity -- so every cost is a flat cash deduction and gross is
+    exactly net plus the three costs back. That identity is what makes this a
+    reconciliation rather than an estimate.
+    """
+    fees_paid = float(pf.stats()["Total Fees Paid"])
+    slippage_paid = _slippage_paid(pf, costs.slippage)
+    funding_paid = float(-flow.sum())
+    net_final = float(pf.value().iloc[-1]) + float(flow.sum())
+    gross_final = net_final + fees_paid + slippage_paid + funding_paid
+    return {
+        "multiple": multiple,
+        "fee_rate": costs.fee,
+        "slippage_rate": costs.slippage,
+        "gross_return_pct": (gross_final / cash - 1.0) * 100.0,
+        "fees_paid": fees_paid,
+        "slippage_paid": slippage_paid,
+        "funding_paid": funding_paid,
+        "net_return_pct": (net_final / cash - 1.0) * 100.0,
+        "net_final_equity": net_final,
+    }
+
+
+def _slippage_paid(pf, slippage: float) -> float:
+    """Currency lost to slippage, recovered from the fill prices it moved.
+
+    vectorbt folds slippage into the fill rather than reporting it, so it is
+    invisible next to ``Total Fees Paid`` unless it is backed out: a buy filled
+    at ``reference * (1 + slippage)`` and a sell at ``reference * (1 -
+    slippage)``, always against the trader.
+    """
+    if slippage == 0.0:
+        return 0.0
+    orders = pf.orders.records_readable
+    if orders.empty:
+        return 0.0
+
+    direction = np.where(orders["Side"].to_numpy() == "Buy", 1.0, -1.0)
+    reference = orders["Price"].to_numpy(dtype="float64") / (1.0 + direction * slippage)
+    return float((orders["Size"].to_numpy(dtype="float64") * reference * slippage).sum())
 
 
 def _exit_signals(
