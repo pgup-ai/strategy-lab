@@ -30,6 +30,30 @@ from tests.conftest import synthetic_ohlcv
 INSTRUMENT = InstrumentId("binance", "perp", "BTC/USDT")
 SUB = Subscription(INSTRUMENT, "15m")
 
+# Frames are sized RELATIVE TO each strategy's warmup, never as a fixed length.
+# The runner emits nothing until bar warmup_bars+1, so a fixed 600-bar frame
+# yields zero signals for any strategy declaring more warmup than that -- and
+# every equality in this module would then be a true-but-empty `[] == []`. That
+# is not hypothetical: it is what a fixed 600 did to the turnaround strategies
+# the moment their warmup went to 4000.
+#
+# The span is the number of bars actually compared, and it is the runtime knob:
+# streaming is O(N^2), because the runner re-runs generate_signals over the whole
+# buffer once per post-warmup bar. Measured signal counts / streaming cost:
+#   span 1000 -> v1 498, v2 40, trend_following 47, trend_rider 1258   (9.7s total)
+#   span  400 -> v1 212, v2 12, trend_following 12, trend_rider  500   (3.5s total)
+# turnaround_v2 is the sparse one and therefore sets the floor.
+STREAM_SPAN = 1_000
+REPEAT_SPAN = 400
+
+# Every comparison below must have real signals behind it. A floor rather than
+# ">0" so the tests cannot quietly decay to a single-signal comparison either.
+MIN_SIGNALS = 10
+
+
+def frame_for(strategy, span: int) -> pd.DataFrame:
+    return synthetic_ohlcv(n=strategy.warmup_bars + span)
+
 # Declared independently of the runner so this stays an oracle rather than a
 # mirror -- if the runner relabelled or reordered its sides, an imported constant
 # would relabel the expectation with it and the comparison would prove nothing.
@@ -100,12 +124,16 @@ def test_reference_side_order_matches_the_runner():
 @pytest.mark.parametrize("name", list_strategies())
 def test_streaming_reproduces_vectorized_signals_exactly(name):
     strategy = get_strategy(name)
-    df = synthetic_ohlcv(n=600)
+    df = frame_for(strategy, STREAM_SPAN)
 
     expected = vectorized_signals(strategy, df)
     actual = streamed_signals(strategy, df)
 
-    assert expected, f"{name}: no signals to compare -- the equality would be vacuous"
+    assert len(expected) >= MIN_SIGNALS, (
+        f"{name}: only {len(expected)} signals past warmup_bars="
+        f"{strategy.warmup_bars} in {len(df)} bars -- the equality below would be "
+        f"vacuous. Raise STREAM_SPAN."
+    )
     assert actual == expected, (
         f"{name}: streaming and vectorized paths diverged. "
         f"{len(expected)} expected vs {len(actual)} actual signals."
@@ -116,9 +144,12 @@ def test_streaming_reproduces_vectorized_signals_exactly(name):
 def test_replay_is_repeatable(name):
     """Same input, same signals -- twice. Fresh runner, fresh feed, no shared state."""
     strategy = get_strategy(name)
-    df = synthetic_ohlcv(n=400)
+    df = frame_for(strategy, REPEAT_SPAN)
     first = streamed_signals(strategy, df)
-    assert first, f"{name}: no signals emitted, repeatability would be vacuous"
+    assert len(first) >= MIN_SIGNALS, (
+        f"{name}: only {len(first)} signals emitted past warmup_bars="
+        f"{strategy.warmup_bars}; repeatability would be vacuous. Raise REPEAT_SPAN."
+    )
     assert streamed_signals(strategy, df) == first
 
 
@@ -152,15 +183,19 @@ def test_streaming_matches_vectorized_on_real_stored_candles():
 
     ``turnaround_v1`` rather than ``v2`` on purpose. Both are the ewm family whose
     output depends on every prior bar, which is the case worth checking against
-    real data -- but on the last 3,000 real 15m bars v2 fires exactly zero times
-    (it fires 126 times in the whole 83,348-bar history), so this test would have
-    asserted ``[] == []`` and passed no matter how broken the engine was. v1 fires
-    1,432 times over the same window, including bars that emit an exit and a
-    reversal together.
+    real data -- but v2 fires only 126 times in the whole 83,348-bar history, so
+    on a short window this test would assert ``[] == []`` and pass no matter how
+    broken the engine was. v1 fires ~1,400 times per 3,000 bars, including bars
+    that emit an exit and a reversal together.
+
+    ``limit_bars`` is warmup-relative for the same reason the synthetic frames
+    are: the runner suppresses the first ``warmup_bars`` of whatever it is given,
+    so a fixed 3,000 leaves nothing to compare once warmup is 4,000.
     """
     strategy = get_strategy("turnaround_v1")
     instrument = InstrumentId("binance", "spot", "BTC/USDT")
-    feed = ReplayFeed.from_database([Subscription(instrument, "15m")], limit_bars=3_000)
+    limit_bars = strategy.warmup_bars + 1_000
+    feed = ReplayFeed.from_database([Subscription(instrument, "15m")], limit_bars=limit_bars)
     df = feed.frames[(instrument, "15m")]
     if df.empty:
         pytest.skip("no stored BTC/USDT 15m candles; run fetch-crypto first")
@@ -185,5 +220,8 @@ def test_streaming_matches_vectorized_on_real_stored_candles():
         return collected
 
     expected = vectorized_signals(strategy, df)
-    assert expected, "expected at least one signal from 3,000 real bars"
+    assert len(expected) >= MIN_SIGNALS, (
+        f"only {len(expected)} signals from {len(df)} real bars past warmup_bars="
+        f"{strategy.warmup_bars}; the equality would be vacuous"
+    )
     assert asyncio.run(_run()) == expected

@@ -118,8 +118,14 @@ Key design decisions that span multiple files:
 ## Adding a strategy
 
 1. New module in `src/strategy_lab/strategies/` (frozen dataclass, unique `name`,
-   plus `version` — a semver string — and `warmup_bars` — its largest lookback,
-   in bars).
+   plus `version` — a semver string — and `warmup_bars`, in bars).
+   `warmup_bars` is **not** simply the largest declared lookback. It is however
+   many bars make a cold start agree with a whole-history backtest, which for a
+   `rolling(n)` window is `n` but for `ewm(span=n, adjust=False)` is ~`20n` —
+   the recursion decays its seed rather than dropping it, so a span-200 EMA is
+   still wrong after 200 bars and only becomes bit-exact around 4000.
+   `tests/test_strategy_metadata.py` enforces this by replaying the cold start;
+   trust it over the declared spans.
 2. Register it in `strategies/registry.py` (two places).
 3. Decide exit ownership: which `SignalSet` ingredients it provides and which
    `ExitMode`s are valid for it.

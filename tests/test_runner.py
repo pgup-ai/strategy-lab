@@ -31,6 +31,28 @@ def make_runner(strategy, **kwargs):
     )
 
 
+def emit_past_warmup(strategy, span: int = 300):
+    """Signals from ``span`` bars streamed after a primed warmup.
+
+    Priming the warmup rather than streaming it is what keeps these tests cheap.
+    The runner re-runs ``generate_signals`` over the entire buffer for every bar
+    it does not suppress, so streaming a 4,000-bar warmup would buy 4,000 extra
+    whole-history passes that emit nothing. ``prime`` fills the same buffer in
+    bulk -- and it is what a live process does with its warmup fetch, so this is
+    also closer to production than streaming the warmup ever was.
+
+    Frames are sized from ``strategy.warmup_bars`` rather than fixed, so raising
+    a strategy's warmup can never silently leave these tests with no signals.
+    """
+    df = synthetic_ohlcv(n=strategy.warmup_bars + span)
+    runner = make_runner(strategy)
+    runner.prime(df.iloc[: strategy.warmup_bars])
+    emitted = []
+    for bar in bars_from(df.iloc[strategy.warmup_bars :]):
+        emitted.extend(runner.on_bar(bar))
+    return emitted
+
+
 @dataclass(frozen=True)
 class _AlwaysLong:
     name: str = "always_long"
@@ -111,10 +133,7 @@ def test_runner_stamps_strategy_identity_and_bar_time():
 
 def test_runner_converts_stop_fraction_to_an_absolute_price():
     """turnaround_v1 reports the stop as a fraction of price; signals carry a price."""
-    runner = make_runner(get_strategy("turnaround_v1"))
-    emitted = []
-    for bar in bars_from(synthetic_ohlcv(n=260)):
-        emitted.extend(runner.on_bar(bar))
+    emitted = emit_past_warmup(get_strategy("turnaround_v1"))
 
     entries = [s for s in emitted if s.side is Side.ENTER_LONG and s.stop_loss is not None]
     assert entries, "expected at least one long entry with a stop"
@@ -127,10 +146,7 @@ def test_short_entry_stop_sits_above_the_entry_price():
     """The fraction is positive for both directions, so only the sign here
     distinguishes a short stop from a long one -- and an inverted sign would
     otherwise look exactly like a valid stop."""
-    runner = make_runner(get_strategy("turnaround_v1"))
-    emitted = []
-    for bar in bars_from(synthetic_ohlcv(n=300)):
-        emitted.extend(runner.on_bar(bar))
+    emitted = emit_past_warmup(get_strategy("turnaround_v1"))
 
     entries = [s for s in emitted if s.side is Side.ENTER_SHORT and s.stop_loss is not None]
     assert entries, "expected at least one short entry with a stop"
@@ -141,10 +157,7 @@ def test_short_entry_stop_sits_above_the_entry_price():
 
 def test_exit_signals_carry_no_stop():
     """A stop protects an open position; an exit already closes it."""
-    runner = make_runner(get_strategy("turnaround_v1"))
-    emitted = []
-    for bar in bars_from(synthetic_ohlcv(n=300)):
-        emitted.extend(runner.on_bar(bar))
+    emitted = emit_past_warmup(get_strategy("turnaround_v1"))
 
     exits = [s for s in emitted if s.side in (Side.EXIT_LONG, Side.EXIT_SHORT)]
     assert exits, "expected at least one exit"
@@ -153,11 +166,9 @@ def test_exit_signals_carry_no_stop():
 
 def test_runner_emits_both_sides_when_a_bar_exits_long_and_enters_short():
     """turnaround_v1 wires long_exits = short_entries, so one bar can do both."""
-    runner = make_runner(get_strategy("turnaround_v1"))
     per_bar: dict[int, set[Side]] = {}
-    for bar in bars_from(synthetic_ohlcv(n=300)):
-        for signal in runner.on_bar(bar):
-            per_bar.setdefault(signal.ts_bar_ms, set()).add(signal.side)
+    for signal in emit_past_warmup(get_strategy("turnaround_v1")):
+        per_bar.setdefault(signal.ts_bar_ms, set()).add(signal.side)
 
     assert any(
         {Side.EXIT_LONG, Side.ENTER_SHORT} <= sides for sides in per_bar.values()
@@ -248,10 +259,8 @@ def test_features_are_json_ready_strings():
     stringified -- lossily: booleans and ints come back as text."""
     import json
 
-    runner = make_runner(get_strategy("turnaround_v1"))
-    emitted = []
-    for bar in bars_from(synthetic_ohlcv(n=260)):
-        emitted.extend(runner.on_bar(bar))
+    emitted = emit_past_warmup(get_strategy("turnaround_v1"))
+    assert emitted, "no signals emitted; nothing to inspect"
 
     features = emitted[0].features
     assert features["allow_shorts"] == "True"

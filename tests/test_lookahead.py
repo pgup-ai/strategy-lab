@@ -10,15 +10,21 @@ from strategy_lab.strategies.base import SignalSet, validate_ohlcv
 from strategy_lab.strategies.registry import get_strategy, list_strategies
 from tests.conftest import synthetic_ohlcv
 
-# Probe frames must be long ENOUGH, not just densely sampled. turnaround_v1/v2 declare
-# warmup_bars=200, so a 400-bar frame leaves only 10 probe points after warmup. Measured
-# over 40 seeds, that config misses a real lookahead bug in turnaround_v1 entirely on
-# 32.5% of seeds (and a full-sample-normalization cheat on 27.5%) -- it passes on the
-# default seed by luck. Halving `step` does NOT fix this; lengthening the frame does,
-# because detectability depends on covering varied price regimes rather than on sampling
-# density. At 1200 bars both miss rates drop to 0/40 for ~0.2s of runtime.
+# Probe frames must be long ENOUGH, not just densely sampled. A 400-bar frame against
+# warmup_bars=200 leaves only 10 probe points. Measured over 40 seeds, that config misses
+# a real lookahead bug in turnaround_v1 entirely on 32.5% of seeds (and a
+# full-sample-normalization cheat on 27.5%) -- it passes on the default seed by luck.
+# Halving `step` does NOT fix this; lengthening the frame does, because detectability
+# depends on covering varied price regimes rather than on sampling density. At 1200 bars
+# past warmup both miss rates drop to 0/40 for ~0.2s of runtime.
 # Do not shrink this without re-running that measurement.
-PROBE_BARS = 1200
+#
+# This counts bars AFTER warmup, and frames are sized `warmup_bars + PROBE_SPAN`, because
+# the probe starts at `warmup_bars`. A fixed total length silently goes to ZERO probe
+# points as soon as a strategy's warmup exceeds it -- which is exactly what happened when
+# the turnaround strategies went to warmup_bars=4000 against a fixed 1200-bar frame: the
+# gate kept passing while testing nothing at all.
+PROBE_SPAN = 1200
 
 SIGNAL_FIELDS = (
     "long_entries",
@@ -73,6 +79,20 @@ POISON_PROFILES = (
 )
 
 
+def probe_frame(warm: int, seed: int = 7) -> pd.DataFrame:
+    """A frame with PROBE_SPAN usable probe points past ``warm``."""
+    return synthetic_ohlcv(n=warm + PROBE_SPAN, seed=seed)
+
+
+def probe_positions(warm: int, length: int, step: int = 20) -> range:
+    """The bars ``poison_probe`` actually corrupts the future of.
+
+    Exposed so tests can assert the probe is not empty. An empty range makes
+    every assertion in this module vacuously true.
+    """
+    return range(warm, length - 1, step)
+
+
 def poison_probe(
     strategy,
     df: pd.DataFrame,
@@ -90,7 +110,7 @@ def poison_probe(
     baseline = strategy.generate_signals(df)
     offenders: list[tuple[str, int]] = []
     for profile_name, poison in profiles:
-        for t in range(warm, len(df) - 1, step):
+        for t in probe_positions(warm, len(df), step):
             poisoned = df.copy()
             tail = poisoned.index[t + 1 :]
             poison(poisoned, tail, t)
@@ -122,7 +142,13 @@ def _profile(name: str) -> tuple:
 @pytest.mark.parametrize("name", list_strategies())
 def test_registered_strategies_do_not_look_ahead(name):
     strategy = get_strategy(name)
-    df = synthetic_ohlcv(n=PROBE_BARS)
+    df = probe_frame(strategy.warmup_bars)
+    # "No offenders" is only meaningful if bars were actually probed.
+    probed = probe_positions(strategy.warmup_bars, len(df))
+    assert len(probed) >= 50, (
+        f"{name}: only {len(probed)} probe points past warmup_bars="
+        f"{strategy.warmup_bars}; the gate would pass without testing anything"
+    )
     offenders = poison_probe(strategy, df, warm=strategy.warmup_bars)
     assert offenders == [], f"{name} used future data at (profile, bar index) {offenders}"
 
@@ -185,7 +211,7 @@ class _CandleDirectionCheat:
 
 @pytest.mark.parametrize("cheat", [_BlatantCheat(), _SubtleCheat(), _CandleDirectionCheat()])
 def test_probe_detects_lookahead(cheat):
-    df = synthetic_ohlcv(n=PROBE_BARS)
+    df = probe_frame(cheat.warmup_bars)
     offenders = poison_probe(cheat, df, warm=cheat.warmup_bars, step=10)
     assert offenders, f"{cheat.name} smuggled future data past the probe"
 
@@ -199,7 +225,7 @@ def test_directional_profile_adds_detection_margin():
     seeds), which is what keeps detection robust if the frame or step is ever tightened.
     """
     cheat = _CandleDirectionCheat()
-    df = synthetic_ohlcv(n=PROBE_BARS)
+    df = probe_frame(cheat.warmup_bars)
     flat_only = poison_probe(
         cheat, df, warm=cheat.warmup_bars, step=10, profiles=_profile("flat")
     )

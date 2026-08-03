@@ -96,7 +96,7 @@ class StrategyRunner:
 
         self.buffer.append(bar)
         # Bar N is the first to emit, where N = warmup_bars + 1: a strategy
-        # declaring 200 warmup bars is trusted from bar 201 on. Any consumer
+        # declaring 4000 warmup bars is trusted from bar 4001 on. Any consumer
         # comparing runner output against a whole-history backtest has to drop
         # the same prefix.
         if len(self.buffer) <= self.strategy.warmup_bars:

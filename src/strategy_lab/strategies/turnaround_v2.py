@@ -16,7 +16,10 @@ from strategy_lab.strategies.base import (
 class TurnaroundV2:
     name: str = "turnaround_v2"
     version: str = "1.0.0"
-    warmup_bars: int = 200
+    # 20x the EMA span, not 1x. ewm(adjust=False) recurses from the first bar and
+    # only decays its seed, so a 200-bar warmup for a span-200 EMA is still
+    # visibly wrong -- see test_recursive_ema_is_bit_exact_after_the_declared_warmup.
+    warmup_bars: int = 4000
     ema_trend_span: int = 200
     ema_extension_span: int = 20
     long_extension: float = 0.99
