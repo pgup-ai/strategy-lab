@@ -470,6 +470,25 @@ disk stays fully static.
 - `trend_rider_v1_deepseek_v4_pro` — weekly long-only ETF trend following with ATR
   volatility gate, ATR position sizing, and fully internal exits; run with
   `--exit-mode opposite_signal_only`
+- `tsmom`, `ema_cross`, `donchian`, `multi_horizon` — the Market Dynamics Engine's R0
+  baselines: deliberately unfiltered trend rules that every later model has to beat
+- `state_machine_v1` — the MDE R5 strategy: a six-state market lifecycle
+  (compression → breakout → confirmed → riding → exhaustion → reset) with hysteresis,
+  minimum dwell and a post-reset cooldown, sizing each entry from the state it opened in
+
+```bash
+strategy-lab backtest --exchange binance --market-type perp --symbols BTC/USDT \
+  --timeframe 4h --strategy state_machine_v1 --exit-mode opposite_signal_only \
+  --start "2019-09-10 08:00:00" --cost-stress 1,2,3
+```
+
+`state_machine_v1` needs perp candles *and* stored funding — funding is what `crowding`
+reads, and a perp backtest refuses to run without it. The `--start` is the venue's first
+funding settlement; earlier bars would be charged zero carry, which reads exactly like
+free carry. It clears the R0 baseline out of sample on risk-adjusted terms — Sharpe +0.938
+against `donchian` 40/10's +0.072 over the same held-out 6,048 bars — while returning less
+than buy-and-hold and losing its edge at 3× costs. Read
+[STRATEGIES.md](STRATEGIES.md#state_machine_v1) before quoting any of that.
 
 See [STRATEGIES.md](STRATEGIES.md) for the source of truth: per-strategy logic,
 parameters, canonical run commands, the exit-mode compatibility matrix, and known issues.

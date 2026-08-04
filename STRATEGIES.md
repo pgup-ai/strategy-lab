@@ -18,7 +18,7 @@ Last reviewed: 2026-08-03 at commit `498eed5`.
 | `ema_cross` | long + short | any (MDE R0 baseline) | EMA48 vs EMA192 | none | engine | flat | R0 baseline |
 | `donchian` | long + short | any (MDE R0 baseline) | close breaks the 96-bar channel | none | strategy (48-bar reverse channel) | flat | R0 baseline |
 | `multi_horizon` | long + short | any (MDE R0 baseline) | sign of a 24/48/96/192 vol-normalized blend | none | engine | flat | R0 baseline |
-| `state_machine_v1` | long + short | crypto perp 4h (MDE R5) | side of the state machine's target risk | the state machine itself | strategy (target side change) | per-state target, entry only | R5 — not yet evaluated out of sample |
+| `state_machine_v1` | long + short | crypto perp 4h (MDE R5) | side of the state machine's target risk | the state machine itself | strategy (target side change) | per-state target, entry only | R5 gate passed out of sample |
 
 \* Status is inferred from report history — correct these labels as research priorities change.
 
@@ -244,9 +244,14 @@ entry state, which is the Turtle asymmetry paying off structurally.
 
 ## state_machine_v1
 
-The MDE R5 strategy, and the only one here that is **not a trend follower**. It runs the
-six-state lifecycle in `state/machine.py` over four R4 features and sizes each entry from
-the state it opened in.
+The MDE R5 strategy. It runs the six-state lifecycle in `state/machine.py` over four R4
+features and sizes each entry from the state it opened in.
+
+It was designed as a hybrid — follow the top `strength` tercile, *fade* the middle one —
+but **out of sample it earns its result as a trend follower**: the follow band produced
++102.4% of its test-half PnL on 94 trades and the fade band −2.4% on 65. The fade is kept
+for now because it was a positive contributor in-sample (+14.6%) and one half is not
+enough to delete a rule on, but it is not what the gate passed on.
 
 - **Entry**: whenever the policy's signed target risk changes side. High `strength`
   follows `direction`; **mid `strength` fades it**; low `strength` is flat.
@@ -273,8 +278,28 @@ the state it opened in.
   the whole-history run on 52–156 of 300 probed bars depending on seed, because the
   machine is a recursion on top of the features and has its own cold start. 60 more bars
   takes it to zero on every seed tried; the declared 240 is four times that.
-- **Not yet evaluated out of sample.** R5's gate — beating the R0 baseline on a held-out
-  40% — is a separate step. Nothing here is a claim that it earns anything.
+- **Run** (the canonical R5 command — the `--start` is the first stored funding
+  settlement, and a perp run refuses to start earlier because Binance settled nothing over
+  the contract's first 40 hours):
+
+  ```bash
+  strategy-lab backtest --exchange binance --market-type perp --symbols BTC/USDT \
+    --timeframe 4h --strategy state_machine_v1 --exit-mode opposite_signal_only \
+    --start "2019-09-10 08:00:00" --cost-stress 1,2,3
+  ```
+
+- **R5 gate: passes.** Parameters chosen on the first 60% of the 15,118-bar BTC/USDT perp
+  4h frame (54 configurations), the last 40% evaluated once. Out of sample it returns
+  **+23.29% net of funding at Sharpe +0.938 and 8.24% max drawdown**, against the R0
+  baseline `donchian` 40/10 at **−6.64% / +0.072 / 43.86%** over the identical 6,048 bars.
+  The untuned R4 default also passes (+19.36% / +0.738 / 11.37%). Three limits belong with
+  that: it wins on **risk, not return** (buy-and-hold is +85.78% over the same bars), it
+  **loses to the best donchian cell chosen with the test half in hand** (40/40 at +112.57%
+  / Sharpe +1.070), and its edge **does not survive 3× costs** (+23.29% → +11.34% →
+  −0.61%), which its 3-bar median holding period makes unsurprising. Full tables in
+  [the charter §9.2](docs/research/2026-08-03-market-dynamics-engine.md#92-r5-split-sample-gate--btcusdt-perp-4h);
+  `tests/test_state_machine_gate.py` re-runs the out-of-sample comparison against the
+  stored candles.
 
 ---
 

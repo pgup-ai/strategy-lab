@@ -1,6 +1,6 @@
 # MDE R5 — Rule-Based State Machine Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [x]`) syntax for tracking.
 
 **Goal:** Turn the R4 features into an explicit state machine whose transitions are gated by measured conditioning, and find out whether it beats the R0 baseline out-of-sample.
 
@@ -96,7 +96,7 @@ COMPRESSION → BREAKOUT → CONFIRMED → RIDING → EXHAUSTION → RESET → C
 
 `RESET` exists so a failed trend has somewhere to go that is not `COMPRESSION`: cooldown applies in `RESET`, and going straight back to `COMPRESSION` would let the machine re-enter on the next bar of the same chop.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```python
 from __future__ import annotations
@@ -133,11 +133,11 @@ def test_an_unknown_feature_column_is_rejected_rather_than_ignored():
         machine.run(frame(direction=[0.0] * 20, crowding=[0.5] * 20))
 ```
 
-- [ ] **Step 2: Run to verify it fails** — `No module named 'strategy_lab.state'`
+- [x] **Step 2: Run to verify it fails** — `No module named 'strategy_lab.state'`
 
-- [ ] **Step 3: Implement `MarketState` and a `StateMachine` that produces a state per bar.** Transitions come in Task 2; this task is the skeleton and the input contract.
+- [x] **Step 3: Implement `MarketState` and a `StateMachine` that produces a state per bar.** Transitions come in Task 2; this task is the skeleton and the input contract.
 
-- [ ] **Step 4: Run tests, commit** (full suite first)
+- [x] **Step 4: Run tests, commit** (full suite first)
 
 ```bash
 git add src/strategy_lab/state tests/test_state_machine.py
@@ -160,7 +160,7 @@ The three mechanisms the gate names, and what each prevents:
 
 **Two hard exits bypass dwell and cooldown**, because refusing to leave on a real break is worse than churning: a `direction` sign flip while in `RIDING`, and `stability` collapsing below its floor. Everything else respects both.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 ```python
 def test_hysteresis_stops_a_hovering_feature_from_flipping_every_bar():
@@ -205,13 +205,13 @@ def test_every_transition_taken_is_legal():
         assert current in StateMachine.LEGAL_TRANSITIONS[previous], f"{previous} -> {current}"
 ```
 
-- [ ] **Steps 2–4: run to fail, implement, run to pass.**
+- [x] **Steps 2–4: run to fail, implement, run to pass.**
 
-- [ ] **Step 5: Mutation-test**
+- [x] **Step 5: Mutation-test**
 
 Collapse `enter_strength` and `exit_strength` to one threshold and confirm the hysteresis test fails. Set `min_dwell` to 1 and confirm the dwell test fails. Skip the cooldown counter and confirm that test fails. Assert each mutation applied.
 
-- [ ] **Step 6: Commit** (suite first)
+- [x] **Step 6: Commit** (suite first)
 
 ```bash
 git commit -m "feat(state): add hysteresis, minimum dwell, and post-reset cooldown"
@@ -237,7 +237,7 @@ A monotone threshold discards the middle tercile, which carries the larger absol
 
 `crowding` modulates size rather than direction: it is consistently negative at every horizon, so extreme crowding shrinks the target rather than flipping it.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 ```python
 def test_high_strength_follows_direction():
@@ -265,13 +265,13 @@ def test_compression_and_reset_are_flat():
         assert target_risk(state=state, direction=+0.9, strength=0.9, crowding=0.5) == 0.0
 ```
 
-- [ ] **Steps 2–4: run to fail, implement, run to pass.**
+- [x] **Steps 2–4: run to fail, implement, run to pass.**
 
-- [ ] **Step 5: Mutation-test**
+- [x] **Step 5: Mutation-test**
 
 Make the mid band follow rather than fade and confirm that test fails. Make low strength follow and confirm it fails. Make crowding flip the sign rather than shrink and confirm the crowding test fails.
 
-- [ ] **Step 6: Commit** (suite first)
+- [x] **Step 6: Commit** (suite first)
 
 ```bash
 git commit -m "feat(state): map state and conditioning to a target risk"
@@ -294,7 +294,7 @@ Registering it means `tests/test_lookahead.py` and `tests/test_replay_determinis
 
 `position_size` carries the policy's target, with a docstring stating plainly that the engine applies it **at entry only** — a reader who assumes rebalancing will otherwise mis-read every result.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 ```python
 def test_it_is_registered_and_covered_by_the_safety_suites():
@@ -321,11 +321,11 @@ def test_position_size_is_present_and_bounded():
     assert size.dropna().between(0.0, 1.0).all()
 ```
 
-- [ ] **Steps 2–5: implement, register in both places, run the safety suites.**
+- [x] **Steps 2–5: implement, register in both places, run the safety suites.**
 
 If `tests/test_lookahead.py` fails for `state_machine_v1`, that is a real lookahead bug in the machine or a feature. Fix it; never loosen the probe.
 
-- [ ] **Step 6: Commit** (suite first)
+- [x] **Step 6: Commit** (suite first)
 
 ```bash
 git commit -m "feat(strategies): expose the state machine through the SignalSet contract"
@@ -341,21 +341,21 @@ git commit -m "feat(strategies): expose the state machine through the SignalSet 
 
 **This is the phase.** Everything above is machinery.
 
-- [ ] **Step 1: Choose parameters on the first 60% only**
+- [x] **Step 1: Choose parameters on the first 60% only**
 
 Thresholds, dwell, and cooldown are selected on bars `[0, 0.6n)`. Record what was tried and how many configurations — the charter's §8 rule about multiple-hypothesis control applies, and "we tried 200 and kept the best" needs saying out loud.
 
-- [ ] **Step 2: Evaluate on the last 40%, once**
+- [x] **Step 2: Evaluate on the last 40%, once**
 
 Run `state_machine_v1` and the R0 baseline (`donchian`, best cell 40/10) over the same test bars, same costs, funding applied. Report for both: total return, Sharpe, max drawdown net of funding, trade count, and time in market.
 
-- [ ] **Step 3: Report the verdict plainly**
+- [x] **Step 3: Report the verdict plainly**
 
 **The gate is beating the R0 baseline out-of-sample.** If it does not, say so — that is a result, and the charter's §8 rule is explicit that a component which does not earn its complexity gets deleted rather than tuned until it passes.
 
 Expect this to be hard. R4 measured the high-`strength` regime decaying +0.195 → +0.062 across halves, so the out-of-sample half is the weaker one by construction. If the machine passes only because of the mid-tercile fade, say that too — it is a more interesting finding than a marginal aggregate win.
 
-- [ ] **Step 4: Record in the charter** — a progress row with both halves' numbers, the configuration count from Step 1, and the roadmap status.
+- [x] **Step 4: Record in the charter** — a progress row with both halves' numbers, the configuration count from Step 1, and the roadmap status.
 
 ---
 
@@ -369,12 +369,12 @@ Expect this to be hard. R4 measured the high-`strength` regime decaying +0.195 �
 
 ## R5 GATE
 
-- [ ] `state_machine_v1` passes `tests/test_lookahead.py` and `tests/test_replay_determinism.py`
-- [ ] Hysteresis, minimum dwell, and cooldown each pinned by a test that fails without them
-- [ ] Every transition taken is legal; no state jumps the lifecycle
-- [ ] Parameters chosen on the first 60%, evaluated once on the last 40%, both reported
-- [ ] **Out-of-sample comparison against the R0 baseline reported, pass or fail**
-- [ ] Full suite green, ruff clean
+- [x] `state_machine_v1` passes `tests/test_lookahead.py` and `tests/test_replay_determinism.py`
+- [x] Hysteresis, minimum dwell, and cooldown each pinned by a test that fails without them
+- [x] Every transition taken is legal; no state jumps the lifecycle
+- [x] Parameters chosen on the first 60%, evaluated once on the last 40%, both reported
+- [x] **Out-of-sample comparison against the R0 baseline reported, pass or fail**
+- [x] Full suite green, ruff clean
 
 ---
 
