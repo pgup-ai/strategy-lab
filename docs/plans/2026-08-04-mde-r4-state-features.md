@@ -22,7 +22,7 @@ vol_percentile = realized_vol.rank(pct=True)      # WRONG
 
 Measured, poisoning bars after row 120 downward:
 
-```
+```text
 full-sample rank  row120:  0.6050 -> 1.0000   CHANGED=True   <-- LOOKAHEAD
 rolling  rank     row120:  1.0000 -> 1.0000   CHANGED=False
 ```
@@ -33,7 +33,7 @@ A full-sample rank at bar *t* depends on bars after *t*. This is the exact shape
 
 ---
 
-## Scope — eight features, and what is deliberately left out
+## Scope — nine features over eight dimensions, and what is left out
 
 | Dimension | v1 implementation | Status |
 |---|---|---|
@@ -65,7 +65,7 @@ A full-sample rank at bar *t* depends on bars after *t*. This is the exact shape
 
 Every feature returns a `pd.Series` aligned to the input index:
 
-- **Signed features** (Direction) range −1..1.
+- **Signed features** (Direction, CompressionRelease) range −1..1. CompressionRelease is a first difference, so it is signed by construction — measured on real BTC 4h it spans −0.77..+0.92.
 - **Unsigned features** (everything else) range 0..1.
 - Warmup rows are `NaN`, never 0.0 — a zero reads as "measured and neutral", which is a different claim from "not yet measurable".
 
