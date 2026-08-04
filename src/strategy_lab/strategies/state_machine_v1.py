@@ -1,9 +1,8 @@
 """The R5 state machine, exposed through the existing ``SignalSet`` contract.
 
-Everything this module does is plumbing: compute the features the machine
-reads, run the machine, run the policy, and turn the resulting signed target
-into the entry/exit booleans ``vbt.Portfolio.from_signals`` understands. The
-decisions live in ``state.machine`` and ``state.policy``.
+Everything this module does is plumbing between the features, the machine, the
+policy and the entry/exit booleans ``vbt.Portfolio.from_signals`` understands.
+The decisions live in ``state.machine`` and ``state.policy``.
 
 Three properties a reader has to hold onto:
 

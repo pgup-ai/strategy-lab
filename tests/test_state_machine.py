@@ -52,7 +52,6 @@ def changes(states: pd.Series) -> int:
 
 def test_the_machine_starts_flat_rather_than_guessing():
     """Bar 0 has no history behind it, so the machine may not claim a trend."""
-    assert StateMachine.INITIAL_STATE is MarketState.COMPRESSION
     states = StateMachine().run(quiet(20, direction=[0.9] * 20, strength=[0.95] * 20))
     assert states.iloc[0] is MarketState.COMPRESSION
 

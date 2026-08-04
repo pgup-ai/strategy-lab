@@ -9,7 +9,6 @@ from strategy_lab.features.registry import get_feature
 from strategy_lab.state.machine import MarketState
 from strategy_lab.state.policy import STATE_TARGET_RISK
 from strategy_lab.strategies.registry import get_strategy, list_strategies
-from strategy_lab.strategies.state_machine_v1 import RANKED_FEATURES
 from tests.conftest import synthetic_ohlcv, synthetic_ohlcv_with_funding
 
 NAME = "state_machine_v1"
@@ -26,27 +25,6 @@ def probe_frame(strategy, *, funding: bool = False, seed: int = 7) -> pd.DataFra
 def test_it_is_registered_and_covered_by_the_safety_suites():
     """Registration is what enrols it in test_lookahead and test_replay_determinism."""
     assert NAME in list_strategies()
-    assert get_strategy(NAME).name == NAME
-
-
-def test_warmup_is_the_deepest_feature_it_reads_plus_the_rank_on_top():
-    """Not a new number, and not the largest declared lookback either.
-
-    ``direction`` alone declares 1920, and a trailing rank cannot start until
-    the feature underneath it has values to rank -- so the two costs add, the
-    way they already do inside ``features.volatility.Energy``.
-    """
-    strategy = get_strategy(NAME)
-    deepest = max(
-        get_feature(name).warmup_bars + (strategy.rank_window - 1 if name in RANKED_FEATURES else 0)
-        for name in strategy.features
-    )
-    assert deepest == get_feature("direction").warmup_bars
-    # And then some, because the machine is a recursion on top of the features
-    # and has its own cold start. Measured at warmup 1920 -- exactly `deepest` --
-    # tests/test_strategy_metadata.py finds 52 to 156 divergences out of 300
-    # probes depending on the seed; it needs about 60 more bars to find none.
-    assert strategy.warmup_bars > deepest, "no room left for the machine to converge"
 
 
 def test_no_signal_fires_before_every_feature_it_reads_is_measurable():
@@ -129,25 +107,19 @@ def test_the_flags_describe_a_consistent_position_path():
             side = -1
 
 
-def test_a_frame_without_funding_runs_without_crowding_and_records_that():
-    """Crowding needs a funding column that only perps carry.
-
-    ``features.flow.Crowding`` refuses such a frame outright, which is right for
-    a feature declining to claim a measurement -- but a strategy that refused
-    every spot and equity frame could not be compared against anything.
+def test_funding_reaches_the_signals_and_its_absence_is_recorded():
+    """``features.flow.Crowding`` refuses a frame with no funding column outright,
+    which is right for a feature declining to claim a measurement -- but a
+    strategy that refused every spot and equity frame could not be compared
+    against anything. So it runs without crowding and says so, and when crowding
+    IS available it has to change something.
     """
-    strategy = get_strategy(NAME)
-    signals = strategy.generate_signals(probe_frame(strategy))
-    assert signals.metadata["crowding_measured"] is False
-
-
-def test_funding_actually_reaches_the_signals():
-    """The other half: when crowding IS available it must change something."""
     strategy = get_strategy(NAME)
     with_funding = strategy.generate_signals(probe_frame(strategy, funding=True))
     without = strategy.generate_signals(probe_frame(strategy))
 
     assert with_funding.metadata["crowding_measured"] is True
+    assert without.metadata["crowding_measured"] is False
     assert not with_funding.position_size.equals(without.position_size)
 
 

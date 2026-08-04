@@ -66,12 +66,7 @@ REQUIRED_COLUMNS = ("direction", "strength", "stability", "crowding")
 
 
 class MarketState(Enum):
-    """Where in the lifecycle of a directional move the market currently is.
-
-    The names are the point: they are what a reader reasons about when the
-    machine does something surprising, and each one is a different claim about
-    what the next bars are likely to do.
-    """
+    """Where in the lifecycle of a directional move the market currently is."""
 
     COMPRESSION = "compression"
     BREAKOUT = "breakout"
@@ -85,10 +80,6 @@ class MarketState(Enum):
 class StateMachine:
     """Turns a per-bar feature frame into a per-bar :class:`MarketState`.
 
-    Frozen and parameter-only, exactly like a ``Strategy`` or a
-    ``StateFeature``: :meth:`run` starts from :attr:`INITIAL_STATE` every time
-    and mutates nothing, so two runs over the same frame cannot disagree.
-
     ``enter_strength`` and ``exit_strength`` default to the tercile boundaries
     R4 measured against, in the rank space described in the module docstring:
     above 2/3 is the follow regime, below 1/3 is noise, and between them is the
@@ -101,8 +92,7 @@ class StateMachine:
     # reasoning as ``_SIDE_BY_FIELD`` in ``tests/test_replay_determinism.py``:
     # a rule the implementation checks against itself proves nothing, so this
     # stays an independent oracle for ``test_every_transition_taken_is_legal``
-    # to compare the taken transitions against. Self-loops are listed because
-    # staying put is the transition the machine takes on most bars.
+    # to compare the taken transitions against.
     LEGAL_TRANSITIONS = {
         MarketState.COMPRESSION: frozenset(
             {MarketState.COMPRESSION, MarketState.BREAKOUT}
@@ -220,23 +210,22 @@ class StateMachine:
         crowded: np.ndarray,
     ) -> list[MarketState]:
         """The sequential core: one pass, saturating counters, no lookahead."""
-        # Counting past these changes no decision, and stopping there is what
-        # makes the machine finite-state rather than a recursion with unbounded
-        # memory. See the module docstring.
+        # Counting past these changes no decision; saturating there is what makes
+        # the machine finite-state. See the module docstring.
         age_cap = max(self.min_dwell, self.cooldown)
 
         state = self.INITIAL_STATE
         bars_in_state = 0
         advance_run = 0
         # +1 / -1 while a move is live: the side it was entered on, which is
-        # what a later ``direction`` reading can flip *against*. A flip is only
-        # meaningful relative to a commitment.
+        # what a later ``direction`` reading can flip *against*.
         side = 0
 
         states: list[MarketState] = []
         for position in range(len(direction)):
             advance_run = min(advance_run + 1, self.min_dwell) if advancing[position] else 0
             stepping_up = bars_in_state >= self.min_dwell and advance_run >= self.min_dwell
+            flipped = side != 0 and direction[position] * side <= -self.direction_floor
 
             if state is MarketState.COMPRESSION:
                 following = MarketState.BREAKOUT if stepping_up else state
@@ -244,11 +233,7 @@ class StateMachine:
                 following = (
                     MarketState.COMPRESSION if bars_in_state >= self.cooldown else state
                 )
-            elif (
-                failing[position]
-                or unstable[position]
-                or _flipped(direction[position], side, self.direction_floor)
-            ):
+            elif failing[position] or unstable[position] or flipped:
                 following = MarketState.RESET
             elif state is MarketState.RIDING and (decaying[position] or crowded[position]):
                 following = MarketState.EXHAUSTION
@@ -269,16 +254,6 @@ class StateMachine:
                 bars_in_state = min(bars_in_state + 1, age_cap)
             states.append(state)
         return states
-
-
-def _flipped(direction: float, side: int, floor: float) -> bool:
-    """Has ``direction`` turned far enough against the side the move was entered on?
-
-    ``floor`` rather than a bare sign test: a lean of -0.001 against a long is
-    noise, and treating it as a break would make the hard exit fire constantly
-    on a trend passing through flat.
-    """
-    return side != 0 and direction * side <= -floor
 
 
 def _require_bar_count(field: str, value: object, *, minimum: int) -> None:
