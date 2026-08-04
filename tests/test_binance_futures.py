@@ -39,7 +39,8 @@ RAW_FUNDING_EARLY = [{"symbol": "BTCUSDT", "fundingTime": 1568102400000,
                       "fundingRate": "0.00010000", "markPrice": "", "rateType": "Regular"}]
 
 IDENTITY = dict(exchange="binance", market_type="perp", symbol="BTC/USDT")
-FOUR_HOURS_MS = 4 * 60 * 60 * 1000
+HOUR_MS = 60 * 60 * 1000
+FOUR_HOURS_MS = 4 * HOUR_MS
 
 
 class FakeResponse:
@@ -232,6 +233,58 @@ def test_open_interest_requests_the_period_and_page_size():
     assert session.calls[0]["params"]["period"] == "4h"
     assert session.calls[0]["params"]["limit"] == OPEN_INTEREST_PAGE_LIMIT
     assert "openInterestHist" in session.calls[0]["url"]
+
+
+def _oi_page(count: int, *, newest_ms: int, step_ms: int = HOUR_MS) -> list[dict]:
+    """``count`` snapshots ending at ``newest_ms``, oldest first as the venue sends them."""
+    return [
+        {
+            "symbol": "BTCUSDT",
+            "sumOpenInterest": "1.0",
+            "sumOpenInterestValue": "2.0",
+            "timestamp": newest_ms - (count - 1 - i) * step_ms,
+        }
+        for i in range(count)
+    ]
+
+
+def test_open_interest_pages_backward_rather_than_keeping_only_the_newest_page():
+    """One page is 500 rows; 30 days at 1h is 720, at 15m 2,880, at 5m 8,640.
+
+    The poll passes no ``startTime``, so there is no cursor to page forward from
+    and a single request silently returns the newest 500 snapshots. Stored, that
+    reads as the venue's whole history rather than as a truncation.
+    """
+    now_ms = int(pd.Timestamp.now(tz="UTC").timestamp() * 1000)
+    newest = _oi_page(OPEN_INTEREST_PAGE_LIMIT, newest_ms=now_ms)
+    older = _oi_page(220, newest_ms=newest[0]["timestamp"] - HOUR_MS)
+    client, session, _ = _client(FakeResponse(newest), FakeResponse(older))
+
+    rows = client.fetch_open_interest("BTC/USDT", period="1h")
+
+    assert len(rows) == 720
+    assert len(session.calls) == 2
+    assert "endTime" not in session.calls[0]["params"]
+    assert session.calls[1]["params"]["endTime"] == newest[0]["timestamp"] - 1
+    timestamps = [row["ts_ms"] for row in rows]
+    assert timestamps == sorted(timestamps)
+
+
+def test_open_interest_stops_at_the_thirty_day_horizon():
+    """The walk has to end somewhere the venue agrees with, and drop what is past it."""
+    now_ms = int(pd.Timestamp.now(tz="UTC").timestamp() * 1000)
+    floor_ms = now_ms - OPEN_INTEREST_HISTORY_DAYS * 24 * HOUR_MS
+    first = _oi_page(OPEN_INTEREST_PAGE_LIMIT, newest_ms=now_ms)
+    second = _oi_page(OPEN_INTEREST_PAGE_LIMIT, newest_ms=first[0]["timestamp"] - HOUR_MS)
+    third = _oi_page(OPEN_INTEREST_PAGE_LIMIT, newest_ms=second[0]["timestamp"] - HOUR_MS)
+    client, session, _ = _client(
+        FakeResponse(first), FakeResponse(second), FakeResponse(third)
+    )
+
+    rows = client.fetch_open_interest("BTC/USDT", period="1h")
+
+    assert len(session.calls) == 2
+    assert min(row["ts_ms"] for row in rows) >= floor_ms
 
 
 def test_open_interest_refuses_a_start_outside_the_measured_window():

@@ -147,8 +147,10 @@ def fetch_open_interest(
     """Collect open-interest snapshots into `open_interest`.
 
     There is deliberately no `--since`: Binance serves only ~30 days of OI
-    history, so this accumulates forward from whenever it is first run and can
-    never be backfilled. Run it on a schedule if OI is wanted as a series.
+    history. Each run collects that whole window -- paginated backward, so a
+    fine `--period` is not silently cut to one 500-row page -- and anything
+    older is simply not available from this venue. Run it on a schedule if OI is
+    wanted as a series reaching further back than 30 days.
     """
     typer.secho(
         f"Warning: Binance serves only ~{OPEN_INTEREST_HISTORY_DAYS} days of open-interest "

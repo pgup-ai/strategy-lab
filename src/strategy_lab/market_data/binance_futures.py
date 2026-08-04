@@ -212,27 +212,37 @@ class BinanceFuturesClient:
         since: str | None = None,
         until: str | None = None,
     ) -> list[dict]:
-        """Open-interest snapshots for roughly the last 30 days -- no further back.
+        """Open-interest snapshots over the venue's whole ~30-day window.
 
-        With no ``since`` this asks for the most recent page, which at any period
-        of 1h or longer already covers everything the venue will serve.
+        Paginated *backward*, because the caller has no ``since`` to page forward
+        from: without a ``startTime`` the endpoint answers with its most recent
+        page and there is no cursor to advance, so one request yields at most
+        ``OPEN_INTEREST_PAGE_LIMIT`` (500) snapshots. That is short of the window
+        at every period finer than 2h -- 30 days is 720 rows at ``1h``, 2,880 at
+        ``15m``, 8,640 at ``5m`` -- and the shortfall is invisible in what gets
+        stored, which is the "truncation read as history" failure this module's
+        warnings exist to prevent. Walking ``endTime`` back past the oldest row
+        seen collects the full window at any period.
         """
+        horizon = pd.Timestamp.now(tz="UTC") - pd.Timedelta(days=OPEN_INTEREST_HISTORY_DAYS)
+        floor_ms = int(horizon.timestamp() * 1000)
         if since is not None:
-            oldest = pd.Timestamp.now(tz="UTC") - pd.Timedelta(days=OPEN_INTEREST_HISTORY_DAYS)
-            if _timestamp_ms(since) < int(oldest.timestamp() * 1000):
+            since_ms = _timestamp_ms(since)
+            if since_ms < floor_ms:
                 raise ValueError(
                     f"Binance serves only ~{OPEN_INTEREST_HISTORY_DAYS} days of open-interest "
                     f"history (measured 2026-08-03: a startTime 40 days back returns -1130). "
                     f"{since} is outside that window. Open interest can only be accumulated "
                     f"forward by polling; it cannot be backfilled."
                 )
+            floor_ms = since_ms
 
-        raw = self._paginate(
+        raw = self._paginate_back(
             path="/futures/data/openInterestHist",
             params={"symbol": to_venue_symbol(symbol), "period": period},
             limit=OPEN_INTEREST_PAGE_LIMIT,
             cursor_of=lambda row: int(row["timestamp"]),
-            since=since,
+            floor_ms=floor_ms,
             until=until,
         )
         return parse_open_interest(
@@ -291,6 +301,54 @@ class BinanceFuturesClient:
             cursor = next_cursor
 
         return collected
+
+    def _paginate_back(
+        self,
+        *,
+        path: str,
+        params: dict,
+        limit: int,
+        cursor_of: Callable[[Any], int],
+        floor_ms: int,
+        until: str | None,
+    ) -> list:
+        """Page backward by ``endTime``, one millisecond before the oldest row seen.
+
+        Forward pagination needs a ``startTime`` to advance from; this walks the
+        other end of the window instead, which is what a poll with no start time
+        has. ``floor_ms`` -- the caller's start, or the venue's ~30-day horizon --
+        is the stop condition alongside a short page, and rows below it are
+        dropped rather than kept, since the venue's own answer near the boundary
+        is not one it will serve consistently.
+
+        Rows are keyed by timestamp, so an overlapping page cannot store a
+        snapshot twice, and returned oldest-first to match the forward path.
+        """
+        collected: dict[int, Any] = {}
+        cursor = _timestamp_ms(until) if until else None
+        while True:
+            page_params = {**params, "limit": limit}
+            if cursor is not None:
+                page_params["endTime"] = cursor
+
+            page = self._get(path, page_params)
+            if not page:
+                break
+
+            oldest = min(cursor_of(row) for row in page)
+            for row in page:
+                if cursor_of(row) >= floor_ms:
+                    collected[cursor_of(row)] = row
+
+            if oldest < floor_ms or len(page) < limit:
+                break
+
+            next_cursor = oldest - 1
+            if cursor is not None and next_cursor >= cursor:
+                break  # non-advancing cursor; stop rather than loop forever
+            cursor = next_cursor
+
+        return [collected[key] for key in sorted(collected)]
 
     def _get(self, path: str, params: dict) -> Any:
         """GET with backoff on 429 and 5xx.
