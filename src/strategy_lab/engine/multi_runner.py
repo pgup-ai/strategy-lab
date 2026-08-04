@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 
 from strategy_lab.core.clock import Clock
-from strategy_lab.core.types import BarEvent, InstrumentId, MarketSnapshot, Signal
+from strategy_lab.core.types import Bar, BarEvent, InstrumentId, MarketSnapshot, Signal
 from strategy_lab.engine.context import BarBuffer
 from strategy_lab.engine.market_clock import MarketClock
 from strategy_lab.engine.runner import StrategyRunner
@@ -67,6 +67,7 @@ class MultiAssetRunner:
         if not event.bar.is_closed:
             return ()
         self._require(event.bar.instrument)
+        self._require_timeframe(event.bar)
 
         completed = self._market_clock.on_event(event)
         return () if completed is None else self._release(completed)
@@ -81,10 +82,12 @@ class MultiAssetRunner:
         # its own bar's cross-section rather than the previous bar's.
         self._snapshot = snapshot
         emitted: list[Signal] = []
-        for instrument, bar in snapshot.bars.items():
-            runner = self._runners.get(instrument)
+        # Keying on candle.instrument is sound only because on_event rejects any
+        # other timeframe, so every candle here carries self.timeframe.
+        for candle, bar in snapshot.bars.items():
+            runner = self._runners.get(candle.instrument)
             if runner is None:
-                self._buffers[instrument].append(bar)
+                self._buffers[candle.instrument].append(bar)
             else:
                 emitted.extend(runner.on_bar(bar))
         return tuple(emitted)
@@ -92,3 +95,16 @@ class MultiAssetRunner:
     def _require(self, instrument: InstrumentId) -> None:
         if instrument not in self._buffers:
             raise KeyError(f"{instrument.key} has no strategy and was not declared as context")
+
+    def _require_timeframe(self, bar: Bar) -> None:
+        """Refuse a bar sampled at anything but the configured timeframe.
+
+        Absorbing one would put two candles for the same instrument in the same
+        snapshot, and dispatch keys on instrument -- so the second would silently
+        replace the first in the buffer that decides the signal.
+        """
+        if bar.timeframe != self.timeframe:
+            raise ValueError(
+                f"{bar.instrument.key} arrived at timeframe {bar.timeframe!r}, "
+                f"but this runner is configured for {self.timeframe!r}"
+            )

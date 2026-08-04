@@ -9,7 +9,7 @@ why ``breadth`` refuses one rather than dividing by whatever happened to show up
 
 from __future__ import annotations
 
-from strategy_lab.core.types import Bar, InstrumentId, MarketSnapshot
+from strategy_lab.core.types import Bar, CandleId, MarketSnapshot
 
 
 def breadth(snapshot: MarketSnapshot, *, min_instruments: int = 2) -> float:
@@ -34,7 +34,7 @@ def breadth(snapshot: MarketSnapshot, *, min_instruments: int = 2) -> float:
     return advancing / present
 
 
-def confirms(snapshot: MarketSnapshot, *, leader: InstrumentId, quorum: float) -> bool:
+def confirms(snapshot: MarketSnapshot, *, leader: CandleId, quorum: float) -> bool:
     """Whether at least ``quorum`` of the followers moved the leader's way.
 
     The leader is excluded from its own vote, so this measures agreement rather
@@ -49,7 +49,7 @@ def confirms(snapshot: MarketSnapshot, *, leader: InstrumentId, quorum: float) -
     if direction == 0:
         return False
 
-    followers = [bar for instrument, bar in snapshot.bars.items() if instrument != leader]
+    followers = [bar for candle, bar in snapshot.bars.items() if candle != leader]
     if not followers:
         return False
     agreeing = sum(1 for bar in followers if _direction(bar) == direction)

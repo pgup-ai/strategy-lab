@@ -40,6 +40,8 @@ class Mode(StrEnum):
 
 @dataclass(frozen=True, slots=True)
 class InstrumentId:
+    """What is traded. Not what is sampled -- see :class:`CandleId`."""
+
     exchange: str
     market_type: str
     symbol: str
@@ -47,6 +49,30 @@ class InstrumentId:
     @property
     def key(self) -> str:
         return f"{self.exchange}:{self.market_type}:{self.symbol}"
+
+    def at(self, timeframe: str) -> CandleId:
+        return CandleId(self, timeframe)
+
+
+@dataclass(frozen=True, slots=True)
+class CandleId:
+    """The full candle identity: an instrument sampled at one timeframe.
+
+    An instrument is what a position is held in; a timeframe is one sampling of
+    it, and the two are not interchangeable -- ``Signal`` carries both as separate
+    fields because a 4h signal and a 1d signal on BTC trade the same book. But
+    anything that *stores bars* must key on the pair: BTC at 4h and BTC at 1d
+    close at the same instant six times a day, so a dict keyed by instrument alone
+    silently keeps whichever arrived last. The timeframe is a literal string --
+    ``1w`` and ``1wk`` are distinct datasets, not synonyms.
+    """
+
+    instrument: InstrumentId
+    timeframe: str
+
+    @property
+    def key(self) -> str:
+        return f"{self.instrument.key}:{self.timeframe}"
 
 
 @dataclass(frozen=True, slots=True)
@@ -63,6 +89,10 @@ class Bar:
     is_closed: bool
     quote_volume: Decimal | None = None
     trades: int | None = None
+
+    @property
+    def candle(self) -> CandleId:
+        return CandleId(self.instrument, self.timeframe)
 
     def __post_init__(self) -> None:
         for field_name in _DECIMAL_FIELDS:
@@ -95,28 +125,32 @@ class MarketSnapshot:
     """Every bar that closed at one event time.
 
     Breadth over five coins is meaningless unless all five bars describe the same
-    instant. Only instruments that actually have a bar at ``ts_event_ms`` are held
+    instant. Only candles that actually have a bar at ``ts_event_ms`` are held
     -- crypto trades around the clock and equities do not -- so a partial universe
     is the normal case and ``absent`` must never be read as ``unchanged``.
+
+    Keyed by :class:`CandleId`, not ``InstrumentId``: one symbol subscribed at two
+    timeframes closes both bars at the same instant, and an instrument-keyed dict
+    resolves that by dropping one.
     """
 
     ts_event_ms: int
-    bars: dict[InstrumentId, Bar]
+    bars: dict[CandleId, Bar]
 
-    def __getitem__(self, instrument: InstrumentId) -> Bar:
-        return self.bars[instrument]
+    def __getitem__(self, candle: CandleId) -> Bar:
+        return self.bars[candle]
 
-    def __contains__(self, instrument: object) -> bool:
-        return instrument in self.bars
+    def __contains__(self, candle: object) -> bool:
+        return candle in self.bars
 
     def __len__(self) -> int:
         return len(self.bars)
 
-    def get(self, instrument: InstrumentId) -> Bar | None:
-        return self.bars.get(instrument)
+    def get(self, candle: CandleId) -> Bar | None:
+        return self.bars.get(candle)
 
     @property
-    def instruments(self) -> tuple[InstrumentId, ...]:
+    def candles(self) -> tuple[CandleId, ...]:
         return tuple(self.bars)
 
 

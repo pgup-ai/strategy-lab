@@ -72,7 +72,14 @@ Key design decisions that span multiple files:
 
 - **Candle identity is `(exchange, market_type, symbol, timeframe)`** with the timeframe
   as a literal string — `1w` and `1wk` are distinct datasets. All indicators are computed
-  at backtest time from raw candles.
+  at backtest time from raw candles. In the event engine that identity is `CandleId`
+  (`core/types.py`), and it is what every bar-holding structure keys on: the feed's
+  merge tie-break, `MarketSnapshot.bars`, and `ReplayFeed.frames`. `InstrumentId` names
+  what is *traded* and is the right key only where a timeframe is fixed by
+  construction — `MultiAssetRunner`'s per-instrument buffers, which is why it rejects a
+  bar at any other timeframe rather than absorbing it. Keying a snapshot by instrument
+  alone silently drops bars: BTC 4h and BTC 1d close at the same instant, and measured
+  on a 12-bar 4h + 2-bar 1d feed, 2 of 14 bars never reached a snapshot.
 - **Exit ownership is split between strategies and the engine.** Strategies return a
   `SignalSet` of exit ingredients (opposite-signal exits, setup stop levels,
   trend-failure series, optional per-bar `position_size` scale); the engine's `ExitMode`

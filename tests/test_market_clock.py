@@ -33,11 +33,11 @@ def event(instrument: InstrumentId, ts_open_ms: int) -> BarEvent:
 
 def test_snapshot_reports_a_missing_instrument_rather_than_inventing_one():
     """Absent must never read as unchanged -- instruments list, delist, and halt."""
-    snapshot = MarketSnapshot(ts_event_ms=1_000, bars={BTC: bar(BTC, 0)})
-    assert ETH not in snapshot
-    assert snapshot.get(ETH) is None
+    snapshot = MarketSnapshot(ts_event_ms=1_000, bars={BTC.at("4h"): bar(BTC, 0)})
+    assert ETH.at("4h") not in snapshot
+    assert snapshot.get(ETH.at("4h")) is None
     with pytest.raises(KeyError):
-        snapshot[ETH]
+        snapshot[ETH.at("4h")]
 
 
 def test_a_timestamp_is_complete_only_once_a_later_event_arrives():
@@ -48,7 +48,7 @@ def test_a_timestamp_is_complete_only_once_a_later_event_arrives():
 
     snapshot = clock.on_event(event(BTC, 14_400_000))
     assert snapshot is not None
-    assert set(snapshot.instruments) == {BTC, ETH}
+    assert set(snapshot.candles) == {BTC.at("4h"), ETH.at("4h")}
     assert snapshot.ts_event_ms == 14_400_000 - 1
 
 
@@ -68,7 +68,7 @@ def test_a_partial_universe_is_emitted_as_is():
     clock = MarketClock()
     clock.on_event(event(BTC, 0))
     snapshot = clock.on_event(event(BTC, 14_400_000))
-    assert set(snapshot.instruments) == {BTC}
+    assert set(snapshot.candles) == {BTC.at("4h")}
 
 
 def test_an_out_of_order_event_is_rejected_not_silently_reordered():
@@ -84,4 +84,4 @@ def test_a_duplicate_instrument_at_one_timestamp_keeps_the_last():
     clock.on_event(event(BTC, 0))
     clock.on_event(BarEvent(bar=bar(BTC, 0, close="999"), ts_event_ms=14_399_999, ts_recv_ms=None))
     snapshot = clock.flush()
-    assert snapshot[BTC].close == Decimal("999")
+    assert snapshot[BTC.at("4h")].close == Decimal("999")

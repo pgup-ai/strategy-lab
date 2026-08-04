@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from strategy_lab.core.types import Bar, BarEvent, InstrumentId, MarketSnapshot
+from strategy_lab.core.types import Bar, BarEvent, CandleId, MarketSnapshot
 
 
 class MarketClock:
@@ -16,7 +16,7 @@ class MarketClock:
 
     def __init__(self) -> None:
         self._ts_event_ms: int | None = None
-        self._bars: dict[InstrumentId, Bar] = {}
+        self._bars: dict[CandleId, Bar] = {}
 
     def on_event(self, event: BarEvent) -> MarketSnapshot | None:
         if self._ts_event_ms is not None and event.ts_event_ms < self._ts_event_ms:
@@ -30,7 +30,9 @@ class MarketClock:
             completed = self._take()
 
         self._ts_event_ms = event.ts_event_ms
-        self._bars[event.bar.instrument] = event.bar
+        # Keyed by candle, not instrument: BTC 4h and BTC 1d close at the same
+        # instant, and an instrument key would let the second overwrite the first.
+        self._bars[event.bar.candle] = event.bar
         return completed
 
     def flush(self) -> MarketSnapshot | None:

@@ -343,13 +343,21 @@ for the full rationale.
 ## Multi-Asset
 
 `ReplayFeed.stream()` merges every subscription into one globally time-ordered
-stream, breaking ties on the instrument key so the order is identical on every
+stream, breaking ties on the full candle key so the order is identical on every
 run. `MarketClock` groups that stream into `MarketSnapshot`s — the set of bars
 sharing one close time — and `MultiAssetRunner` drives one strategy per
 instrument off those snapshots, keeping a full-history `BarBuffer` for each.
 Instruments listed under `context` are buffered and appear in snapshots without
 being traded; an instrument in neither `strategies` nor `context` raises rather
 than being dropped.
+
+**Candles, not instruments, are what a snapshot holds.** `CandleId` is the pair
+`(instrument, timeframe)`, and both the tie-break and `MarketSnapshot.bars` key
+on it, because one symbol subscribed at 4h and 1d ties with *itself* at every day
+boundary — an instrument-keyed snapshot resolves that by dropping a bar. Read a
+snapshot with `snapshot[BTC.at("4h")]`. `MultiAssetRunner` is single-timeframe by
+construction, so its buffers stay keyed by instrument (`runner.buffer(BTC)`) and
+a bar at any other timeframe raises rather than being absorbed.
 
 **A timestamp is complete only once an event with a later timestamp arrives.**
 Never by looking ahead — that is the whole point. So a cross-sectional signal

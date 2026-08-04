@@ -124,7 +124,7 @@ def test_isinstance_alone_does_not_prove_conformance():
 
 
 def test_replay_feed_satisfies_the_behavioural_feed_contract():
-    feed = ReplayFeed(frames={(INSTRUMENT, "15m"): synthetic_ohlcv(n=50)})
+    feed = ReplayFeed(frames={INSTRUMENT.at("15m"): synthetic_ohlcv(n=50)})
     assert len(assert_feed_contract(feed, [SUB])) == 50
 
 
@@ -133,14 +133,14 @@ def test_replay_feed_sorts_an_out_of_order_frame():
     df = synthetic_ohlcv(n=50)
     shuffled = df.iloc[[7, 0, 49, 23, *range(1, 7), *range(8, 23), *range(24, 49)]]
     assert list(shuffled.index) != sorted(shuffled.index)
-    events = collect(ReplayFeed(frames={(INSTRUMENT, "15m"): shuffled}), [SUB])
+    events = collect(ReplayFeed(frames={INSTRUMENT.at("15m"): shuffled}), [SUB])
     timestamps = [event.bar.ts_open_ms for event in events]
     assert len(timestamps) == 50
     assert timestamps == sorted(timestamps)
 
 
 def test_replay_bars_are_built_from_the_subscription():
-    events = collect(ReplayFeed(frames={(INSTRUMENT, "15m"): synthetic_ohlcv(n=3)}), [SUB])
+    events = collect(ReplayFeed(frames={INSTRUMENT.at("15m"): synthetic_ohlcv(n=3)}), [SUB])
     bar = events[0].bar
     assert (bar.instrument, bar.timeframe) == (INSTRUMENT, "15m")
     assert bar.is_closed is True
@@ -162,18 +162,18 @@ def test_sub_second_open_times_are_not_rounded_down():
         name="timestamp",
     )
     df = synthetic_ohlcv(n=len(offsets_ms)).set_index(index)
-    events = collect(ReplayFeed(frames={(INSTRUMENT, "15m"): df}), [SUB])
+    events = collect(ReplayFeed(frames={INSTRUMENT.at("15m"): df}), [SUB])
     assert [event.bar.ts_open_ms for event in events] == [ts.value // 1_000_000 for ts in index]
 
 
 def test_unknown_subscription_yields_nothing():
     other = Subscription(InstrumentId("binance", "spot", "ETH/USDT"), "1h")
-    events = collect(ReplayFeed(frames={(INSTRUMENT, "15m"): synthetic_ohlcv(n=5)}), [other])
+    events = collect(ReplayFeed(frames={INSTRUMENT.at("15m"): synthetic_ohlcv(n=5)}), [other])
     assert events == []
 
 
 def test_server_time_ms_is_zero_before_any_event_and_tracks_the_last_bar():
-    feed = ReplayFeed(frames={(INSTRUMENT, "15m"): synthetic_ohlcv(n=5)})
+    feed = ReplayFeed(frames={INSTRUMENT.at("15m"): synthetic_ohlcv(n=5)})
     assert asyncio.run(feed.server_time_ms()) == 0
     events = collect(feed, [SUB])
     assert asyncio.run(feed.server_time_ms()) == events[-1].bar.ts_close_ms
@@ -181,7 +181,7 @@ def test_server_time_ms_is_zero_before_any_event_and_tracks_the_last_bar():
 
 def test_backfill_yields_only_bars_inside_the_requested_range():
     df = synthetic_ohlcv(n=10)
-    feed = ReplayFeed(frames={(INSTRUMENT, "15m"): df})
+    feed = ReplayFeed(frames={INSTRUMENT.at("15m"): df})
     all_ms = [ts.value // 1_000_000 for ts in df.index]
     bars = drain_backfill(feed, SUB, all_ms[2], all_ms[5])
     assert [bar.ts_open_ms for bar in bars] == all_ms[2:6]
@@ -191,7 +191,7 @@ def test_backfill_yields_only_bars_inside_the_requested_range():
 def test_backfill_on_an_unknown_subscription_stops_cleanly():
     """The bare `return` inside an async generator must end iteration, not raise."""
     other = Subscription(InstrumentId("binance", "spot", "ETH/USDT"), "1h")
-    feed = ReplayFeed(frames={(INSTRUMENT, "15m"): synthetic_ohlcv(n=5)})
+    feed = ReplayFeed(frames={INSTRUMENT.at("15m"): synthetic_ohlcv(n=5)})
     assert drain_backfill(feed, other, 0, 2**63 - 1) == []
 
 
@@ -208,7 +208,7 @@ def test_duplicate_timestamps_are_collapsed_last_wins():
     df = synthetic_ohlcv(n=bars)
     corrected = df.iloc[[1]].copy()
     corrected.loc[:, ["open", "high", "low", "close", "volume"]] = [110.0, 115.0, 105.0, 112.0, 9.0]
-    events = collect(ReplayFeed(frames={(INSTRUMENT, "15m"): pd.concat([df, corrected])}), [SUB])
+    events = collect(ReplayFeed(frames={INSTRUMENT.at("15m"): pd.concat([df, corrected])}), [SUB])
 
     timestamps = [event.bar.ts_open_ms for event in events]
     assert timestamps == sorted(timestamps)
@@ -226,7 +226,7 @@ def test_duplicate_timestamps_are_collapsed_last_wins():
 
 def test_duplicate_timestamps_are_collapsed_in_backfill_too():
     df = synthetic_ohlcv(n=3)
-    feed = ReplayFeed(frames={(INSTRUMENT, "15m"): pd.concat([df, df.iloc[[1]]])})
+    feed = ReplayFeed(frames={INSTRUMENT.at("15m"): pd.concat([df, df.iloc[[1]]])})
     bars = drain_backfill(feed, SUB, 0, 2**63 - 1)
     assert [bar.ts_open_ms for bar in bars] == [ts.value // 1_000_000 for ts in df.index]
 

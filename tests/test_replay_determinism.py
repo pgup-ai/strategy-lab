@@ -96,7 +96,7 @@ def vectorized_signals(strategy, df: pd.DataFrame) -> list[tuple[int, Side]]:
 
 def streamed_signals(strategy, df: pd.DataFrame) -> list[tuple[int, Side]]:
     """What the event-driven runner produces from the same bars."""
-    feed = ReplayFeed(frames={(INSTRUMENT, "15m"): df})
+    feed = ReplayFeed(frames={INSTRUMENT.at("15m"): df})
     runner = StrategyRunner(
         strategy=strategy, instrument=INSTRUMENT, timeframe="15m", clock=SimClock()
     )
@@ -197,7 +197,7 @@ def test_streaming_matches_vectorized_on_real_stored_candles():
     instrument = InstrumentId("binance", "spot", "BTC/USDT")
     limit_bars = strategy.warmup_bars + 1_000
     feed = ReplayFeed.from_database([Subscription(instrument, "15m")], limit_bars=limit_bars)
-    df = feed.frames[(instrument, "15m")]
+    df = feed.frames[instrument.at("15m")]
     if df.empty:
         pytest.skip("no stored BTC/USDT 15m candles; run fetch-crypto first")
 

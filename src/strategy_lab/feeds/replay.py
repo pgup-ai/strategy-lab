@@ -7,11 +7,9 @@ from decimal import Decimal
 
 import pandas as pd
 
-from strategy_lab.core.types import Bar, BarEvent, InstrumentId
+from strategy_lab.core.types import Bar, BarEvent, CandleId, InstrumentId
 from strategy_lab.feeds.base import FeedHealth, Subscription
 from strategy_lab.timeframes import timeframe_to_millis
-
-FrameKey = tuple[InstrumentId, str]
 
 
 @dataclass
@@ -23,7 +21,7 @@ class ReplayFeed:
     :meth:`stream`.
     """
 
-    frames: dict[FrameKey, pd.DataFrame] = field(default_factory=dict)
+    frames: dict[CandleId, pd.DataFrame] = field(default_factory=dict)
     name: str = "replay"
     _last_event_ms: int | None = field(default=None, init=False, repr=False)
 
@@ -39,7 +37,7 @@ class ReplayFeed:
     ) -> ReplayFeed:
         from strategy_lab.db import load_candles
 
-        frames: dict[FrameKey, pd.DataFrame] = {}
+        frames: dict[CandleId, pd.DataFrame] = {}
         for sub in subscriptions:
             df = load_candles(
                 exchange=sub.instrument.exchange,
@@ -52,26 +50,28 @@ class ReplayFeed:
             )
             if limit_bars is not None:
                 df = df.tail(limit_bars)
-            frames[(sub.instrument, sub.timeframe)] = df
+            frames[sub.candle] = df
         return cls(frames=frames)
 
     async def stream(self, subs: Sequence[Subscription]) -> AsyncIterator[BarEvent]:
         """Yield every subscription's bars as one globally time-ordered stream.
 
-        Ties -- several instruments closing the same bar -- break on the instrument
-        key: without a total order the replay/live determinism proof does not hold
-        for more than one instrument.
+        Ties -- several candles closing at the same instant -- break on the full
+        candle key: without a total order the replay/live determinism proof does not
+        hold for more than one subscription. The timeframe is part of that key
+        because one symbol subscribed at 4h and at 1d ties with *itself* six times a
+        day, and an instrument-only key leaves those two bars unordered.
         """
         merged = heapq.merge(
             *(self._events_for(sub) for sub in subs),
-            key=lambda event: (event.ts_event_ms, event.bar.instrument.key),
+            key=lambda event: (event.ts_event_ms, event.bar.candle.key),
         )
         for event in merged:
             self._last_event_ms = event.ts_event_ms
             yield event
 
     def _events_for(self, sub: Subscription) -> Iterator[BarEvent]:
-        df = self.frames.get((sub.instrument, sub.timeframe))
+        df = self.frames.get(sub.candle)
         if df is None or df.empty:
             return
         bar_ms = timeframe_to_millis(sub.timeframe)
@@ -80,7 +80,7 @@ class ReplayFeed:
             yield BarEvent(bar=bar, ts_event_ms=bar.ts_close_ms, ts_recv_ms=None)
 
     async def backfill(self, sub: Subscription, start_ms: int, end_ms: int) -> AsyncIterator[Bar]:
-        df = self.frames.get((sub.instrument, sub.timeframe))
+        df = self.frames.get(sub.candle)
         if df is None or df.empty:
             return
         bar_ms = timeframe_to_millis(sub.timeframe)

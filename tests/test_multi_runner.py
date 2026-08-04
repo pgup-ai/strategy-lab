@@ -29,8 +29,8 @@ def run(runner: MultiAssetRunner, feed: ReplayFeed, subs) -> list:
 
 
 def two_instrument_feed(n: int = 400):
-    return ReplayFeed(frames={(BTC, "4h"): synthetic_ohlcv(n=n, freq="4h", seed=1),
-                              (ETH, "4h"): synthetic_ohlcv(n=n, freq="4h", seed=2)})
+    return ReplayFeed(frames={BTC.at("4h"): synthetic_ohlcv(n=n, freq="4h", seed=1),
+                              ETH.at("4h"): synthetic_ohlcv(n=n, freq="4h", seed=2)})
 
 
 def test_each_instrument_gets_its_own_buffer():
@@ -60,11 +60,11 @@ def test_one_instrument_matches_the_single_asset_runner():
     strategy = get_strategy("donchian")
 
     multi = MultiAssetRunner(strategies={BTC: strategy}, timeframe="4h", clock=SimClock())
-    multi_signals = run(multi, ReplayFeed(frames={(BTC, "4h"): df}), [Subscription(BTC, "4h")])
+    multi_signals = run(multi, ReplayFeed(frames={BTC.at("4h"): df}), [Subscription(BTC, "4h")])
 
     single = StrategyRunner(strategy=strategy, instrument=BTC, timeframe="4h", clock=SimClock())
     single_signals = []
-    for event in ReplayFeed(frames={(BTC, "4h"): df})._events_for(Subscription(BTC, "4h")):
+    for event in ReplayFeed(frames={BTC.at("4h"): df})._events_for(Subscription(BTC, "4h")):
         single_signals.extend(single.on_event(event))
 
     assert multi_signals, "two empty lists would match trivially"
@@ -95,6 +95,22 @@ def test_an_unknown_instrument_is_rejected_rather_than_silently_dropped():
     # formats InstrumentId.key, a raw KeyError carries the dataclass repr instead.
     with pytest.raises(KeyError, match="binance:perp:ETH/USDT"):
         run(runner, feed, [Subscription(BTC, "4h"), Subscription(ETH, "4h")])
+
+
+def test_a_bar_at_another_timeframe_is_rejected_rather_than_absorbed():
+    """Dispatch keys on instrument, so a second timeframe would overwrite the first.
+
+    The runner holds one buffer per instrument and one configured timeframe; a 1d
+    bar arriving at a 4h runner has nowhere correct to go, and appending it to the
+    4h buffer would corrupt the series the signal is computed from.
+    """
+    runner = MultiAssetRunner(
+        strategies={BTC: get_strategy("donchian")}, timeframe="4h", clock=SimClock()
+    )
+    feed = ReplayFeed(frames={BTC.at("1d"): synthetic_ohlcv(n=5, freq="1D")})
+
+    with pytest.raises(ValueError, match="configured for '4h'"):
+        run(runner, feed, [Subscription(BTC, "1d")])
 
 
 def test_both_instruments_produce_signals_in_a_two_strategy_run():
