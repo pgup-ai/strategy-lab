@@ -787,10 +787,11 @@ async def go():
     async for event in feed.stream(subs):
         snap = clock.on_event(event)
         if snap:
-            values.append(breadth(snap))
             partial += len(snap) < 2
+            if len(snap) >= 2:        # breadth refuses a one-instrument universe
+                values.append(breadth(snap))
     snap = clock.flush()
-    if snap: values.append(breadth(snap))
+    if snap and len(snap) >= 2: values.append(breadth(snap))
     return values, partial
 
 vals, partial = asyncio.run(go())

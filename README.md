@@ -371,10 +371,13 @@ subs = [Subscription(InstrumentId("binance", "perp", s), "4h")
         for s in ("BTC/USDT", "ETH/USDT")]
 feed, clock = ReplayFeed.from_database(subs), MarketClock()
 
-async for event in feed.stream(subs):
-    snapshot = clock.on_event(event)
-    if snapshot:
+def score(snapshot):
+    if snapshot and len(snapshot) >= 2:      # 477 of these hold BTC alone
         breadth(snapshot)   # strategy_lab.features.cross_sectional
+
+async for event in feed.stream(subs):
+    score(clock.on_event(event))
+score(clock.flush())    # the last timestamp has no successor to release it
 ```
 
 `breadth` and `confirms` read one snapshot and nothing else. Both assume a
@@ -384,9 +387,11 @@ snapshots. `breadth` refuses a universe smaller than `min_instruments`
 (default 2) rather than returning a well-formed number that is really just one
 instrument's direction.
 
-Measured over the stored BTC + ETH perp 4h series: **15,128 snapshots, mean
-breadth 0.512, 477 partial universes** — that last figure is exactly the
-stretch where BTC had listed and ETH had not (2019-09-08 to 2019-11-27).
+Measured over the stored BTC + ETH perp 4h series: **15,128 snapshots, of which
+477 are partial** — that last figure is the stretch where BTC had listed and ETH
+had not (2019-09-08 to 2019-11-27). Mean breadth over the **14,651 complete
+cross-sections** is **0.512**; the partial ones are skipped rather than scored,
+which is what the guard in the loop above is doing.
 
 ## Live Report Serving
 
