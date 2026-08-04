@@ -11,10 +11,18 @@ from strategy_lab.backtests.engine import ExitMode, run_backtest
 from strategy_lab.backtests.sizing import (
     SizeMode,
     realized_volatility,
+    vol_warmup_bars,
     volatility_target_weights,
 )
 from strategy_lab.market_data.base import MarketDataIdentity
 from strategy_lab.strategies import get_strategy
+
+
+# Small enough that ``20 x span`` warmup bars leave most of a 500-bar frame
+# converged. The production default is 96, whose 1,920-bar warmup would zero
+# every weight on these frames and make each assertion below vacuously true.
+_SPAN = 20
+_WARM = vol_warmup_bars(_SPAN)
 
 
 def _returns(scale: float, n: int = 500, seed: int = 5) -> pd.Series:
@@ -22,11 +30,19 @@ def _returns(scale: float, n: int = 500, seed: int = 5) -> pd.Series:
     return pd.Series(np.random.default_rng(seed).normal(0, scale, n), index=index)
 
 
+def _weights(returns: pd.Series, **kwargs) -> pd.Series:
+    kwargs.setdefault("target_annual_vol", 0.10)
+    kwargs.setdefault("bars_per_year", 2190)
+    kwargs.setdefault("span", _SPAN)
+    return volatility_target_weights(returns, **kwargs)
+
+
 def test_weights_are_capped():
-    weights = volatility_target_weights(
-        _returns(0.0001), target_annual_vol=0.10, bars_per_year=2190, max_weight=2.0
+    weights = _weights(_returns(0.0001), max_weight=2.0)
+    assert weights.max() == pytest.approx(2.0), (
+        "a market this calm must request more than the cap, or the ceiling is "
+        "never exercised and this test asserts nothing"
     )
-    assert weights.max() <= 2.0
 
 
 def test_realized_volatility_annualizes():
@@ -37,39 +53,41 @@ def test_realized_volatility_annualizes():
 
 def test_zero_volatility_does_not_produce_infinite_weight():
     flat = pd.Series(
-        0.0, index=pd.date_range("2024-01-01", periods=200, freq="4h", tz="UTC", name="timestamp")
+        0.0, index=pd.date_range("2024-01-01", periods=500, freq="4h", tz="UTC", name="timestamp")
     )
-    weights = volatility_target_weights(flat, target_annual_vol=0.10, bars_per_year=2190)
+    weights = _weights(flat)
     assert np.isfinite(weights).all()
 
 
 def test_a_ten_times_calmer_market_gets_a_ten_times_larger_weight():
     """Targeting constant *risk* means weight is inversely proportional to volatility."""
     calm, wild = _returns(0.001), _returns(0.01)
-    w_calm = volatility_target_weights(
-        calm, target_annual_vol=0.10, bars_per_year=2190, max_weight=1e6
-    )
-    w_wild = volatility_target_weights(
-        wild, target_annual_vol=0.10, bars_per_year=2190, max_weight=1e6
-    )
+    w_calm = _weights(calm, max_weight=1e6)
+    w_wild = _weights(wild, max_weight=1e6)
     assert w_calm.iloc[-1] / w_wild.iloc[-1] == pytest.approx(10.0, rel=0.02)
 
 
 def test_doubling_the_target_doubles_the_weight():
     returns = _returns(0.01)
-    single = volatility_target_weights(returns, target_annual_vol=0.10, bars_per_year=2190)
-    double = volatility_target_weights(returns, target_annual_vol=0.20, bars_per_year=2190)
+    single = _weights(returns)
+    double = _weights(returns, target_annual_vol=0.20)
+    assert single.iloc[-1] > 0, "a zero weight would make the ratio below vacuous"
     assert double.iloc[-1] == pytest.approx(2 * single.iloc[-1], rel=1e-9)
 
 
 def test_weights_are_causal():
     """Sizing must not read the future -- a later shock cannot change an earlier weight."""
+    poison_at = _WARM + 50
     returns = _returns(0.01)
     poisoned = returns.copy()
-    poisoned.iloc[300:] = 5.0
-    base = volatility_target_weights(returns, target_annual_vol=0.10, bars_per_year=2190)
-    after = volatility_target_weights(poisoned, target_annual_vol=0.10, bars_per_year=2190)
-    pd.testing.assert_series_equal(base.iloc[:300], after.iloc[:300])
+    poisoned.iloc[poison_at:] = 5.0
+    base = _weights(returns)
+    after = _weights(poisoned)
+    assert (base.iloc[:poison_at] > 0).any(), (
+        "every weight before the poison is zero, so the comparison below holds "
+        "for any implementation"
+    )
+    pd.testing.assert_series_equal(base.iloc[:poison_at], after.iloc[:poison_at])
 
 
 def test_realized_volatility_scales_with_the_bar_count_per_year():
@@ -83,15 +101,17 @@ def test_realized_volatility_scales_with_the_bar_count_per_year():
 def test_a_missing_return_does_not_poison_every_later_weight():
     returns = _returns(0.01)
     returns.iloc[10] = np.nan
-    weights = volatility_target_weights(returns, target_annual_vol=0.10, bars_per_year=2190)
+    weights = _weights(returns)
     assert np.isfinite(weights).all()
+    assert (weights > 0).any(), "an all-zero series is finite for the wrong reason"
 
 
 def test_sizing_is_blind_to_direction():
     """A size multiplier, not a direction: mirroring every return must not move a weight."""
     returns = _returns(0.01)
-    up = volatility_target_weights(returns, target_annual_vol=0.10, bars_per_year=2190)
-    down = volatility_target_weights(-returns, target_annual_vol=0.10, bars_per_year=2190)
+    up = _weights(returns)
+    down = _weights(-returns)
+    assert (up > 0).any(), "an all-zero series matches its mirror trivially"
     assert (up >= 0).all()
     pd.testing.assert_series_equal(up, down)
 
@@ -155,7 +175,15 @@ def test_a_calm_regime_gets_a_larger_entry_than_a_violent_one(tmp_path):
     split = df.index[len(df) // 2]
 
     fixed = _entry_notional(_run(tmp_path, df))
-    targeted = _entry_notional(_run(tmp_path, df, size_mode=SizeMode.VOL_SCALED_ENTRY))
+    targeted = _entry_notional(
+        _run(tmp_path, df, size_mode=SizeMode.VOL_SCALED_ENTRY, vol_span=_SPAN)
+    )
+
+    assert targeted.index.min() < split, (
+        f"every vol-scaled entry landed after the regime split; the span-{_SPAN} "
+        f"estimator's {_WARM}-bar warmup covers the calm half and there is "
+        f"nothing to compare"
+    )
 
     assert fixed.to_numpy() == pytest.approx(fixed.iloc[0])
     assert targeted[targeted.index < split].mean() > 3 * targeted[targeted.index >= split].mean()
@@ -178,13 +206,15 @@ def test_only_the_entry_bar_weight_lands_and_a_later_one_never_resizes(tmp_path)
     measured and the notional matches to float precision rather than loosely.
     """
     df = _regime_shift_frame(wild=0.05)
-    result = _run(tmp_path, df, size_mode=SizeMode.VOL_SCALED_ENTRY, max_weight=1.0)
+    result = _run(
+        tmp_path, df, size_mode=SizeMode.VOL_SCALED_ENTRY, max_weight=1.0, vol_span=_SPAN
+    )
 
     weights = volatility_target_weights(
         df["close"].pct_change(),
         target_annual_vol=0.30,
         bars_per_year=2191.5,
-        span=96,
+        span=_SPAN,
         max_weight=1.0,
     )
     trades = pd.read_csv(
@@ -290,3 +320,93 @@ def test_a_weight_the_book_can_fill_is_left_alone(tmp_path):
 
     config = json.loads((result.report_dir / "config.json").read_text())
     assert config["max_weight_effective"] == 2.0
+
+
+# --- estimator warmup ------------------------------------------------------
+
+
+def test_the_estimator_warmup_is_zero_weighted():
+    """``ewm().std()`` is finite long before it means anything.
+
+    An estimate exists from the second observation, so the earlier version
+    returned a full series whose leading values were a function of where the
+    frame happened to start. Measured on the canonical BTC perp 4h frame at the
+    production span of 96: the cold-start weight peaks at 1.551 and sits at or
+    above the 1.053 the book can actually fill on **104 of the 1,920** warmup
+    bars, against a converged mean of 0.644.
+    """
+    weights = _weights(_returns(0.01), max_weight=1e6)
+
+    assert (weights.iloc[:_WARM] == 0.0).all(), (
+        f"weights inside the {_WARM}-bar estimator warmup are non-zero, so an "
+        f"entry there is sized off a number that has not converged"
+    )
+    assert (weights.iloc[_WARM:] > 0.0).all(), (
+        "the warmup swallowed the whole series; nothing is left to size with"
+    )
+
+
+def test_a_cold_start_estimate_is_not_merely_noisy_but_biased():
+    """Why the prefix is dropped rather than trusted with a wide tolerance.
+
+    An ``ewm(adjust=False)`` variance is seeded from almost nothing and climbs
+    towards the truth, so early volatility reads *low* and the weight it implies
+    reads *high* -- the direction that puts on the largest positions exactly
+    where the estimate is worst.
+    """
+    returns = _returns(0.01)
+    realized = realized_volatility(returns, span=_SPAN, bars_per_year=2190)
+    cold = 0.10 / realized.iloc[1:10]
+    converged = (0.10 / realized.iloc[_WARM:]).mean()
+
+    assert cold.max() > 2.0 * converged, (
+        f"cold-start weight peaks at {cold.max():.3f} against a converged mean "
+        f"of {converged:.3f}; if the two agreed there would be nothing to mask"
+    )
+
+
+def test_no_entry_is_sized_off_an_unconverged_estimate(tmp_path):
+    """The engine must mask the estimator's warmup, not merely the strategy's.
+
+    ``donchian`` declares 96 bars; the span-96 estimator needs 1,920. Taking the
+    strategy's number would leave 1,824 bars of entries sized off a weight that
+    is still converging -- and it is the entry *size*, not the entry itself,
+    that would be wrong, which no trade count would reveal.
+    """
+    df = _regime_shift_frame()
+    result = _run(tmp_path, df, size_mode=SizeMode.VOL_SCALED_ENTRY, vol_span=_SPAN)
+
+    config = json.loads((result.report_dir / "config.json").read_text())
+    assert config["vol_warmup_bars"] == _WARM
+    assert config["warmup_bars"] == _WARM, (
+        f"the run masked {config['warmup_bars']} bars; the span-{_SPAN} "
+        f"estimator needs {_WARM} and is the deeper of the two claims"
+    )
+
+    trades = pd.read_csv(result.trades_path, parse_dates=["Entry Timestamp"])
+    assert not trades.empty
+    assert trades["Entry Timestamp"].min() >= df.index[_WARM], (
+        f"first entry at {trades['Entry Timestamp'].min()} precedes the "
+        f"estimator warmup ending {df.index[_WARM]}"
+    )
+
+
+def test_a_frame_too_short_for_the_estimator_is_refused(tmp_path):
+    """Under-trading silently is the failure this replaces.
+
+    Every weight on such a frame is zero, so every entry is filled at size zero
+    and the run reports a flat curve and an empty trade list -- indistinguishable
+    from a strategy that found no setups.
+    """
+    df = _regime_shift_frame(n=_WARM)
+
+    with pytest.raises(ValueError, match="warmup") as raised:
+        _run(tmp_path, df, size_mode=SizeMode.VOL_SCALED_ENTRY, vol_span=_SPAN)
+    message = str(raised.value)
+    assert "volatility estimator" in message and str(_WARM) in message, (
+        f"error blames the strategy rather than the estimator that bound: {message}"
+    )
+
+    # The same frame is fine under fixed sizing, so the refusal is about the
+    # estimator and not about the frame being short in general.
+    assert not pd.read_csv(_run(tmp_path, df).trades_path).empty

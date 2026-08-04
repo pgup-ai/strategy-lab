@@ -8,6 +8,7 @@ from pathlib import Path
 import typer
 
 from strategy_lab.backtests import ExitMode, SizeMode, run_backtest
+from strategy_lab.backtests.sizing import DEFAULT_VOL_SPAN
 from strategy_lab.db import init_db, list_candle_sets, load_candles, upsert_candles
 from strategy_lab.db.candles import normalize_candle_frame
 from strategy_lab.market_data.base import MarketDataIdentity
@@ -348,9 +349,19 @@ def backtest(
             "scales the ENTRY only: an open position is never resized, because "
             "from_signals fills once per state change, so a position held through a "
             "calm-to-violent shift keeps its calm-regime notional. The estimator is an "
-            "EWM (span 96) that decays its seed instead of dropping it, so weights need "
-            "roughly 20x span -- about 1,900 bars -- to converge; a shorter frame "
-            "under-trades its early bars rather than erroring."
+            "EWM that decays its seed instead of dropping it, so weights need roughly "
+            "20x --vol-span to converge and no entry is taken before that."
+        ),
+    ),
+    vol_span: int = typer.Option(
+        DEFAULT_VOL_SPAN,
+        "--vol-span",
+        min=1,
+        help=(
+            "Span of the EWM volatility estimator under --size-mode vol-scaled-entry. "
+            "It also sets the run's warmup: entries are masked for 20x this many bars, "
+            "and a frame shorter than that is refused rather than sized off an "
+            "estimate that has not converged."
         ),
     ),
     vol_target: float = typer.Option(
@@ -419,6 +430,7 @@ def backtest(
                 size_mode=size_mode,
                 vol_target=vol_target,
                 max_weight=max_weight,
+                vol_span=vol_span,
             )
         except ValueError as exc:
             # Incompatible flag combinations (sizing collisions, exit modes a

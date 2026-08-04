@@ -45,6 +45,25 @@ import pandas as pd
 
 DEFAULT_VOL_SPAN = 96
 
+# ``ewm(adjust=False)`` is recursive from bar 0 and decays its seed rather than
+# dropping it, so a span-n estimate is still wrong after n bars. Measured in
+# Phase 1a on this repo's own EMAs: a span-200 recursion only becomes bit-exact
+# around 4000 bars. The same multiple governs the volatility estimator below,
+# which is the same recursion applied to squared deviations.
+EWM_WARMUP_MULTIPLE = 20
+
+
+def vol_warmup_bars(span: int) -> int:
+    """Bars an ``ewm(adjust=False)`` estimate of ``span`` needs to converge.
+
+    This is what makes a volatility-scaled run reproducible. The estimate is
+    *finite* from a handful of observations -- it just is not yet a measurement
+    of anything -- so without a declared warmup the weight on an early bar is a
+    function of where the frame happens to start, and moving ``--start`` changes
+    the size of entries over market the run has in common with its predecessor.
+    """
+    return EWM_WARMUP_MULTIPLE * span
+
 
 class SizeMode(str, Enum):
     """How the engine turns ``position_pct`` into a per-entry size.
@@ -110,9 +129,14 @@ def volatility_target_weights(
     ``[0, max_weight]``, so a degenerate estimate produces a capped weight
     instead of a fictional one.
 
-    Warmup bars have no volatility estimate yet; they get weight zero rather
-    than an unbounded one, so a cold start under-trades instead of betting the
-    account on three bars of history.
+    **Bars inside the estimator's own warmup get weight zero**, not the
+    unconverged number ``ewm`` is happy to return for them. ``ewm().std()`` is
+    finite after two observations, so the earlier version of this function
+    handed back a full series in which the leading values were arbitrary --
+    typically pinned to ``max_weight``, since a cold estimate of volatility is
+    usually far too small. That made sizing depend on where the frame began: the
+    same market segment was sized differently by two runs with different
+    ``--start``. See :func:`vol_warmup_bars` for how long that takes.
     """
     if target_annual_vol <= 0:
         raise ValueError("target_annual_vol must be > 0")
@@ -121,12 +145,16 @@ def volatility_target_weights(
 
     realized = realized_volatility(returns, span=span, bars_per_year=bars_per_year)
     weights = target_annual_vol / realized.where(realized > 0)
-    return weights.replace([np.inf, -np.inf], np.nan).fillna(0.0).clip(0.0, max_weight)
+    weights = weights.replace([np.inf, -np.inf], np.nan).fillna(0.0).clip(0.0, max_weight)
+    weights.iloc[: vol_warmup_bars(span)] = 0.0
+    return weights
 
 
 __all__ = [
     "DEFAULT_VOL_SPAN",
+    "EWM_WARMUP_MULTIPLE",
     "SizeMode",
     "realized_volatility",
+    "vol_warmup_bars",
     "volatility_target_weights",
 ]

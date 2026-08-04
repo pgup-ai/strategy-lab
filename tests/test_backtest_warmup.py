@@ -45,11 +45,11 @@ class _TwoEntryStrategy:
     def generate_signals(self, df: pd.DataFrame) -> SignalSet:
         flat = pd.Series(False, index=df.index)
         long_entries = flat.copy()
-        long_entries.iloc[_EARLY_ENTRY] = True
-        long_entries.iloc[_LATE_ENTRY] = True
         long_exits = flat.copy()
-        long_exits.iloc[_EARLY_ENTRY + 2] = True
-        long_exits.iloc[_LATE_ENTRY + 2] = True
+        for entry in (_EARLY_ENTRY, _LATE_ENTRY):
+            if entry + 2 < len(df):
+                long_entries.iloc[entry] = True
+                long_exits.iloc[entry + 2] = True
         return SignalSet(
             long_entries=long_entries,
             long_exits=long_exits,

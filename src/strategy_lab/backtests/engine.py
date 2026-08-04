@@ -19,6 +19,7 @@ from strategy_lab.backtests.report import render_report_html
 from strategy_lab.backtests.sizing import (
     DEFAULT_VOL_SPAN,
     SizeMode,
+    vol_warmup_bars,
     volatility_target_weights,
 )
 from strategy_lab.market_data.base import MarketDataIdentity
@@ -101,10 +102,9 @@ def run_backtest(
         raise ValueError(f"No candles loaded for {identity}")
 
     df = df.sort_index()
-    warmup = _warmup_bars(strategy, df)
-    signals = strategy.generate_signals(df)
     exit_mode = ExitMode(exit_mode)
     size_mode = SizeMode(size_mode)
+    signals = strategy.generate_signals(df)
     signals = _vol_scaled_entry_weights(
         signals,
         df=df,
@@ -116,6 +116,9 @@ def run_backtest(
         vol_span=vol_span,
         position_pct=position_pct,
     )
+    # After the sizing check, so an incompatible pair of flags is reported as
+    # such rather than as whichever data problem the frame happens to have too.
+    warmup = _warmup_bars(strategy, df, size_mode=size_mode, vol_span=vol_span)
     long_exits, short_exits = _exit_signals(
         df=df,
         signals=signals,
@@ -273,8 +276,21 @@ def run_backtest(
     )
 
 
-def _warmup_bars(strategy: Strategy, df: pd.DataFrame) -> int:
-    """How many leading bars the strategy declares are not yet converged.
+def _warmup_bars(
+    strategy: Strategy,
+    df: pd.DataFrame,
+    *,
+    size_mode: SizeMode,
+    vol_span: int,
+) -> int:
+    """Leading bars nothing may trade on, from whichever estimator is slowest.
+
+    Two claims compete and the deeper one binds. The strategy's own
+    ``warmup_bars`` is one. The other belongs to the sizing layer: under
+    ``vol-scaled-entry`` the weight comes from an ``ewm(adjust=False)``
+    volatility estimate, which needs roughly 20x its span before it means
+    anything. Sizing an entry off the shorter of the two is the same defect in
+    a different layer -- an entry taken on a number that has not converged.
 
     Refused rather than clamped when the frame is entirely warmup: a run that
     masks every bar produces an empty ``trades.csv``, a flat equity curve and a
@@ -282,12 +298,17 @@ def _warmup_bars(strategy: Strategy, df: pd.DataFrame) -> int:
     it reads as a strategy that declined to trade. The sweep already refuses the
     same case for the same reason.
     """
-    warmup = int(strategy.warmup_bars)
+    budgets = {f"{strategy.name} declares {strategy.warmup_bars}": int(strategy.warmup_bars)}
+    if size_mode is not SizeMode.FIXED:
+        estimator = vol_warmup_bars(vol_span)
+        budgets[f"the span-{vol_span} volatility estimator needs {estimator}"] = estimator
+
+    reason, warmup = max(budgets.items(), key=lambda item: item[1])
     if warmup >= len(df):
         raise ValueError(
-            f"{strategy.name} declares {warmup} warmup bars but the frame has "
-            f"{len(df)}; every bar would be masked and the run would report a "
-            f"flat curve rather than an absence of data"
+            f"{reason} warmup bars but the frame has {len(df)}; every bar would "
+            f"be masked and the run would report a flat curve rather than an "
+            f"absence of data"
         )
     return warmup
 
@@ -426,6 +447,7 @@ def _sizing_config(
         "max_weight": max_weight,
         "max_weight_effective": _executable_max_weight(max_weight, position_pct),
         "vol_span": vol_span,
+        "vol_warmup_bars": vol_warmup_bars(vol_span),
         "bars_per_year": timeframe_to_bars_per_year(timeframe),
     }
 

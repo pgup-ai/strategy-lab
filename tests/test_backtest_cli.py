@@ -133,13 +133,22 @@ def test_an_equity_run_needs_no_funding_and_applies_none(candles, tmp_path):
 
 
 def test_size_mode_reaches_the_engine_and_is_recorded(candles, funding, tmp_path):
-    result = _invoke(tmp_path, *_PERP, "--size-mode", "vol-scaled-entry", "--vol-target", "0.4")
+    # --vol-span 20 because the estimator's warmup is 20x the span and the
+    # fixture frame is 900 bars: the production default of 96 needs 1,920 and is
+    # refused on it, which is the point of the flag existing.
+    result = _invoke(
+        tmp_path, *_PERP,
+        "--size-mode", "vol-scaled-entry", "--vol-target", "0.4", "--vol-span", "20",
+    )
 
     assert result.exit_code == 0, result.output
     [report_dir] = list(tmp_path.iterdir())
     config = json.loads((report_dir / "config.json").read_text())
     assert config["size_mode"] == "vol-scaled-entry"
     assert config["vol_target"] == 0.4
+    assert config["vol_span"] == 20
+    assert config["vol_warmup_bars"] == 400
+    assert config["warmup_bars"] == 400
 
 
 def test_the_withdrawn_vol_target_spelling_is_not_quietly_accepted(candles, funding, tmp_path):
