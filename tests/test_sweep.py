@@ -546,7 +546,9 @@ def test_donchians_exit_channel_is_inert_once_it_is_no_narrower_than_the_entry()
     triggers the reversal -- which outranks it. Measured on the 15,128-bar BTC
     perp 4h frame: **zero** bars where a long exit fires without a short entry
     beside it, and the positions for ``exit_span`` 20, 40 and 80 are identical
-    at ``entry_span=20``.
+    at ``entry_span=20``. This test reproduces the degeneracy on a synthetic
+    frame at ``entry_span=48`` with ``exit_span`` 48/96/192 -- same relation,
+    spans chosen to fit the 900-bar fixture rather than the gate's grid.
 
     So 5 of the gate's 16 cells are exact duplicates of another cell. The
     degeneracy needs shorts: with ``allow_shorts=False`` there is no reversal to

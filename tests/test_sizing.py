@@ -315,7 +315,11 @@ def test_a_weight_the_book_can_fill_is_left_alone(tmp_path):
     df = _regime_shift_frame()
 
     with warnings.catch_warnings():
-        warnings.simplefilter("error")
+        # Only the sizing warning should fail this test -- a bare
+        # simplefilter("error") also promotes unrelated FutureWarnings from
+        # pandas/vectorbt, failing it for reasons that have nothing to do here.
+        warnings.simplefilter("ignore")
+        warnings.filterwarnings("error", message=".*max_weight.*")
         result = _run(
             tmp_path, df, size_mode=SizeMode.VOL_SCALED_ENTRY, max_weight=2.0, position_pct=0.5
         )
