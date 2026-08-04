@@ -202,7 +202,7 @@ def test_klines_paginate_forward_past_the_last_returned_bar():
 
 def test_klines_stop_at_until():
     start = PAGE_START_MS
-    client, session, _ = _client(FakeResponse(_kline_page(KLINE_PAGE_LIMIT, start_ms=start)))
+    client, _, _ = _client(FakeResponse(_kline_page(KLINE_PAGE_LIMIT, start_ms=start)))
     until = pd.Timestamp(start + 2 * FOUR_HOURS_MS, unit="ms", tz="UTC")
 
     df = client.fetch_klines("BTC/USDT", "4h", since="2024-01-01", until=str(until))
@@ -328,7 +328,7 @@ def test_open_interest_refuses_a_start_outside_the_measured_window():
 
 
 def test_a_rate_limit_is_retried_rather_than_truncating_the_series():
-    client, session, slept = _client(
+    client, session, _ = _client(
         FakeResponse({"code": -1003}, status_code=429),
         FakeResponse(_kline_page(2)),
     )

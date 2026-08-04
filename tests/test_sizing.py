@@ -227,8 +227,10 @@ def test_only_the_entry_bar_weight_lands_and_a_later_one_never_resizes(tmp_path)
     assert notional.to_numpy() == pytest.approx(10_000.0 * 0.95 * entry_weights, rel=1e-9)
 
     held = [
-        weights.loc[entry:exit]
-        for entry, exit in zip(trades["Entry Timestamp"], trades["Exit Timestamp"])
+        weights.loc[entry_ts:exit_ts]
+        for entry_ts, exit_ts in zip(
+            trades["Entry Timestamp"], trades["Exit Timestamp"], strict=True
+        )
     ]
     assert max((span.max() / span.min()) for span in held if span.min() > 0) > 5.0
 

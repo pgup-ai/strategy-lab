@@ -73,7 +73,7 @@ def sweep_parameters(
     cells = [
         (params, dataclasses.replace(template, **params))
         for params in (
-            dict(zip(names, combination))
+            dict(zip(names, combination, strict=True))
             for combination in itertools.product(*(grid[name] for name in names))
         )
     ]

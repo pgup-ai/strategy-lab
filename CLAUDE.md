@@ -121,7 +121,8 @@ Key design decisions that span multiple files:
   historical OI study is unanswerable from this source; **`markPrice` is `""`
   on funding records before 2023-10-31**, and `Decimal("")` raises, so it is
   parsed as NULL; and **funding timestamps are up to 47 ms past the 8h
-  boundary**, so align funding to bars by flooring, never by equality against a
+  boundary**, so match funding to the bar whose interval contains it, never by
+  equality against a
   generated 8h range. The settlement interval is per-contract — nothing here
   hardcodes 8h.
 - **Values that arrive as exchange strings stay `Decimal` end to end.**
