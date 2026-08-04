@@ -27,10 +27,15 @@ class EmaCross:
         require_positive_span(self.name, "fast_span", self.fast_span)
         require_positive_span(self.name, "slow_span", self.slow_span)
         # Always recomputed, so a ``warmup_bars=`` passed by a caller is
-        # overwritten: it is a measured consequence of the slow span, not a free
+        # overwritten: it is a measured consequence of the spans, not a free
         # parameter. Left as a field so ``dataclasses.fields`` still reports it.
-        # The slow span binds -- the fast EMA converges strictly sooner.
-        object.__setattr__(self, "warmup_bars", _EWM_WARMUP_MULTIPLE * self.slow_span)
+        # The larger span binds, not ``slow_span``: a sweep cell is free to set
+        # ``fast_span`` above it, and then the "fast" EMA is the slower recursion.
+        object.__setattr__(
+            self,
+            "warmup_bars",
+            _EWM_WARMUP_MULTIPLE * max(self.fast_span, self.slow_span),
+        )
 
     def generate_signals(self, df: pd.DataFrame) -> SignalSet:
         validate_ohlcv(df)

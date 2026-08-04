@@ -40,8 +40,11 @@ def require_positive_span(strategy: str, field: str, value: object) -> None:
     field. Zero is the quieter half: ``pct_change(0)`` and ``rolling(0)`` raise
     nothing and yield a strategy that simply never trades, which reads on a
     surface as a parameter region with no edge rather than as a broken cell.
+
+    ``bool`` is rejected separately because it is an ``int`` subclass: without
+    that, ``lookback=True`` passes and silently behaves as ``lookback=1``.
     """
-    if not isinstance(value, int) or value < 1:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
         raise ValueError(f"{strategy} {field} must be a positive integer, got {value!r}")
 
 

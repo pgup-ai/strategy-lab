@@ -19,6 +19,12 @@ from strategy_lab.universe.etfs import ETF_UNIVERSE
 
 app = typer.Typer(help="Fetch candles, store them locally, and run reproducible backtests.")
 
+# The perp/funding/OI commands all go through `BinanceFuturesClient`, which is
+# hardwired to `fapi.binance.com`. The --exchange value is only a label written
+# into the stored identity, so anything else here files Binance data under
+# another venue's name.
+SUPPORTED_PERP_EXCHANGES = ("binance",)
+
 
 @app.command("init-db")
 def init_db_command() -> None:
@@ -69,7 +75,9 @@ def fetch_perp(
     timeframe: str = typer.Option("4h", help="Candle timeframe, for example 4h."),
     since: str = typer.Option("2019-09-01", help="UTC start time. History begins 2019-09-09."),
     until: str | None = typer.Option(None, help="UTC end time. Defaults to now."),
-    exchange: str = typer.Option("binance", help="Venue id used in the stored identity."),
+    exchange: str = typer.Option(
+        "binance", help="Venue id used in the stored identity. Only 'binance' is supported."
+    ),
     dry_run: bool = typer.Option(False, "--dry-run", help="Fetch and report, but store nothing."),
 ) -> None:
     """Backfill Binance USD-M perp candles into `market_candles`.
@@ -112,7 +120,9 @@ def fetch_funding(
     symbol: str = typer.Option("BTC/USDT", help="Contract symbol, for example BTC/USDT."),
     since: str = typer.Option("2019-09-01", help="UTC start time. History begins 2019-09-10."),
     until: str | None = typer.Option(None, help="UTC end time. Defaults to now."),
-    exchange: str = typer.Option("binance", help="Venue id used in the stored identity."),
+    exchange: str = typer.Option(
+        "binance", help="Venue id used in the stored identity. Only 'binance' is supported."
+    ),
     dry_run: bool = typer.Option(False, "--dry-run", help="Fetch and report, but store nothing."),
 ) -> None:
     """Backfill perp funding rates into `funding_rates`.
@@ -141,7 +151,9 @@ def fetch_funding(
 def fetch_open_interest(
     symbol: str = typer.Option("BTC/USDT", help="Contract symbol, for example BTC/USDT."),
     period: str = typer.Option("4h", help="Snapshot period: 5m, 15m, 30m, 1h, 2h, 4h, 6h, 12h, 1d."),
-    exchange: str = typer.Option("binance", help="Venue id used in the stored identity."),
+    exchange: str = typer.Option(
+        "binance", help="Venue id used in the stored identity. Only 'binance' is supported."
+    ),
     dry_run: bool = typer.Option(False, "--dry-run", help="Fetch and report, but store nothing."),
 ) -> None:
     """Collect open-interest snapshots into `open_interest`.
@@ -176,10 +188,16 @@ def fetch_open_interest(
 
 # These four exist so the fetch tests can substitute the venue and storage,
 # matching `_create_run`/`_write_signals` below.
-def _futures_client(**kwargs):
+def _futures_client(*, exchange: str, **kwargs):
     from strategy_lab.market_data.binance_futures import BinanceFuturesClient
 
-    return BinanceFuturesClient(**kwargs)
+    if exchange not in SUPPORTED_PERP_EXCHANGES:
+        raise typer.BadParameter(
+            f"{exchange!r} is not supported: this client only speaks to Binance USD-M "
+            f"futures, so another --exchange would file Binance data under that venue's "
+            f"name. Supported: {', '.join(SUPPORTED_PERP_EXCHANGES)}."
+        )
+    return BinanceFuturesClient(exchange=exchange, **kwargs)
 
 
 def _upsert_funding(rows):
@@ -429,15 +447,20 @@ def _funding_rates(identity: MarketDataIdentity, df):
     if identity.market_type != "perp":
         return None
 
-    from strategy_lab.backtests.costs import funding_coverage_gaps
+    from strategy_lab.backtests.costs import funding_coverage_gaps, window_end
     from strategy_lab.db.funding import load_funding
 
+    # The right bound is the last bar's exclusive right edge, not its opening
+    # timestamp: a bar covers an interval, and Binance stamps settlements up to
+    # 47 ms past the boundary, so bounding at the open drops a settlement that
+    # falls inside the final bar -- either failing the coverage check on a
+    # complete history or charging that settlement as zero.
     rates = load_funding(
         exchange=identity.exchange,
         market_type=identity.market_type,
         symbol=identity.symbol,
         start=str(df.index.min()),
-        end=str(df.index.max()),
+        end=str(window_end(df.index)),
     )
     if rates.empty:
         raise typer.BadParameter(

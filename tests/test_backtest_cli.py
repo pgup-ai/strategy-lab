@@ -14,6 +14,7 @@ import pytest
 from typer.testing import CliRunner
 
 from strategy_lab import cli
+from strategy_lab.market_data.base import MarketDataIdentity
 from tests.conftest import synthetic_ohlcv
 
 runner = CliRunner()
@@ -132,23 +133,32 @@ def test_an_equity_run_needs_no_funding_and_applies_none(candles, tmp_path):
 
 
 def test_size_mode_reaches_the_engine_and_is_recorded(candles, funding, tmp_path):
-    result = _invoke(tmp_path, *_PERP, "--size-mode", "vol-target", "--vol-target", "0.4")
+    result = _invoke(tmp_path, *_PERP, "--size-mode", "vol-scaled-entry", "--vol-target", "0.4")
 
     assert result.exit_code == 0, result.output
     [report_dir] = list(tmp_path.iterdir())
     config = json.loads((report_dir / "config.json").read_text())
-    assert config["size_mode"] == "vol-target"
+    assert config["size_mode"] == "vol-scaled-entry"
     assert config["vol_target"] == 0.4
 
 
-def test_vol_targeting_a_self_sizing_strategy_exits_cleanly(candles, funding, tmp_path):
+def test_the_withdrawn_vol_target_spelling_is_not_quietly_accepted(candles, funding, tmp_path):
+    """The mode was renamed because "targeting" claimed continuous rebalancing that
+    ``from_signals`` never performed. Silently aliasing the old spelling would keep
+    that claim reachable, so it must be rejected rather than mapped."""
+    result = _invoke(tmp_path, *_PERP, "--size-mode", "vol-target")
+
+    assert result.exit_code == 2, result.output
+
+
+def test_vol_scaling_a_self_sizing_strategy_exits_cleanly(candles, funding, tmp_path):
     """An incompatible pair of flags is user error, and must not surface as a traceback."""
     result = runner.invoke(
         cli.app,
         [
             "backtest", "--report-root", str(tmp_path), "--timeframe", "4h",
             "--strategy", "trend_rider_v1_deepseek_v4_pro",
-            "--exit-mode", "opposite_signal_only", "--size-mode", "vol-target", *_PERP,
+            "--exit-mode", "opposite_signal_only", "--size-mode", "vol-scaled-entry", *_PERP,
         ],
     )
 
@@ -171,3 +181,29 @@ def test_a_perp_run_with_no_stored_funding_stops_rather_than_reporting_gross(
     assert result.exit_code != 0
     assert "fetch-funding" in result.output
     assert "--no-funding" in result.output
+
+
+def test_the_funding_query_covers_the_final_bar_not_only_its_opening_stamp(monkeypatch):
+    """A bar covers an interval, and settlements land up to 47 ms past a boundary.
+
+    Bounding the query at the last candle's *opening* timestamp drops a
+    settlement stamped inside the final bar, which either fails the coverage
+    check on a complete history or charges that settlement as zero.
+    """
+    index = pd.date_range("2024-01-01", periods=6, freq="4h", tz="UTC", name="timestamp")
+    df = pd.DataFrame({"close": 100.0}, index=index)
+    settled = index + pd.Timedelta(47, unit="ms")
+
+    def fake_load_funding(*, start=None, end=None, **kwargs):
+        # Inclusive on both bounds, matching the SQL `>= start` / `<= end`.
+        frame = pd.DataFrame({"funding_rate": 0.0001}, index=settled)
+        return frame.loc[pd.Timestamp(start) : pd.Timestamp(end)]
+
+    monkeypatch.setattr("strategy_lab.db.funding.load_funding", fake_load_funding)
+    identity = MarketDataIdentity(
+        exchange="binance", market_type="perp", symbol="BTC/USDT", timeframe="4h"
+    )
+
+    rates = cli._funding_rates(identity, df)
+
+    assert rates.index[-1] == settled[-1]

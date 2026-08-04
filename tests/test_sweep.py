@@ -371,3 +371,38 @@ def test_stability_score_counts_how_much_of_the_surface_works():
     assert np.std(narrow_sharpes) > np.std(plateau_sharpes)
 
     assert stability_score(plateau) > stability_score(two_good_cells)
+
+
+class _AlwaysLong:
+    """Holds a long from the first bar, so the evaluated window opens in the market."""
+
+    name = "always_long"
+    version = "1.0.0"
+    warmup_bars = 0
+
+    def generate_signals(self, df: pd.DataFrame) -> SignalSet:
+        return SignalSet(
+            long_entries=pd.Series(True, index=df.index),
+            long_exits=pd.Series(False, index=df.index),
+            short_entries=pd.Series(False, index=df.index),
+            short_exits=pd.Series(False, index=df.index),
+        )
+
+
+def test_max_drawdown_counts_a_loss_on_the_first_evaluated_bar():
+    """The equity curve starts at par, before the first bar's return is applied.
+
+    Taking ``cummax`` of the already-reduced curve makes an opening loss its own
+    peak, so a cell that drops 10% on the first evaluated bar and then goes flat
+    reports no drawdown at all -- the risk of the cells that fail earliest is
+    exactly the risk that vanishes.
+    """
+    closes = [100.0, 100.0, 100.0, 90.0, 90.0, 90.0]
+    df = pd.DataFrame(
+        {"close": closes},
+        index=pd.date_range("2024-01-01", periods=len(closes), freq="15min", tz="UTC"),
+    )
+
+    point = sweep_module._evaluate(df, _AlwaysLong(), {}, 3, "15m")
+
+    assert point.max_drawdown == pytest.approx(-0.1)

@@ -260,3 +260,28 @@ def test_fetch_open_interest_passes_the_period(wiring):
     [call] = wiring["client"].calls
     assert call["method"] == "fetch_open_interest"
     assert call["period"] == "1h"
+
+
+# --- venue restriction -----------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        ["fetch-perp", "--symbol", "BTC/USDT", "--timeframe", "4h"],
+        ["fetch-funding", "--symbol", "BTC/USDT"],
+        ["fetch-open-interest", "--symbol", "BTC/USDT"],
+    ],
+)
+def test_an_unsupported_exchange_is_refused_rather_than_relabelled(command):
+    """The client only speaks to Binance USD-M; --exchange is only a stored label.
+
+    Deliberately runs without the ``wiring`` fixture so the real
+    ``_futures_client`` is exercised: accepting the flag would fetch from
+    ``fapi.binance.com`` and file the rows under the other venue's identity.
+    """
+    result = runner.invoke(cli.app, [*command, "--exchange", "bybit"])
+
+    assert result.exit_code != 0
+    message = _message(result)
+    assert "bybit" in message and "binance" in message

@@ -39,6 +39,10 @@ RAW_FUNDING_EARLY = [{"symbol": "BTCUSDT", "fundingTime": 1568102400000,
                       "fundingRate": "0.00010000", "markPrice": "", "rateType": "Regular"}]
 
 IDENTITY = dict(exchange="binance", market_type="perp", symbol="BTC/USDT")
+# 2024-01-01. Synthetic pagination pages run 1,500 bars forward from here, and
+# ``parse_klines`` drops any bar whose interval has not elapsed, so a page
+# anchored near the recording date would be discarded as still forming.
+PAGE_START_MS = 1704067200000
 HOUR_MS = 60 * 60 * 1000
 FOUR_HOURS_MS = 4 * HOUR_MS
 
@@ -77,7 +81,7 @@ def _client(*responses, **kwargs):
     return client, session, slept
 
 
-def _kline_page(count: int, start_ms: int = 1785772800000) -> list[list]:
+def _kline_page(count: int, start_ms: int = PAGE_START_MS) -> list[list]:
     return [
         [start_ms + i * FOUR_HOURS_MS, "1.0", "2.0", "0.5", "1.5", "10.0",
          start_ms + (i + 1) * FOUR_HOURS_MS - 1, "15.0", 10, "5.0", "7.5", "0"]
@@ -146,6 +150,24 @@ def test_parsed_rows_carry_exactly_the_storage_columns():
     }
 
 
+def test_the_still_forming_kline_is_not_parsed_as_a_closed_bar():
+    """With no ``endTime`` the venue's last row is the open candle.
+
+    Its OHLCV is provisional and keeps changing, but it reaches storage through
+    the same upsert as a finished bar, so a sweep run before it closes trades on
+    values that no longer exist afterwards.
+    """
+    closed = RAW_KLINE[0]
+    forming = [closed[0] + FOUR_HOURS_MS, *closed[1:6], closed[6] + FOUR_HOURS_MS, *closed[7:]]
+
+    # ``now`` sits on the forming bar's close time, which is the last millisecond
+    # of its interval -- so that interval has not elapsed yet.
+    df = parse_klines([closed, forming], now_ms=forming[6])
+
+    assert len(df) == 1
+    assert df.index[0] == pd.Timestamp(closed[0], unit="ms", tz="UTC")
+
+
 def test_an_empty_kline_payload_keeps_the_populated_shape():
     df = parse_klines([])
     assert df.empty
@@ -164,10 +186,10 @@ def test_klines_paginate_forward_past_the_last_returned_bar():
     market with a short history rather than as a bug.
     """
     first = _kline_page(KLINE_PAGE_LIMIT)
-    second = _kline_page(3, start_ms=1785772800000 + KLINE_PAGE_LIMIT * FOUR_HOURS_MS)
+    second = _kline_page(3, start_ms=PAGE_START_MS + KLINE_PAGE_LIMIT * FOUR_HOURS_MS)
     client, session, _ = _client(FakeResponse(first), FakeResponse(second))
 
-    df = client.fetch_klines("BTC/USDT", "4h", since="2026-08-01")
+    df = client.fetch_klines("BTC/USDT", "4h", since="2024-01-01")
 
     assert len(df) == KLINE_PAGE_LIMIT + 3
     assert len(session.calls) == 2
@@ -179,11 +201,11 @@ def test_klines_paginate_forward_past_the_last_returned_bar():
 
 
 def test_klines_stop_at_until():
-    start = 1785772800000
+    start = PAGE_START_MS
     client, session, _ = _client(FakeResponse(_kline_page(KLINE_PAGE_LIMIT, start_ms=start)))
     until = pd.Timestamp(start + 2 * FOUR_HOURS_MS, unit="ms", tz="UTC")
 
-    df = client.fetch_klines("BTC/USDT", "4h", since="2026-08-01", until=str(until))
+    df = client.fetch_klines("BTC/USDT", "4h", since="2024-01-01", until=str(until))
 
     assert len(df) == 3
     assert df.index.max() == until
@@ -311,7 +333,7 @@ def test_a_rate_limit_is_retried_rather_than_truncating_the_series():
         FakeResponse(_kline_page(2)),
     )
 
-    df = client.fetch_klines("BTC/USDT", "4h", since="2026-08-01")
+    df = client.fetch_klines("BTC/USDT", "4h", since="2024-01-01")
 
     assert len(df) == 2
     assert len(session.calls) == 2
@@ -324,7 +346,7 @@ def test_a_server_error_is_retried():
         FakeResponse(_kline_page(1)),
     )
 
-    assert len(client.fetch_klines("BTC/USDT", "4h", since="2026-08-01")) == 1
+    assert len(client.fetch_klines("BTC/USDT", "4h", since="2024-01-01")) == 1
     assert len(session.calls) == 2
 
 
@@ -334,7 +356,7 @@ def test_retry_after_is_respected_when_the_venue_sends_one():
         FakeResponse(_kline_page(1)),
     )
 
-    client.fetch_klines("BTC/USDT", "4h", since="2026-08-01")
+    client.fetch_klines("BTC/USDT", "4h", since="2024-01-01")
 
     assert slept == [7.0]
 
@@ -347,7 +369,7 @@ def test_backoff_grows_between_attempts():
         FakeResponse(_kline_page(1)),
     )
 
-    client.fetch_klines("BTC/USDT", "4h", since="2026-08-01")
+    client.fetch_klines("BTC/USDT", "4h", since="2024-01-01")
 
     assert slept == [1.0, 2.0, 4.0]
 
@@ -357,7 +379,7 @@ def test_a_persistent_rate_limit_raises_instead_of_returning_a_short_series():
     client, _, _ = _client(*[FakeResponse({}, status_code=429) for _ in range(4)], max_attempts=4)
 
     with pytest.raises(BinanceFuturesError, match="429"):
-        client.fetch_klines("BTC/USDT", "4h", since="2026-08-01")
+        client.fetch_klines("BTC/USDT", "4h", since="2024-01-01")
 
 
 def test_a_client_error_is_not_retried():

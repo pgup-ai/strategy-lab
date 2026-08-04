@@ -118,7 +118,7 @@ def funding_coverage_gaps(
     if len(index) == 0:
         return []
 
-    start, end = index[0], _window_end(index)
+    start, end = index[0], window_end(index)
     settled = pd.DatetimeIndex(funding.dropna().index).sort_values()
     settled = settled[(settled >= start) & (settled < end)]
     if len(settled) < 2:
@@ -160,11 +160,11 @@ def _contained(
     # exactly on a bar open belongs to that bar and one a millisecond earlier
     # belongs to the previous one.
     slot = index.searchsorted(settled, side="right") - 1
-    inside = (slot >= 0) & (settled < _window_end(index))
+    inside = (slot >= 0) & (settled < window_end(index))
     return slot[inside], settled[inside], rates.to_numpy(dtype="float64")[inside]
 
 
-def _window_end(index: pd.DatetimeIndex) -> pd.Timestamp:
+def window_end(index: pd.DatetimeIndex) -> pd.Timestamp:
     """Exclusive right edge of the last bar.
 
     The last bar covers an interval like every other, so a settlement inside it
@@ -178,4 +178,10 @@ def _window_end(index: pd.DatetimeIndex) -> pd.Timestamp:
     return index[-1] + span
 
 
-__all__ = ["CostModel", "apply_funding", "funding_coverage_gaps", "funding_ledger"]
+__all__ = [
+    "CostModel",
+    "apply_funding",
+    "funding_coverage_gaps",
+    "funding_ledger",
+    "window_end",
+]

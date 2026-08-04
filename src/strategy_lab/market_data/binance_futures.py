@@ -44,9 +44,11 @@ OPEN_INTEREST_HISTORY_DAYS = 30
 
 OHLCV_COLUMNS = ("open", "high", "low", "close", "volume")
 
-# Binance klines are positional arrays: [openTime, o, h, l, c, volume, ...].
+# Binance klines are positional arrays:
+# [openTime, o, h, l, c, volume, closeTime, ...].
 _KLINE_OPEN_TIME = 0
 _KLINE_OHLCV = slice(1, 6)
+_KLINE_CLOSE_TIME = 6
 
 
 class BinanceFuturesError(RuntimeError):
@@ -58,7 +60,7 @@ def to_venue_symbol(symbol: str) -> str:
     return symbol.replace("/", "").upper()
 
 
-def parse_klines(raw: list[list]) -> pd.DataFrame:
+def parse_klines(raw: list[list], *, now_ms: int | None = None) -> pd.DataFrame:
     """Positional kline arrays -> a UTC-indexed float64 OHLCV frame.
 
     float64 rather than ``Decimal`` on purpose: this frame is handed to
@@ -66,7 +68,15 @@ def parse_klines(raw: list[list]) -> pd.DataFrame:
     for the NUMERIC bind. That round-trip is exact for every float64 value, and
     it keeps perp candles on the identical hardened path as spot and equity
     candles rather than inventing a second one.
+
+    The still-forming kline is dropped. Without an ``endTime`` the venue returns
+    the open candle as the last row, whose OHLCV is provisional and will change;
+    stored through the same upsert as finished bars it is indistinguishable from
+    one, and a sweep run before it closes trades on values that no longer exist
+    afterwards. ``now_ms`` is injectable so this is testable without a clock.
     """
+    now = time.time() * 1000 if now_ms is None else now_ms
+    raw = [row for row in raw if int(row[_KLINE_CLOSE_TIME]) < now]
     if not raw:
         # Typed like the populated path: a bare DataFrame(columns=...) would be
         # object dtype on a tz-naive index, breaking callers only on empty ranges.

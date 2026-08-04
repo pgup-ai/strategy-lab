@@ -103,7 +103,11 @@ def _evaluate(
     returns = (df["close"].pct_change() * position).iloc[warmup:].fillna(0.0)
     equity = (1 + returns).cumprod()
 
-    drawdown = (equity / equity.cummax() - 1).min()
+    # Clamped to 1.0 because the curve starts at par, before the first bar's
+    # return: an unclamped cummax takes the already-reduced first value as the
+    # peak, so a cell that loses 10% on bar one and then goes flat reports no
+    # drawdown at all.
+    drawdown = (equity / equity.cummax().clip(lower=1.0) - 1).min()
     volatility = returns.std()
     sharpe = 0.0
     if math.isfinite(volatility) and volatility > 0:

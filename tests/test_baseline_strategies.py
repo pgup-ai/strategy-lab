@@ -53,6 +53,9 @@ def reversal_frame(up_bars: int, down_bars: int = 300) -> pd.DataFrame:
     [
         ("tsmom", {"lookback": 384}, 384),
         ("ema_cross", {"slow_span": 384}, 7680),
+        # A sweep is free to put ``fast_span`` above ``slow_span``, and then the
+        # "fast" EMA is the slower-converging recursion; warmup follows the larger.
+        ("ema_cross", {"fast_span": 384}, 7680),
         ("donchian", {"entry_span": 384}, 384),
         # The shorter channel can be the longer one; warmup follows whichever is.
         ("donchian", {"exit_span": 384}, 384),
@@ -95,6 +98,10 @@ def test_reconfiguring_a_baseline_rederives_its_warmup(name, params, expected):
         ("ema_cross", {"fast_span": 0}, "fast_span"),
         ("ema_cross", {"slow_span": -1}, "slow_span"),
         ("multi_horizon", {"lookbacks": ()}, "lookbacks"),
+        # ``bool`` is an ``int`` subclass, so these pass an isinstance check and
+        # then silently act as lookback=1 and entry_span=0.
+        ("tsmom", {"lookback": True}, "lookback"),
+        ("donchian", {"entry_span": False}, "entry_span"),
         ("multi_horizon", {"entry_threshold": -0.1}, "entry_threshold"),
     ],
 )
