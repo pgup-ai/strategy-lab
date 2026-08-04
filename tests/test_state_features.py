@@ -5,6 +5,7 @@ import pandas as pd
 import pytest
 
 from strategy_lab.features.base import rolling_percentile, rolling_zscore
+from strategy_lab.features.flow import Crowding, Participation, align_funding_to_bars
 from strategy_lab.features.trend import Direction, Persistence, Stability, Strength
 from strategy_lab.features.volatility import Compression, CompressionRelease, Energy
 
@@ -241,3 +242,84 @@ def test_every_volatility_feature_leaves_warmup_as_nan(feature):
 def test_volatility_features_stay_inside_their_declared_range(feature, floor):
     values = feature.compute(regime_switch(feature.warmup_bars)).dropna()
     assert values.min() >= floor and values.max() <= 1.0
+
+
+def with_funding(
+    df: pd.DataFrame, *, base: float = 0.0001, recent: float | None = None, tail: int = 40
+) -> pd.DataFrame:
+    """Settle funding on every second bar, as an 8h venue does against 4h bars.
+
+    ``base`` is jittered rather than flat, because a constant carry has no spread
+    for a z-score to measure and every bar comes out exactly neutral -- true, but
+    useless for asking whether the feature responds to anything. ``recent``
+    shifts the last ``tail`` settlements to a different level.
+    """
+    settlements = df.index[::2]
+    rates = np.random.default_rng(5).normal(base, abs(base) * 0.2, len(settlements))
+    if recent is not None:
+        rates[-tail:] = recent
+    return df.assign(
+        funding_rate=align_funding_to_bars(df.index, pd.Series(rates, index=settlements))
+    )
+
+
+def test_participation_ranks_a_volume_spike_above_the_quiet_bars_around_it():
+    feature = Participation()
+    df = choppy(feature.warmup_bars + 200)
+    df.loc[df.index[-1], "volume"] = df["volume"].max() * 10
+    values = feature.compute(df)
+    assert values.iloc[-1] == pytest.approx(1.0)
+    assert values.iloc[-2] < 0.9
+
+
+def test_crowding_refuses_a_frame_with_no_funding_rather_than_calling_it_neutral():
+    """Equity frames have no funding. A silent 0.5 would claim nobody is crowded."""
+    feature = Crowding()
+    with pytest.raises(ValueError, match="funding_rate"):
+        feature.compute(choppy(feature.warmup_bars + 50))
+
+
+def test_crowding_reads_above_neutral_when_longs_pay_and_below_when_shorts_do():
+    feature = Crowding()
+    df = choppy(feature.warmup_bars + 400)
+    longs_pay = feature.compute(with_funding(df, recent=0.003)).iloc[-1]
+    shorts_pay = feature.compute(with_funding(df, recent=-0.003)).iloc[-1]
+    assert longs_pay > 0.9 and shorts_pay < 0.1
+
+
+def test_crowding_of_an_unchanging_carry_is_neutral_not_undefined():
+    """Flat funding has no spread to measure against, which is 0.5 -- not the
+    NaN or the inf an unguarded z-score produces from that 0/0."""
+    feature = Crowding()
+    df = choppy(feature.warmup_bars + 200)
+    settlements = df.index[::2]
+    flat = df.assign(
+        funding_rate=align_funding_to_bars(
+            df.index, pd.Series(0.0001, index=settlements, dtype="float64")
+        )
+    )
+    values = feature.compute(flat).dropna()
+    assert np.isfinite(values).all()
+    assert values.eq(0.5).all()
+
+
+def test_funding_lands_on_the_bar_containing_it_not_the_one_it_equals():
+    """Binance stamps settlements past the boundary -- 3,260 of BTC's 7,559 stored
+    ones are off-grid -- so an equality join against an 8h range drops 43% of them."""
+    index = pd.date_range("2024-01-01", periods=6, freq="4h", tz="UTC", name="timestamp")
+    late = pd.DatetimeIndex([index[2] + pd.Timedelta(milliseconds=47)])
+    aligned = align_funding_to_bars(index, pd.Series([0.0001], index=late))
+
+    assert aligned.iloc[2] == pytest.approx(0.0001)
+    assert aligned.drop(index[2]).eq(0.0).all()
+
+
+@pytest.mark.parametrize("crypto_only", [False, True])
+def test_every_flow_feature_leaves_warmup_as_nan_and_stays_inside_zero_to_one(crypto_only):
+    feature = Crowding() if crypto_only else Participation()
+    df = choppy(feature.warmup_bars + 300)
+    values = feature.compute(with_funding(df) if crypto_only else df)
+
+    assert values.iloc[: feature.warmup_bars].isna().all()
+    assert values.iloc[feature.warmup_bars :].notna().all()
+    assert values.dropna().min() >= 0.0 and values.dropna().max() <= 1.0
