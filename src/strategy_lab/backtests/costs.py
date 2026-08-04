@@ -112,8 +112,12 @@ def funding_coverage_gaps(
     only past 1.5x it -- orders of magnitude outside the venue's 47 ms stamping
     jitter, but inside a single missed settlement.
 
-    Fewer than two settlements makes the whole window uncovered: one timestamp
-    pins no cadence, so nothing can be said about what is missing around it.
+    A cadence that is not **repeated** certifies itself and is refused. Two
+    settlements stored where three belong -- 00:00, 08:00, 16:00 arriving as
+    00:00 and 16:00 -- yield a single 16h spacing, and every check below then
+    passes on the very hole this function exists to name. Requiring the interval
+    to be observed twice makes the whole window uncovered instead, as does a
+    window holding fewer than two settlements at all.
     """
     if len(index) == 0:
         return []
@@ -126,9 +130,18 @@ def funding_coverage_gaps(
 
     spacing = np.diff(settled.asi8)
     cadence = pd.Timedelta(int(np.median(spacing)), unit="ns")
+    # The tolerance sits far above the venue's 47 ms jitter and far below a
+    # missed settlement, so "repeated" means the same interval, not a near one.
+    if np.count_nonzero(np.abs(spacing - cadence.value) <= cadence.value * 0.1) < 2:
+        return [(start, end)]
 
     gaps = []
-    if settled[0] - start > cadence:
+    # ``>=`` at the head, ``>`` at the tail: the window is left-closed, so a
+    # complete series has a settlement in [start, start + cadence) but its last
+    # one may sit a full cadence before ``end``. The head is where a missing
+    # settlement measures exactly one cadence -- an interior one measures two,
+    # which is why that side compares against 1.5x instead.
+    if settled[0] - start >= cadence:
         gaps.append((start, settled[0]))
     gaps.extend(
         (settled[i], settled[i + 1]) for i in np.flatnonzero(spacing > cadence.value * 1.5)

@@ -60,6 +60,26 @@ def test_report_handles_a_one_dimensional_grid():
     assert len(rows_with_cells) == 1
 
 
+def test_report_handles_a_sequence_valued_axis():
+    """``multi_horizon.lookbacks`` is a tuple, and the CLI's JSON grid delivers
+    it as a list -- unhashable, and the crash lands after the sweep is computed.
+    """
+    points = [
+        SweepPoint(
+            {"lookbacks": list(spans)},
+            total_return=0.1,
+            sharpe=0.4,
+            max_drawdown=-0.1,
+            trades=5,
+        )
+        for spans in ((12, 24, 48), (24, 48, 96))
+    ]
+    html = render_sweep_html(points=points, config={"strategy": "multi_horizon"})
+
+    assert len(_cells(html)) == 2
+    assert "96" in html
+
+
 def test_cells_are_coloured_by_the_sign_and_size_of_sharpe():
     """Colour is what answers "plateau or spike" before any number is read."""
     points = [

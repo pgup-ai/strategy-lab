@@ -228,6 +228,26 @@ def test_a_single_settlement_pins_no_cadence_so_nothing_is_covered():
     ]
 
 
+def test_two_settlements_cannot_certify_their_own_cadence():
+    """00:00 and 16:00 stored where 00:00/08:00/16:00 belong: the lone 16h
+    spacing becomes the yardstick and the missing settlement measures as normal.
+    """
+    bars = _bars(n=6)
+    funding = _funding_at(["2024-01-01 00:00", "2024-01-01 16:00"])
+    assert funding_coverage_gaps(funding=funding, index=bars) == [
+        (bars[0], bars[-1] + pd.Timedelta("4h"))
+    ]
+
+
+def test_a_missing_first_settlement_is_a_head_gap():
+    """The window opens on the settlement grid, so a first settlement one whole
+    cadence in means the one at the open was never stored."""
+    bars = _bars()
+    funding = _funding([0.0001] * 30, freq="8h")
+    [(start, end)] = funding_coverage_gaps(funding=funding.iloc[1:], index=bars)
+    assert (start, end) == (bars[0], funding.index[1])
+
+
 def test_the_cadence_is_read_from_the_contract_rather_than_assumed():
     """A two-hour spacing is a hole in an hourly-settling contract and nothing at
     all in an eight-hourly one. Nothing here knows the interval in advance."""

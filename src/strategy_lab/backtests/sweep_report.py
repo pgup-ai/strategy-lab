@@ -73,22 +73,35 @@ def _ordered(values: list) -> list:
     return seen
 
 
+def _hashable(value: object) -> object:
+    """A grid value usable as a dict key.
+
+    A sequence-valued parameter -- ``multi_horizon.lookbacks`` is a tuple, and
+    the CLI's JSON grid necessarily delivers a list -- is otherwise unhashable,
+    and the resulting ``TypeError`` lands after the whole sweep has been
+    computed but before anything is written, losing all of it.
+    """
+    if isinstance(value, (list, tuple)):
+        return tuple(_hashable(item) for item in value)
+    return value
+
+
 def _grid_table(points: list[SweepPoint], scale: float) -> str:
     row_axis, col_axes = _axes(points)
 
+    def row_key(point: SweepPoint) -> object:
+        return _hashable(point.params[row_axis]) if row_axis else None
+
     def col_key(point: SweepPoint) -> tuple:
-        return tuple(point.params[name] for name in col_axes)
+        return tuple(_hashable(point.params[name]) for name in col_axes)
 
     # Values only -- the axis names live once, in the corner cell.
     def col_label(key: tuple) -> str:
         return " · ".join(_fmt_param(v) for v in key)
 
     columns = _ordered([col_key(p) for p in points])
-    rows = _ordered([p.params[row_axis] for p in points]) if row_axis else [None]
-    by_position = {
-        ((p.params[row_axis] if row_axis else None), col_key(p)): (index, p)
-        for index, p in enumerate(points)
-    }
+    rows = _ordered([row_key(p) for p in points]) if row_axis else [None]
+    by_position = {(row_key(p), col_key(p)): (index, p) for index, p in enumerate(points)}
 
     header = "".join(f"<th>{escape(col_label(key))}</th>" for key in columns)
     across = " · ".join(col_axes)
