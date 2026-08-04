@@ -63,6 +63,30 @@ def test_flush_releases_the_final_timestamp():
     assert clock.flush() is None, "flushing twice must not replay the snapshot"
 
 
+def test_a_mid_stream_flush_leaves_the_clock_usable():
+    """A live feed reconnecting flushes mid-stream, so flush is not end-of-stream only.
+
+    What must survive it: the released snapshot is complete, the stream continues,
+    and the total-order guard still rejects an event from before the flush. That
+    last one is why ``_take()`` keeps ``_ts_event_ms`` -- clearing it releases
+    nothing extra and silently accepts a stale bar instead of raising.
+    """
+    clock = MarketClock()
+    clock.on_event(event(BTC, 0))
+    clock.on_event(event(ETH, 0))
+
+    assert len(clock.flush()) == 2
+
+    # The stream continues at the flushed timestamp; the redelivered bar starts a
+    # fresh accumulation rather than re-opening the snapshot already released.
+    assert clock.on_event(event(BTC, 0)) is None
+    resumed = clock.on_event(event(BTC, 14_400_000))
+    assert set(resumed.candles) == {BTC.at("4h")}
+
+    with pytest.raises(ValueError, match="out of order"):
+        clock.on_event(event(ETH, 0))
+
+
 def test_a_partial_universe_is_emitted_as_is():
     """ETH is halted; the snapshot reports BTC only rather than stalling."""
     clock = MarketClock()

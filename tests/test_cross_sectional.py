@@ -73,6 +73,19 @@ def test_confirms_follows_the_leader_down_as_well_as_up():
     assert confirms(snap, leader=BTC.at("4h"), quorum=0.5) is True
 
 
+@pytest.mark.parametrize("quorum", [-0.1, 1.5])
+def test_confirms_refuses_a_quorum_outside_zero_to_one(quorum):
+    """A negative quorum passes a unanimously disagreeing field as confirmation.
+
+    ``agreeing / followers`` is in [0, 1], so ``>= -0.1`` is true even at zero
+    agreement -- a well-formed True meaning the opposite of what it claims.
+    """
+    snap = snapshot(btc=bar(BTC, "100", "110"), eth=bar(ETH, "100", "90"),
+                    sol=bar(SOL, "100", "90"))
+    with pytest.raises(ValueError, match=str(quorum)):
+        confirms(snap, leader=BTC.at("4h"), quorum=quorum)
+
+
 def test_confirms_is_false_when_the_leader_has_no_direction_to_confirm():
     snap = snapshot(btc=bar(BTC, "100", "100"), eth=bar(ETH, "100", "105"))
     assert confirms(snap, leader=BTC.at("4h"), quorum=0.5) is False

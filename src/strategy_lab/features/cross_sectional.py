@@ -41,7 +41,14 @@ def confirms(snapshot: MarketSnapshot, *, leader: CandleId, quorum: float) -> bo
     than rewarding a large leader move. A missing leader, an unchanged leader and
     an empty field of followers are all False: there is no confirmation to claim,
     and True would let a one-instrument snapshot wave a trade through.
+
+    ``quorum`` is a fraction, so it is range-checked rather than trusted: a
+    negative one makes ``agreeing / followers >= quorum`` true for a field that
+    unanimously disagreed, which reads as confirmation and is the opposite of one.
     """
+    if not 0.0 <= quorum <= 1.0:
+        raise ValueError(f"quorum must be a fraction in [0.0, 1.0], got {quorum}")
+
     leader_bar = snapshot.get(leader)
     if leader_bar is None:
         return False

@@ -87,6 +87,13 @@ class MultiAssetRunner:
         for candle, bar in snapshot.bars.items():
             runner = self._runners.get(candle.instrument)
             if runner is None:
+                # Context-only instruments append here while traded ones append
+                # inside StrategyRunner.on_bar. The two paths are not duplicated
+                # logic: for a traded instrument self._buffers[instrument] IS
+                # runner.buffer (same object, wired in __init__), so there is one
+                # buffer per instrument either way and only the caller differs.
+                # Drift would fail test_each_instrument_gets_its_own_buffer, which
+                # asserts buffer *contents* for the traded path.
                 self._buffers[candle.instrument].append(bar)
             else:
                 emitted.extend(runner.on_bar(bar))

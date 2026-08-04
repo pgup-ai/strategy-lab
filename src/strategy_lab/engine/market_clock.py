@@ -43,4 +43,9 @@ class MarketClock:
             return None
         snapshot = MarketSnapshot(ts_event_ms=self._ts_event_ms, bars=dict(self._bars))
         self._bars.clear()
+        # ``_ts_event_ms`` deliberately survives: it doubles as the total-order
+        # high-water mark, so clearing it here would let an event from before the
+        # flush be accepted instead of raising. It cannot leak into a later
+        # snapshot, because every release is gated on ``_bars`` being non-empty --
+        # verified by enumeration over every operation sequence up to length 5.
         return snapshot
