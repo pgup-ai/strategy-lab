@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import warnings
 
 import numpy as np
 import pandas as pd
@@ -192,4 +193,35 @@ def test_the_sizing_choice_is_recorded_for_reproducibility(tmp_path):
     assert targeted["size_mode"] == "vol-target"
     assert targeted["vol_target"] == 0.25
     assert targeted["max_weight"] == 1.5
+    assert targeted["max_weight_effective"] == pytest.approx(1 / 0.95)
     assert targeted["bars_per_year"] == pytest.approx(2191.5)
+
+
+def test_a_weight_above_buying_power_is_capped_and_named(tmp_path):
+    """The advertised ``--max-weight 2.0`` cannot be filled at 95% deployment:
+    an entry is sized as cash x position_pct x weight and the book has no
+    leverage. Silently clamping is the failure mode -- a config that claims
+    something the run did not do."""
+    df = _regime_shift_frame()
+
+    with pytest.warns(UserWarning, match="1.053"):
+        result = _run(tmp_path, df, size_mode=SizeMode.VOL_TARGET, max_weight=2.0)
+
+    config = json.loads((result.report_dir / "config.json").read_text())
+    assert config["max_weight"] == 2.0
+    assert config["max_weight_effective"] == pytest.approx(1 / 0.95)
+
+
+def test_a_weight_the_book_can_fill_is_left_alone(tmp_path):
+    """Halving deployment doubles the executable ceiling, so the same cap that
+    was clipped above now passes through untouched and unmentioned."""
+    df = _regime_shift_frame()
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        result = _run(
+            tmp_path, df, size_mode=SizeMode.VOL_TARGET, max_weight=2.0, position_pct=0.5
+        )
+
+    config = json.loads((result.report_dir / "config.json").read_text())
+    assert config["max_weight_effective"] == 2.0

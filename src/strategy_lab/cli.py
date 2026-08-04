@@ -342,7 +342,11 @@ def backtest(
         2.0,
         "--max-weight",
         min=0.0001,
-        help="Cap on the vol-target size multiplier, so a calm stretch cannot lever up.",
+        help=(
+            "Cap on the vol-target size multiplier, so a calm stretch cannot lever up. "
+            "The book has no leverage, so anything above 1 / --position-pct cannot be "
+            "filled and is capped, with a warning and the effective value in config.json."
+        ),
     ),
     cost_stress: str = typer.Option(
         "1",

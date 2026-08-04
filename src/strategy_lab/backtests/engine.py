@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import math
 import re
+import warnings
 from collections.abc import Sequence
 from dataclasses import asdict, dataclass, replace
 from datetime import UTC, datetime
@@ -109,6 +110,7 @@ def run_backtest(
         vol_target=vol_target,
         max_weight=max_weight,
         vol_span=vol_span,
+        position_pct=position_pct,
     )
     long_exits, short_exits = _exit_signals(
         df=df,
@@ -196,6 +198,7 @@ def run_backtest(
             vol_target=vol_target,
             max_weight=max_weight,
             vol_span=vol_span,
+            position_pct=position_pct,
         ),
         "cost_model": asdict(model),
         "cost_stress": list(multiples),
@@ -273,6 +276,7 @@ def _volatility_targeted(
     vol_target: float,
     max_weight: float,
     vol_span: int,
+    position_pct: float,
 ) -> SignalSet:
     """``signals`` with ``position_size`` replaced by volatility-target weights.
 
@@ -296,14 +300,38 @@ def _volatility_targeted(
             f"the engine."
         )
 
+    executable = _executable_max_weight(max_weight, position_pct)
+    if executable < max_weight:
+        warnings.warn(
+            f"max_weight {max_weight:g} is above the {executable:.4g} this book "
+            f"can fill at position_pct {position_pct:g}: an entry is sized as "
+            f"cash x position_pct x weight and there is no leverage, so a calm "
+            f"regime would request more long notional than initial cash covers "
+            f"and be filled short of it. Weights are capped at {executable:.4g}, "
+            f"recorded as max_weight_effective in config.json.",
+            stacklevel=3,
+        )
+
     weights = volatility_target_weights(
         df["close"].pct_change(),
         target_annual_vol=vol_target,
         bars_per_year=timeframe_to_bars_per_year(timeframe),
         span=vol_span,
-        max_weight=max_weight,
+        max_weight=executable,
     )
     return replace(signals, position_size=weights)
+
+
+def _executable_max_weight(max_weight: float, position_pct: float) -> float:
+    """``max_weight`` clipped to the weight the book's own cash can fill.
+
+    Without this the run silently does something other than what it advertises:
+    vectorbt fills what the cash covers rather than rejecting the order, so a
+    ``--max-weight 2.0`` run at the default 95% deployment targets 30% vol on
+    paper and holds whatever fit in practice, with ``config.json`` recording the
+    number that was asked for.
+    """
+    return min(max_weight, 1.0 / position_pct)
 
 
 def _sizing_config(
@@ -313,13 +341,20 @@ def _sizing_config(
     vol_target: float,
     max_weight: float,
     vol_span: int,
+    position_pct: float,
 ) -> dict[str, Any]:
-    """The vol-target settings, recorded only on runs that actually used them."""
+    """The vol-target settings, recorded only on runs that actually used them.
+
+    Both caps are recorded: ``max_weight`` is what was asked for and
+    ``max_weight_effective`` is what the book could fill, so a run stays
+    reproducible even when the two disagree.
+    """
     if size_mode is SizeMode.FIXED:
         return {}
     return {
         "vol_target": vol_target,
         "max_weight": max_weight,
+        "max_weight_effective": _executable_max_weight(max_weight, position_pct),
         "vol_span": vol_span,
         "bars_per_year": timeframe_to_bars_per_year(timeframe),
     }
