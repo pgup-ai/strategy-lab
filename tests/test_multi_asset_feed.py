@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import asyncio
 
+import pytest
+
 from strategy_lab.core.types import InstrumentId
 from strategy_lab.feeds.base import Subscription
 from strategy_lab.feeds.replay import ReplayFeed
@@ -74,3 +76,24 @@ def test_mixed_timeframes_merge_on_event_time():
     times = [e.ts_event_ms for e in events]
     assert times == sorted(times)
     assert len(events) == 14
+
+
+@pytest.mark.db
+def test_stored_btc_and_eth_perps_merge_into_one_ordered_stream():
+    """Read-only, on the real research data: the blocker this phase removes.
+
+    Their histories start two months apart, so this also exercises the unequal-length
+    path at the scale it actually occurs rather than on a six-bar fixture.
+    """
+    subs = [Subscription(BTC, "4h"), Subscription(ETH, "4h")]
+    feed = ReplayFeed.from_database(subs)
+    stored = {sub.instrument: feed.frames[(sub.instrument, sub.timeframe)] for sub in subs}
+    if any(df.empty for df in stored.values()):
+        pytest.skip("binance perp BTC/USDT and ETH/USDT 4h are not both stored")
+
+    events = drain(feed, subs)
+
+    times = [e.ts_event_ms for e in events]
+    assert times == sorted(times)
+    assert {e.bar.instrument for e in events} == {BTC, ETH}
+    assert len(events) == sum(len(df) for df in stored.values())

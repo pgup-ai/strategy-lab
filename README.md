@@ -26,6 +26,9 @@ strategy-lab/
     db/              # normalized candle schema and read/write helpers
     strategies/      # strategy modules
     backtests/       # vectorbt runner and report writer
+    feeds/           # MarketDataFeed protocol and the Postgres replay feed
+    engine/          # event-driven runners, bar buffers, market clock
+    features/        # cross-sectional reads over a market snapshot
     cli.py
 ```
 
@@ -336,6 +339,46 @@ backtest, not to replace it for day-to-day iteration.
 
 See [the Phase 1a design doc](docs/design/2026-08-02-realtime-trading-framework.md)
 for the full rationale.
+
+## Multi-Asset
+
+`ReplayFeed.stream()` merges every subscription into one globally time-ordered
+stream, breaking ties on the instrument key so the order is identical on every
+run. `MarketClock` groups that stream into `MarketSnapshot`s — the set of bars
+sharing one close time — and `MultiAssetRunner` drives one strategy per
+instrument off those snapshots, keeping a full-history `BarBuffer` for each.
+Instruments listed under `context` are buffered and appear in snapshots without
+being traded; an instrument in neither `strategies` nor `context` raises rather
+than being dropped.
+
+**A timestamp is complete only once an event with a later timestamp arrives.**
+Never by looking ahead — that is the whole point. So a cross-sectional signal
+for bar *t* is emitted when the first *t+1* event lands, the final timestamp
+needs an explicit `flush()`, and a snapshot holds only the instruments that
+actually have a bar at that time. Absent is not unchanged: crypto trades
+around the clock, equities do not, and instruments list and delist.
+
+```python
+subs = [Subscription(InstrumentId("binance", "perp", s), "4h")
+        for s in ("BTC/USDT", "ETH/USDT")]
+feed, clock = ReplayFeed.from_database(subs), MarketClock()
+
+async for event in feed.stream(subs):
+    snapshot = clock.on_event(event)
+    if snapshot:
+        breadth(snapshot)   # strategy_lab.features.cross_sectional
+```
+
+`breadth` and `confirms` read one snapshot and nothing else. Both assume a
+shared timeframe across the universe — a daily bar meets a 4h bar only at day
+boundaries, so a mixed-timeframe universe produces mostly single-instrument
+snapshots. `breadth` refuses a universe smaller than `min_instruments`
+(default 2) rather than returning a well-formed number that is really just one
+instrument's direction.
+
+Measured over the stored BTC + ETH perp 4h series: **15,128 snapshots, mean
+breadth 0.512, 477 partial universes** — that last figure is exactly the
+stretch where BTC had listed and ETH had not (2019-09-08 to 2019-11-27).
 
 ## Live Report Serving
 

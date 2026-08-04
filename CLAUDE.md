@@ -52,6 +52,13 @@ runner or to strategy code. See
 [the Phase 1a design doc](docs/design/2026-08-02-realtime-trading-framework.md)
 for the full rationale.
 
+The event-driven flow also runs many instruments at once: `stream()` k-way
+merges every subscription into one time-ordered stream, `MarketClock`
+(`engine/market_clock.py`) groups it into `MarketSnapshot`s, and
+`MultiAssetRunner` (`engine/multi_runner.py`) holds one full-history
+`BarBuffer` per instrument and delegates each traded one to its own
+`StrategyRunner`. `features/cross_sectional.py` reads a snapshot.
+
 A third flow scores a strategy across a *grid* rather than at one setting:
 `sweep_parameters` (`backtests/sweep.py`) rebuilds the strategy per cell with
 `dataclasses.replace`, converts each `SignalSet` to a ±1 position with
@@ -91,6 +98,22 @@ Key design decisions that span multiple files:
   signals; `tests/test_lookahead.py` poisons every bar after *t* and asserts
   row *t* is unchanged, which is the direct causality proof. **A strategy that
   fails either test is not safe to trade.**
+- **A timestamp is complete only once an event with a *later* timestamp
+  arrives** — never by looking ahead, which is the same lookahead the two
+  suites above exist to prevent, and the only completeness a live feed can
+  establish. Three consequences, all deliberate, all easy to violate by
+  accident. (1) **Cross-sectional work lags one bar**: `MultiAssetRunner`
+  holds bar *t* until the first *t+1* event proves *t* done, so signals for
+  *t* are emitted then. Dispatching on arrival instead would emit sooner but
+  could only ever see the *t−1* cross-section. (2) **The final timestamp needs
+  an explicit `flush()`** — nothing arrives after it, so a caller that drops
+  `flush()` silently loses the last snapshot and the last bar of every buffer.
+  (3) **A snapshot holds only instruments that have a bar at that time**, and
+  `absent` must never be read as `unchanged` — instruments list, delist and
+  halt, and crypto trades hours equities do not. `breadth` therefore refuses a
+  universe below `min_instruments` instead of dividing by whatever showed up;
+  on a mixed 4h/1d universe 10 of 12 snapshots hold a single instrument, where
+  that quotient is a well-formed number carrying no cross-sectional content.
 - **The bar buffer keeps full history, never a rolling window.**
   `turnaround_v1`/`turnaround_v2` compute `ewm(adjust=False)`, which is
   recursive from the first bar. Measured: a 60-bar window produces wrong
