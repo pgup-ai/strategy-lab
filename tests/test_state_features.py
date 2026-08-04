@@ -6,6 +6,7 @@ import pytest
 
 from strategy_lab.features.base import rolling_percentile, rolling_zscore
 from strategy_lab.features.trend import Direction, Persistence, Stability, Strength
+from strategy_lab.features.volatility import Compression, CompressionRelease, Energy
 
 
 def series(values) -> pd.Series:
@@ -13,7 +14,9 @@ def series(values) -> pd.Series:
     return pd.Series(values, index=index, dtype="float64")
 
 
-def frame(close: np.ndarray, *, half_range: float, volume: float = 500.0) -> pd.DataFrame:
+def frame(
+    close: np.ndarray, *, half_range: float | np.ndarray, volume: float = 500.0
+) -> pd.DataFrame:
     index = pd.date_range(
         "2024-01-01", periods=len(close), freq="4h", tz="UTC", name="timestamp"
     )
@@ -162,3 +165,79 @@ def test_unsigned_trend_features_stay_inside_zero_to_one(feature):
     for df in (trending(feature.warmup_bars + 400), choppy(feature.warmup_bars + 400)):
         values = feature.compute(df).dropna()
         assert values.min() >= 0.0 and values.max() <= 1.0
+
+
+def regime_switch(quiet: int, violent: int = 200, calm: int = 200) -> pd.DataFrame:
+    """Quiet chop, then violent chop, then a calm one-way trend, in one series.
+
+    One frame rather than three, because Energy is a percentile against the
+    instrument's own recent history: two separately generated series each read
+    mid-range against themselves and the contrast the charter cares about --
+    same dimension, opposite regimes -- never appears.
+    """
+    blocks, half_ranges, level = [], [], 0.0
+    for length, scale, slope, half_range, seed in (
+        (quiet, 0.004, 0.0, 0.004, 1),
+        (violent, 0.020, 0.0, 0.020, 2),
+        (calm, 0.0005, 0.002, 0.001, 3),
+    ):
+        rng = np.random.default_rng(seed)
+        walk = level + np.cumsum(np.full(length, slope) + rng.normal(0, scale, length))
+        blocks.append(walk)
+        half_ranges.append(np.full(length, half_range))
+        level = walk[-1]
+    return frame(
+        100 * np.exp(np.concatenate(blocks)), half_range=np.concatenate(half_ranges)
+    )
+
+
+def test_energy_and_strength_tell_a_steady_trend_from_violent_chop():
+    """The charter's own worked example, and the reason they are two dimensions.
+
+    Strength 0.8 / Energy 0.3 is a slow steady trend; Strength 0.2 / Energy 0.95
+    is violent two-way chop. Collapsed into one number both read 'active'.
+    """
+    energy, strength = Energy(), Strength()
+    quiet = energy.warmup_bars
+    df = regime_switch(quiet)
+    violent_end, calm_end = quiet + 199, len(df) - 1
+
+    assert energy.compute(df).iloc[violent_end] > 0.8
+    assert strength.compute(df).iloc[violent_end] < 0.2
+    assert energy.compute(df).iloc[calm_end] < 0.2
+    assert strength.compute(df).iloc[calm_end] > 0.8
+
+
+def test_compression_is_energy_read_from_the_other_end():
+    df = regime_switch(Energy().warmup_bars)
+    total = (Compression().compute(df) + Energy().compute(df)).dropna()
+    assert np.allclose(total, 1.0)
+
+
+def test_compression_release_is_positive_exactly_where_compression_falls():
+    """The sign is the whole reason this is a named feature: differencing
+    Compression by hand reports a release as a negative number."""
+    df = regime_switch(Energy().warmup_bars)
+    compression = Compression().compute(df)
+    release = CompressionRelease().compute(df)
+
+    falling = (compression.diff() < 0) & release.notna()
+    rising = (compression.diff() > 0) & release.notna()
+    assert falling.sum() > 100 and rising.sum() > 100
+    assert (release[falling] > 0).all()
+    assert (release[rising] < 0).all()
+
+
+@pytest.mark.parametrize("feature", [Energy(), Compression(), CompressionRelease()])
+def test_every_volatility_feature_leaves_warmup_as_nan(feature):
+    values = feature.compute(regime_switch(feature.warmup_bars))
+    assert values.iloc[: feature.warmup_bars].isna().all()
+    assert values.iloc[feature.warmup_bars :].notna().all()
+
+
+@pytest.mark.parametrize(
+    ("feature", "floor"), [(Energy(), 0.0), (Compression(), 0.0), (CompressionRelease(), -1.0)]
+)
+def test_volatility_features_stay_inside_their_declared_range(feature, floor):
+    values = feature.compute(regime_switch(feature.warmup_bars)).dropna()
+    assert values.min() >= floor and values.max() <= 1.0
