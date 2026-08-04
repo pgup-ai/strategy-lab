@@ -63,6 +63,13 @@ def sweep_parameters(
         )
 
     names = list(grid)
+    empty = [name for name in names if not grid[name]]
+    if empty:
+        raise ValueError(
+            f"{strategy_name} grid parameter(s) {sorted(empty)} have no values; "
+            f"their product is empty, so there is no surface to score"
+        )
+
     cells = [
         (params, dataclasses.replace(template, **params))
         for params in (

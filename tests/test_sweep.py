@@ -117,6 +117,25 @@ def test_sweep_names_the_cell_whose_warmup_exceeds_the_frame():
     )
 
 
+def test_sweep_names_a_grid_axis_that_has_no_values():
+    """``itertools.product`` yields no cells, so the failure surfaces far downstream.
+
+    Unguarded this raises ``max() arg is an empty sequence`` from the deepest-cell
+    search, naming neither the parameter nor the problem -- and on a multi-axis
+    grid the one empty axis is exactly what the user needs told.
+    """
+    with pytest.raises(ValueError) as raised:
+        sweep_parameters(
+            df=synthetic_ohlcv(n=900),
+            strategy_name="donchian",
+            grid={"entry_span": [24, 48], "exit_span": []},
+            timeframe="15m",
+        )
+    assert "exit_span" in str(raised.value), (
+        f"error does not name the empty parameter: {raised.value}"
+    )
+
+
 def test_a_sweep_over_a_negative_lookback_fails_instead_of_scoring_it():
     """The reachable path to a non-causal strategy, and the only one.
 
