@@ -328,7 +328,7 @@ def test_open_interest_refuses_a_start_outside_the_measured_window():
 
 
 def test_a_rate_limit_is_retried_rather_than_truncating_the_series():
-    client, session, _ = _client(
+    client, session, slept = _client(
         FakeResponse({"code": -1003}, status_code=429),
         FakeResponse(_kline_page(2)),
     )
@@ -341,7 +341,7 @@ def test_a_rate_limit_is_retried_rather_than_truncating_the_series():
 
 
 def test_a_server_error_is_retried():
-    client, session, slept = _client(
+    client, session, _ = _client(
         FakeResponse("upstream boom", status_code=502),
         FakeResponse(_kline_page(1)),
     )
