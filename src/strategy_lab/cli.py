@@ -746,11 +746,9 @@ def _parse_horizons(raw: str) -> tuple[int, ...]:
 def _diagnosable_features(names, df):
     """Split registered features into those this frame can support and those it cannot.
 
-    Crowding refuses a frame with no funding rather than returning a neutral
-    0.5, so an equity or spot series simply cannot carry it. Skipping is
-    therefore the honest outcome -- but a *silent* skip is how a feature ships
-    unexamined, which is the one thing the R4 gate forbids, so every skip is
-    echoed and written into the run's config.
+    Crowding refuses a frame with no funding, so an equity or spot series simply
+    cannot carry it. Skipping is the honest outcome; a *silent* skip is how a
+    feature ships unexamined, so every skip is echoed and written into the config.
     """
     from strategy_lab.features.registry import get_feature
 

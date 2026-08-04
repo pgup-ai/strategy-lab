@@ -1,9 +1,8 @@
 """The univariate diagnostic as one page, in the same house style as the sweep.
 
-One row per feature, one column group per horizon. The IC cell carries the
-full-sample number *and* both halves, because averaging a feature that works in
-one half and not the other produces a middling number that looks like a weak
-signal instead of a broken one.
+One row per feature, one column group per horizon, and each IC cell carrying the
+full-sample number over both halves -- ``features.diagnostics`` carries the
+reasoning for why the halves are the reading.
 
 Self-contained by the same rule as every other report here: no external asset,
 no network, so a report opened in two years renders exactly as it did the day it
@@ -23,7 +22,6 @@ from strategy_lab.features.diagnostics import (
     to_record,
 )
 
-_DOWN = "#ef5350"
 _UP_RGB = "38, 166, 154"
 _DOWN_RGB = "239, 83, 80"
 
@@ -47,10 +45,6 @@ def _fmt_pct(value: float) -> str:
 
 def _fmt_num(value: float) -> str:
     return _DASH if value != value else f"{value:.3f}"
-
-
-def _fmt_int(value: int) -> str:
-    return f"{value:,}"
 
 
 def _fmt_halves(entry: HorizonIC) -> str:
@@ -92,7 +86,7 @@ def _row(diagnostic: FeatureDiagnostic, result: DiagnosticSet) -> str:
     cells = [
         f'<th class="row-label">{escape(diagnostic.name)}</th>',
         f'<td class="stat">{escape(_fmt_pct(diagnostic.coverage))}</td>',
-        f'<td class="stat">{escape(_fmt_int(diagnostic.observations))}</td>',
+        f'<td class="stat">{diagnostic.observations:,}</td>',
         f'<td class="stat">{escape(_fmt_num(diagnostic.minimum))}</td>',
         f'<td class="stat">{escape(_fmt_num(diagnostic.median))}</td>',
         f'<td class="stat">{escape(_fmt_num(diagnostic.maximum))}</td>',
@@ -176,9 +170,8 @@ def _chips(result: DiagnosticSet) -> str:
 def _payload(result: DiagnosticSet) -> str:
     """The numbers behind the page, as JSON -- the same record written to disk.
 
-    ``allow_nan=False`` is deliberate: :func:`to_record` has already turned every
-    unmeasurable statistic into ``null``, so anything left for ``json.dumps`` to
-    reject is a bug rather than a missing measurement.
+    ``allow_nan=False`` is an assertion: :func:`to_record` has already nulled
+    every unmeasurable statistic, so anything left to reject is a bug.
     """
     return json.dumps(
         to_record(result)["features"],
@@ -224,7 +217,6 @@ def render_diagnostics_html(*, result: DiagnosticSet, config: dict) -> str:
         )
         .replace("__IC_SCALE__", escape(f"{_IC_SCALE:+.3f}"))
         .replace("__NEG_IC_SCALE__", escape(f"{-_IC_SCALE:+.3f}"))
-        .replace("__DOWN__", _DOWN)
         .replace("__PAYLOAD__", _payload(result))
     )
 
@@ -238,7 +230,7 @@ _TEMPLATE = """<!DOCTYPE html>
 <style>
   :root {
     --bg: #131722; --panel: #1e222d; --border: #2a2e39; --border-soft: #232733;
-    --ink: #d1d4dc; --ink-dim: #787b86; --down: __DOWN__;
+    --ink: #d1d4dc; --ink-dim: #787b86; --down: #ef5350;
   }
   * { box-sizing: border-box; margin: 0; padding: 0; }
   body {
@@ -331,7 +323,7 @@ __CHIPS__
   <div class="table-wrap">
 __TABLE__
   </div>
-  <div id="detail">Hover a feature for its full record.</div>
+  <div id="detail">Hover a feature for what the table has no column for.</div>
   <h2>Redundancy</h2>
 __REDUNDANCY__
 __SKIPPED__
@@ -373,7 +365,6 @@ __SKIPPED__
       detail.replaceChildren();
       detail.appendChild(figure('version', record.version));
       detail.appendChild(figure('warmup', String(record.warmup_bars) + 'b'));
-      detail.appendChild(figure('bars', String(record.observations)));
       record.ic.forEach(function (entry) {
         detail.appendChild(figure(
           'IC@' + entry.horizon + 'b',
@@ -381,11 +372,6 @@ __SKIPPED__
             num(entry.second_half_ic, 3) + ' over ' + entry.observations + ' bars)'
         ));
       });
-      detail.appendChild(figure(
-        'closest',
-        (record.max_correlation.feature || '\\u2014') + ' r=' +
-          num(record.max_correlation.r, 3)
-      ));
     });
   });
 })();

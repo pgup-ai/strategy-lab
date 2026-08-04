@@ -9,10 +9,9 @@ Crowding is crypto-only. Nothing about equity data carries a funding rate, so
 a silent 0.5 there reads "measured, and nobody is crowded", which is a claim
 about a market this feature never looked at.
 
-Funding arrives on the venue's own schedule -- 8h against 4h bars, stamped up to
-47 ms past the boundary -- so :func:`align_funding_to_bars` delegates to
-``backtests.costs.apply_funding`` rather than reimplementing containment. One
-copy of the 47 ms rule exists; which module holds it matters less than that.
+Funding arrives on the venue's own schedule rather than the bar's, so
+:func:`align_funding_to_bars` delegates to ``backtests.costs.apply_funding``
+rather than reimplementing containment: one copy of that rule exists.
 """
 
 from __future__ import annotations

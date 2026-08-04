@@ -92,12 +92,6 @@ class FeatureDiagnostic:
     turnover: float
     ics: tuple[HorizonIC, ...]
 
-    def ic_at(self, horizon: int) -> HorizonIC:
-        for entry in self.ics:
-            if entry.horizon == horizon:
-                return entry
-        raise KeyError(f"{self.name} was not diagnosed at horizon {horizon}")
-
 
 @dataclass(frozen=True)
 class DiagnosticSet:

@@ -158,10 +158,8 @@ class Stability:
     the square root of the span -- without that the ratio would be a function of
     window length rather than of the market.
 
-    Not normalized by the window's price variance, which would make this a
-    monotone function of Persistence. Measured on the stored BTC/USDT perp 4h
-    history at window 96: 5th percentile 0.75, median 0.84, 95th 0.90, never
-    saturating at either rail, and correlated with Persistence at 0.04.
+    Measured on the stored BTC/USDT perp 4h history at window 96: 5th percentile
+    0.75, median 0.84, 95th 0.90, never saturating at either rail.
     """
 
     name: str = "stability"

@@ -89,9 +89,7 @@ def test_direction_is_positive_in_an_uptrend_and_negative_in_a_downtrend():
 def test_direction_is_not_pinned_to_its_rails_by_an_ordinary_trend():
     """A spread of a few ATRs is common, so an unscaled tanh saturates on it.
 
-    Measured on the stored BTC/USDT perp 4h history, feeding the raw ATR ratio
-    to tanh puts 51.6% of bars past |0.9|; here the same unscaled form reads
-    1.0000 against 0.9884 scaled.
+    On this fixture the unscaled form reads 1.0000 against 0.9884 scaled.
     """
     feature = Direction()
     values = feature.compute(trending(feature.warmup_bars + 500, slope=0.0005)).dropna()

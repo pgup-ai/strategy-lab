@@ -4,13 +4,10 @@ Both are exercised with purpose-built features rather than registered ones,
 because a test that depends on what ``strength`` happens to score on synthetic
 data measures the fixture, not the harness.
 
-The two lies:
+The two lies, whose reasoning ``features.diagnostics`` carries in full:
 
-1. **A forward return anchored at the feature's own bar.** ``close[t+h]/close[t]``
-   never contains bar *t*'s own *return*, which is why the bug survives a glance.
-   It contains bar *t*'s own *price* -- as the denominator -- so any feature that
-   rises with a high ``close[t]`` mechanically predicts a fall, and the noisier
-   the print the stronger the "signal".
+1. **A forward return anchored at the feature's own bar** -- no ``shift(-1)`` in
+   sight, and
    :func:`test_a_target_anchored_at_the_feature_s_own_bar_manufactures_an_ic`
    measures it: -0.53 against a series with no forward information in it at all.
 2. **A split-half that is not a split.** Reporting the full-sample IC twice
