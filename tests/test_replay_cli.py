@@ -57,7 +57,7 @@ def feed_calls(monkeypatch):
     def fake_from_database(cls, subscriptions, **kwargs):
         subs = list(subscriptions)
         calls.append({"subscriptions": subs, "kwargs": kwargs})
-        return cls(frames={(sub.instrument, sub.timeframe): df for sub in subs})
+        return cls(frames={sub.candle: df for sub in subs})
 
     monkeypatch.setattr(ReplayFeed, "from_database", classmethod(fake_from_database))
     return calls

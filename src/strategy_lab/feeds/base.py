@@ -26,7 +26,7 @@ from collections.abc import AsyncIterator, Sequence
 from dataclasses import dataclass, field
 from typing import Protocol, runtime_checkable
 
-from strategy_lab.core.types import Bar, BarEvent, InstrumentId
+from strategy_lab.core.types import Bar, BarEvent, CandleId, InstrumentId
 
 
 @dataclass(frozen=True, slots=True)
@@ -34,6 +34,10 @@ class Subscription:
     instrument: InstrumentId
     timeframe: str
     include_forming: bool = False
+
+    @property
+    def candle(self) -> CandleId:
+        return CandleId(self.instrument, self.timeframe)
 
 
 @dataclass(frozen=True, slots=True)
