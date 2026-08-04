@@ -16,6 +16,7 @@ from __future__ import annotations
 
 from typing import Protocol
 
+import numpy as np
 import pandas as pd
 
 
@@ -38,6 +39,20 @@ class StateFeature(Protocol):
 
     def compute(self, df: pd.DataFrame) -> pd.Series:
         ...
+
+
+def mask_warmup(values: pd.Series, *, warmup_bars: int) -> pd.Series:
+    """``NaN`` the first ``warmup_bars`` rows, whatever the computation produced there.
+
+    Not every indicator declines to answer early. ``rolling(n)`` yields ``NaN``
+    until its window fills, but ``ewm(adjust=False)`` returns a number from bar
+    zero -- a converging one, off by a decaying seed for some twenty spans. To a
+    caller both are "a value", one of them silently unusable, so the warmup
+    boundary is drawn here instead of being left to each indicator's own habit.
+    """
+    masked = values.copy()
+    masked.iloc[:warmup_bars] = np.nan
+    return masked
 
 
 def rolling_percentile(series: pd.Series, *, window: int) -> pd.Series:
