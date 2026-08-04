@@ -106,10 +106,11 @@ Key design decisions that span multiple files:
   tercile is a rank statement and the raw boundaries move 0.067/0.156 →
   0.059/0.139 between halves, so a threshold in feature units is a differently
   sized bucket per era. And **the fade did not survive out of sample** — R5
-  measured the follow band carrying essentially all test-half PnL and the fade exactly none,
-  against +85.4% / +14.6% in-sample — so the machine's *design* is a hybrid while
-  its *measured* result is trend following. Do not describe it as either without
-  saying which.
+  measured the follow band at **+100.0%** of test-half PnL on 54 trades and the
+  fade at **+0.0%** (+0.30 currency units on +1,567.15 total, 19 trades, 31.6%
+  win rate), against +70.8% on 53 trades / +29.2% on 24 in-sample — so the
+  machine's *design* is a hybrid while its *measured* result is trend following.
+  Do not describe it as either without saying which.
 - **`position_size` is consumed on the bar that opens a position and never
   again.** `vbt.Portfolio.from_signals` defaults to `accumulate=False`; measured
   in R2 against the installed vectorbt, `size = [1,1,1,1,5,5,5,5]` with an entry
