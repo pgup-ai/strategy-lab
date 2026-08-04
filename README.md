@@ -485,9 +485,9 @@ strategy-lab backtest --exchange binance --market-type perp --symbols BTC/USDT \
 `state_machine_v1` needs perp candles *and* stored funding — funding is what `crowding`
 reads, and a perp backtest refuses to run without it. The `--start` is the venue's first
 funding settlement; earlier bars would be charged zero carry, which reads exactly like
-free carry. It clears the R0 baseline out of sample on risk-adjusted terms — Sharpe +0.938
-against `donchian` 40/10's +0.072 over the same held-out 6,048 bars — while returning less
-than buy-and-hold and losing its edge at 3× costs. Read
+free carry. It clears the R0 baseline out of sample on risk-adjusted terms — Sharpe +0.896
+against `donchian` 40/10's +0.072 over the same held-out 6,048 bars — while returning far
+less than buy-and-hold. Read
 [STRATEGIES.md](STRATEGIES.md#state_machine_v1) before quoting any of that.
 
 See [STRATEGIES.md](STRATEGIES.md) for the source of truth: per-strategy logic,

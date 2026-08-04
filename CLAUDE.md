@@ -106,7 +106,7 @@ Key design decisions that span multiple files:
   tercile is a rank statement and the raw boundaries move 0.067/0.156 →
   0.059/0.139 between halves, so a threshold in feature units is a differently
   sized bucket per era. And **the fade did not survive out of sample** — R5
-  measured the follow band at +102.4% of test-half PnL and the fade at −2.4%,
+  measured the follow band carrying essentially all test-half PnL and the fade exactly none,
   against +85.4% / +14.6% in-sample — so the machine's *design* is a hybrid while
   its *measured* result is trend following. Do not describe it as either without
   saying which.

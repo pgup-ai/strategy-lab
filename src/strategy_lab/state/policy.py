@@ -32,9 +32,9 @@ the two live regimes. The low tercile is where the halves disagree in sign --
 noise, and the one band that must be flat.
 
 That makes ``state_machine_v1`` a hybrid rather than a trend follower, and the
-mid band is where the machine spends much of its ``EXHAUSTION`` time by
-construction: ``RIDING`` is left exactly when strength drops out of the top
-tercile.
+mid band is where the machine spends much of its ``EXHAUSTION`` time: ``RIDING``
+is left on any bar that stops advancing, which includes strength dropping out of
+the top tercile but also a lean decaying below ``direction_floor``.
 
 ``crowding`` modulates size rather than direction. It was consistently negative
 at every horizon R4 measured -- high carry, lower forward return -- so it
@@ -127,11 +127,19 @@ def target_risk_series(
     crowding_penalty: float = CROWDING_PENALTY,
 ) -> pd.Series:
     """:func:`target_risk` over a whole frame, on ``states``' index."""
-    if not noise_band < follow_band:
+    if not 0.0 <= noise_band < follow_band <= 1.0:
         raise ValueError(
-            f"noise_band ({noise_band}) must sit below follow_band ({follow_band}); "
+            f"need 0 <= noise_band ({noise_band}) < follow_band ({follow_band}) <= 1; "
             "collapsing them removes the mid band, which is where R4 measured the "
             "larger absolute IC"
+        )
+    # Outside [0, 1] the damping stops damping: at 2.0 a fully crowded long comes
+    # out negative -- a short wearing a long's target -- and at -1.0 the target
+    # exceeds full risk. Both are silent, so they are refused rather than clipped.
+    if not 0.0 <= crowding_penalty <= 1.0:
+        raise ValueError(
+            f"crowding_penalty ({crowding_penalty}) must lie in [0, 1]; outside it "
+            "the damping flips the side or pushes the target past full risk"
         )
 
     scale = states.map(STATE_TARGET_RISK).to_numpy(dtype="float64")

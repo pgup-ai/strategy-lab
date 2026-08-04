@@ -1,20 +1,30 @@
 from __future__ import annotations
 
+from dataclasses import replace
+
 import numpy as np
 import pandas as pd
 import pytest
 
 from strategy_lab.features.flow import FUNDING_COLUMN, align_funding_to_bars
 from strategy_lab.features.registry import get_feature
-from strategy_lab.state.machine import MarketState
+from strategy_lab.state.machine import MarketState, StateMachine
 from strategy_lab.state.policy import STATE_TARGET_RISK
 from strategy_lab.strategies.registry import get_strategy, list_strategies
+from strategy_lab.strategies.state_machine_v1 import RANKED_FEATURES
 from tests.conftest import synthetic_ohlcv, synthetic_ohlcv_with_funding
 
 NAME = "state_machine_v1"
 
 # Enough bars past warmup for the machine to walk the lifecycle several times.
 PROBE_SPAN = 800
+
+# Bars probed by the cold-start replay below, and the fields it compares --
+# both narrower than ``tests/test_strategy_metadata.py``'s, which owns the same
+# check for every registered strategy. This one exists only for machines that
+# are not registered, so it is scoped to what this adapter actually emits.
+COLD_START_PROBES = 200
+SIGNAL_FIELDS = ("long_entries", "long_exits", "short_entries", "short_exits", "position_size")
 
 
 def probe_frame(strategy, *, funding: bool = False, seed: int = 7) -> pd.DataFrame:
@@ -142,6 +152,88 @@ def test_the_machine_and_the_policy_are_reachable_from_the_adapter():
     features, _ = strategy.feature_frame(probe_frame(strategy))
     states = set(strategy.machine.run(features))
     assert states == set(MarketState), f"unreachable states: {set(MarketState) - states}"
+
+
+def test_the_declared_warmup_scales_with_the_machine_it_holds():
+    """A pinned margin is wrong for any machine but the one it was measured on.
+
+    ``sweep_parameters`` rebuilds every cell with ``dataclasses.replace``, so a
+    grid over ``min_dwell`` is a grid over convergence cost: a cold machine
+    needing 1,000 consecutive advancing bars per lifecycle step cannot be where
+    a whole-history machine already is until it has had them. The adapter
+    therefore spends ``StateMachine.convergence_bars`` rather than a constant,
+    and what is asserted here is the consequence -- the margin past the features
+    is never below the machine's own proven bound, and a slower machine is
+    handed strictly more of it.
+    """
+    features_only = max(
+        get_feature(name).warmup_bars
+        + (get_strategy(NAME).rank_window - 1 if name in RANKED_FEATURES else 0)
+        for name in get_strategy(NAME).features
+    )
+    slower = None
+    for config in (StateMachine(min_dwell=1), StateMachine(), StateMachine(min_dwell=1_000)):
+        strategy = replace(get_strategy(NAME), machine=config)
+        margin = strategy.warmup_bars - features_only
+        assert margin >= config.convergence_bars, (
+            f"min_dwell={config.min_dwell} declares {margin} bars past its features, "
+            f"under its own convergence bound of {config.convergence_bars}"
+        )
+        assert slower is None or margin > slower, (
+            f"min_dwell={config.min_dwell} was handed {margin} bars, no more than the "
+            f"{slower} a faster machine got"
+        )
+        slower = margin
+
+
+@pytest.mark.parametrize(
+    "machine",
+    [
+        StateMachine(min_dwell=8, cooldown=24, exhaustion_dwell=30),
+        StateMachine(min_dwell=16, cooldown=32, exhaustion_dwell=48),
+    ],
+    ids=["slow", "slower"],
+)
+def test_a_configured_machine_gets_a_warmup_that_covers_it(machine):
+    """The empirical half: is the derived margin actually enough?
+
+    ``tests/test_strategy_metadata.py`` replays the cold start for the
+    *registered* strategy only, which is the default machine. These two are
+    reached the way ``sweep_parameters`` reaches a cell, and neither is
+    registered anywhere.
+
+    Both are chosen for being slow enough to have a materially different
+    convergence cost (80 and 130 bars against the default's 34) *and* fast
+    enough to still take positions inside the probed window -- the R5 trained
+    cell is deliberately not here, because it holds nothing at all over 200 bars
+    of this frame and every comparison would be ``0.0 == 0.0``. The non-vacuity
+    assertion below is what keeps that from happening silently.
+    """
+    strategy = replace(get_strategy(NAME), machine=machine)
+    warm = strategy.warmup_bars
+    df = synthetic_ohlcv(n=warm + COLD_START_PROBES)
+    whole = strategy.generate_signals(df)
+
+    live = int((whole.position_size.iloc[warm:] > 0).sum())
+    assert live >= 10, (
+        f"only {live} of the {COLD_START_PROBES} probed bars hold a position, so the "
+        "comparison below is mostly flat against flat. Raise COLD_START_PROBES."
+    )
+
+    divergences = []
+    for position in range(warm, len(df)):
+        cold = strategy.generate_signals(df.iloc[position - warm : position + 1])
+        for field in SIGNAL_FIELDS:
+            expected, actual = getattr(whole, field).iloc[position], getattr(cold, field).iloc[-1]
+            if not (pd.isna(expected) and pd.isna(actual)) and expected != actual:
+                divergences.append((position, field))
+                break
+
+    assert divergences == [], (
+        f"a machine with min_dwell={machine.min_dwell}, cooldown={machine.cooldown}, "
+        f"exhaustion_dwell={machine.exhaustion_dwell} declares warmup_bars={warm} and a "
+        f"cold start from exactly that many bars disagrees at {divergences[:5]}"
+    )
 
 
 @pytest.mark.db

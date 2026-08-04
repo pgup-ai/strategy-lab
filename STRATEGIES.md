@@ -249,9 +249,9 @@ features and sizes each entry from the state it opened in.
 
 It was designed as a hybrid — follow the top `strength` tercile, *fade* the middle one —
 but **out of sample it earns its result as a trend follower**: the follow band produced
-+102.4% of its test-half PnL on 94 trades and the fade band −2.4% on 65. The fade is kept
-for now because it was a positive contributor in-sample (+14.6%) and one half is not
-enough to delete a rule on, but it is not what the gate passed on.
+essentially all of its test-half PnL on 54 trades, and the fade band exactly nothing. The
+fade is kept for now because it contributed in-sample and one half is not enough to delete
+a rule on, but it is not what the gate passed on.
 
 - **Entry**: whenever the policy's signed target risk changes side. High `strength`
   follows `direction`; **mid `strength` fades it**; low `strength` is flat.
@@ -272,7 +272,8 @@ enough to delete a rule on, but it is not what the gate passed on.
   `crowding` on the paying side only. **The engine applies it on the entry bar and never
   again**, so a state change mid-position cannot resize — the taper is R6's job.
 - **Params**: `rank_window=480`, `machine=StateMachine(enter_strength=2/3,
-  exit_strength=1/3, min_dwell=4, cooldown=8, …)`, `warmup_bars=2160`.
+  exit_strength=1/3, min_dwell=4, cooldown=4, …)`, `warmup_bars=2192` — derived as
+  `deepest_feature + 8 x machine.convergence_bars`, so it tracks the machine it holds.
 - **`warmup_bars` is not the max over its features.** `direction` declares 1920, and at
   exactly 1920 the cold-start replay in `tests/test_strategy_metadata.py` disagrees with
   the whole-history run on 52–156 of 300 probed bars depending on seed, because the
@@ -290,13 +291,14 @@ enough to delete a rule on, but it is not what the gate passed on.
 
 - **R5 gate: passes.** Parameters chosen on the first 60% of the 15,118-bar BTC/USDT perp
   4h frame (54 configurations), the last 40% evaluated once. Out of sample it returns
-  **+23.29% net of funding at Sharpe +0.938 and 8.24% max drawdown**, against the R0
-  baseline `donchian` 40/10 at **−6.64% / +0.072 / 43.86%** over the identical 6,048 bars.
-  The untuned R4 default also passes (+19.36% / +0.738 / 11.37%). Three limits belong with
-  that: it wins on **risk, not return** (buy-and-hold is +85.78% over the same bars), it
-  **loses to the best donchian cell chosen with the test half in hand** (40/40 at +112.57%
-  / Sharpe +1.070), and its edge **does not survive 3× costs** (+23.29% → +11.34% →
-  −0.61%), which its 3-bar median holding period makes unsurprising. Full tables in
+  **+15.45% net of funding at Sharpe +0.896 and 4.67% max drawdown** on 73 trades,
+  against the R0 baseline `donchian` 40/10 at **−6.64% / +0.072 / 43.86%** over the
+  identical 6,048 bars. The untuned R4 default also passes (+15.52% / +0.746 / 7.11%).
+  Two limits belong with that: it wins on **risk, not return** (buy-and-hold is +85.78%
+  over the same bars), and it **loses to the best donchian cell chosen with the test half
+  in hand** (40/40 at +112.57% / Sharpe +1.070). It now **does** survive 3× costs
+  (+15.45% / +10.93% / +6.41%) — the bounded-exit fix cut turnover from 159 trades to 73
+  and lengthened the median hold from 3 bars to 7. Full tables in
   [the charter §9.2](docs/research/2026-08-03-market-dynamics-engine.md#92-r5-split-sample-gate--btcusdt-perp-4h);
   `tests/test_state_machine_gate.py` re-runs the out-of-sample comparison against the
   stored candles.
@@ -322,7 +324,7 @@ R0 baselines (verified against the engine on 5,000 synthetic bars, 2026-08-03):
 | `continuation_failure` (default) | opposite state OR N adverse closes | channel exit OR N adverse closes |
 | `opposite_signal_only` | ✅ canonical — opposite state, unaffected by `--no-allow-shorts` | ✅ canonical — channel exit, unaffected by `--no-allow-shorts` |
 | `trend_failure` | ✗ raises (no trend-failure series) | ✗ raises (no trend-failure series) |
-| `setup_invalidation_stop` | ✗ raises (no setup stop) | ✗ raises (no setup stop) |
+| `setup_invalidation_stop` | ⚠ runs, but identical to `opposite_signal_only` — the strategy emits no setup stop, so none is applied | ✗ raises (no setup stop) |
 | `trend_structure` | long-only (raises if short entries exist — pass `--no-allow-shorts`); SMA40 via fallback | same; note it *replaces* the channel exit |
 
 `state_machine_v1` owns its exits the way `trend_rider_v1` does, so the same warning

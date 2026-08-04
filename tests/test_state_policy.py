@@ -109,3 +109,24 @@ def test_the_scalar_and_vector_forms_agree():
         for i in range(n)
     ]
     assert vector.to_list() == pytest.approx(scalar)
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"crowding_penalty": 2.0},    # damping flips a crowded long into a short
+        {"crowding_penalty": -1.0},   # damping pushes the target past full risk
+        {"noise_band": -0.1},
+        {"follow_band": 1.5},
+    ],
+)
+def test_a_setting_that_would_reverse_or_exceed_the_target_is_refused(kwargs):
+    """Each of these is silent at runtime -- the target just comes out wrong."""
+    with pytest.raises(ValueError):
+        target_risk_series(
+            states=pd.Series([MarketState.RIDING]),
+            direction=pd.Series([0.8]),
+            strength=pd.Series([0.9]),
+            crowding=pd.Series([0.98]),
+            **kwargs,
+        )

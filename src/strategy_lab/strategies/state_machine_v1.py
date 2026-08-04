@@ -55,18 +55,27 @@ RANKED_FEATURES = ("strength", "stability")
 # when there is nothing to damp with, provided the metadata says so.
 NEUTRAL_CROWDING = 0.5
 
-# Bars of slack past the deepest feature, for the machine itself to forget where
-# its input began. This is why ``warmup_bars`` is NOT simply the max over the
-# features: the machine is a recursion on top of them, so a cold start still has
-# to re-synchronise after every feature it reads has converged.
+# Multiples of the machine's own ``convergence_bars`` to add past the deepest
+# feature, so the machine has time to forget where its input began. This is why
+# ``warmup_bars`` is NOT simply the max over the features: the machine is a
+# recursion on top of them, so a cold start still has to re-synchronise after
+# every feature it reads has converged.
 #
-# Measured with ``tests/test_strategy_metadata.py``'s own cold-start replay, 300
-# probes on each of five seeds: at margin 0 -- warmup 1920, the features' own
-# number -- the cold start disagrees on 52 to 156 of the 300 probed bars. At
-# margin 60 it disagrees on none, on any seed. This is four times that, because
-# the margin is cheap and the failure it prevents is a live process trading a
-# state the backtest never entered.
-MACHINE_CONVERGENCE_BARS = 240
+# A multiple rather than a constant, because the cost scales with the machine
+# that is actually configured -- ``StateMachine(min_dwell=1000)`` needs
+# thousands of bars where the default needs a few hundred, and
+# ``sweep_parameters`` reaches this through ``dataclasses.replace``.
+#
+# Measured with ``tests/test_strategy_metadata.py``'s own cold-start replay, 120
+# probes on each of three seeds, on three machines: the default, one at
+# ``min_dwell=2, cooldown=16``, and a deliberately slow ``min_dwell=8,
+# cooldown=24, exhaustion_dwell=30`` (convergence bounds 34 / 36 / 80). At
+# margin 0 -- warmup 1920, the features' own number -- the cold start disagrees
+# on 27 to 64 of the probed bars. At 2x ``convergence_bars`` it disagrees on
+# none, for any of the three, on any seed. This is four times that, because the
+# margin is cheap and the failure it prevents is a live process trading a state
+# the backtest never entered.
+MACHINE_CONVERGENCE_MULTIPLE = 8
 
 
 @dataclass(frozen=True)
@@ -91,6 +100,11 @@ class StateMachineV1:
         Not the largest declared lookback: a rank over ``rank_window`` cannot
         start until the feature underneath it has values to rank, so the two
         costs add exactly as they do in ``features.volatility.Energy``.
+
+        The machine's share is read off ``self.machine`` rather than pinned,
+        because it is genuinely a function of the configuration: a cold machine
+        with a large ``min_dwell`` needs that many advancing bars per lifecycle
+        step before it can be where a whole-history machine already is.
         """
         from strategy_lab.features.registry import get_feature
 
@@ -100,7 +114,7 @@ class StateMachineV1:
             if name in RANKED_FEATURES:
                 cost += self.rank_window - 1
             deepest = max(deepest, cost)
-        return deepest + MACHINE_CONVERGENCE_BARS
+        return deepest + MACHINE_CONVERGENCE_MULTIPLE * self.machine.convergence_bars
 
     def generate_signals(self, df: pd.DataFrame) -> SignalSet:
         validate_ohlcv(df)

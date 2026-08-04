@@ -24,15 +24,20 @@ Three mechanisms the R5 gate names, and what each one prevents:
 
 - **Hysteresis.** ``enter_strength`` gates every step *up* the lifecycle and
   ``exit_strength`` gates the failure that drops out of it, so between them
-  lies a dead band in which nothing happens. One constant compared twice would
-  make a feature hovering on it toggle the state every bar. The lifecycle is
-  also strictly forward -- ``EXHAUSTION`` cannot return to ``RIDING`` -- so a
-  decayed trend has to go round through ``RESET`` rather than oscillate.
-- **Minimum dwell.** A step up needs its condition to have held for
+  lies a dead band in which the machine does not step up and does not fail.
+  One constant compared twice would make a feature hovering on it toggle the
+  state every bar. The dead band is where the machine declines to *climb*,
+  not where nothing at all happens -- see the bounded exits below, which is
+  the distinction that took a bug to find. The lifecycle is also strictly
+  forward -- ``EXHAUSTION`` cannot return to ``RIDING`` -- so a decayed trend
+  has to go round through ``RESET`` rather than oscillate.
+- **Minimum dwell, both ways.** A step up needs ``advancing`` to have held for
   ``min_dwell`` consecutive bars *and* the current state to have lasted that
   long. Either alone is too weak: without the run length a single spike bar
   advances the machine, and without the state age a long-standing condition
-  walks it through three states in three bars.
+  walks it through three states in three bars. The same count runs the other
+  way: ``min_dwell`` consecutive *non*-advancing bars drop a ``BREAKOUT`` or
+  ``CONFIRMED`` that never became a ride back to ``RESET``.
 - **Cooldown.** ``RESET`` is held for ``cooldown`` bars, and ``BREAKOUT`` is
   reachable only from ``COMPRESSION``. Holding ``RESET`` *is* the "cannot
   re-enter for M bars" rule rather than a second counter beside it.
@@ -42,16 +47,38 @@ worse than churning: ``direction`` flipping against the side the move was
 entered on, and ``stability`` collapsing below its floor. Both drop straight to
 ``RESET`` from any live state.
 
-Every counter here **saturates**, which is load-bearing rather than incidental.
-A machine is a recursion over its whole input, so without saturation the state
-at bar *t* would depend on every bar back to the first one the process ever
-saw, and no live process could reproduce a backtest's state: it starts cold.
-Saturated, the machine is a finite automaton that forgets where it started
-after any run of failing bars long enough to walk it back to ``COMPRESSION``,
-which is what makes the adapter's ``warmup_bars`` mean anything at all.
-``tests/test_state_machine.py::test_the_machine_forgets_where_it_started``
-pins the property and ``tests/test_strategy_metadata.py`` measures how many
-bars it costs.
+**Every state has a bounded exit, and that is what makes a live process able to
+reproduce a backtest.** A machine is a recursion over its whole input, so the
+state at bar *t* can in principle depend on every bar back to the first one the
+process ever saw -- and a live process starts cold where a backtest arrives
+carrying years. Counters saturating is necessary for the machine to be a finite
+automaton but it is not sufficient: a state nothing routes *out of* remembers
+its own arrival forever. Measured on the pre-fix machine, a persistent tail of
+``direction=0.8, strength=0.5, stability=0.9, crowding=0.5`` left a cold start
+in ``COMPRESSION`` and a warm one in ``EXHAUSTION``, permanently, for a target
+risk of 0.0 against -0.55 -- and 14 of 48 sampled constant tails had more than
+one attractor, ``BREAKOUT`` and ``CONFIRMED`` parking in the dead band the same
+way. Three rules close it, and each is also the behaviour the lifecycle wanted:
+
+- A ``BREAKOUT`` or ``CONFIRMED`` that stops advancing for ``min_dwell`` bars
+  has failed as a setup and drops to ``RESET``. It had already lost every bar
+  of progress toward its next step -- ``advance_run`` resets on any
+  non-advancing bar -- so what it kept was a label, not a position in the
+  lifecycle.
+- ``RIDING`` ends on any bar that is not ``advancing``, which is the old
+  "strength left the top band" rule plus the case that parked it: a lean that
+  has decayed below ``direction_floor``. A ride with no direction is not a ride.
+- ``EXHAUSTION`` runs out after ``exhaustion_dwell`` bars. It is the one
+  transition on a plain timer, because a move that has already decayed has no
+  condition left to wait on.
+
+Together with a ``COMPRESSION -> BREAKOUT`` gate that now refuses the
+conditions which would immediately end a move, this gives the invariant
+``tests/test_state_machine.py::test_a_constant_tail_converges_from_any_start``
+pins: **from any starting configuration, a constant tail reaches the same state
+within** :attr:`StateMachine.convergence_bars` **bars.** That is what
+``warmup_bars`` is denominated in; ``tests/test_strategy_metadata.py`` measures
+what it costs on real-shaped input.
 """
 
 from __future__ import annotations
@@ -128,6 +155,12 @@ class StateMachine:
     crowding_extreme: float = 0.475
     min_dwell: int = 4
     cooldown: int = 8
+    # Bars ``EXHAUSTION`` may last before the move is simply over. 12 is three
+    # times the default ``min_dwell``: the machine gives a move as long to end
+    # as it took to establish, since COMPRESSION -> BREAKOUT -> CONFIRMED ->
+    # RIDING is exactly three dwell periods. A field rather than an expression
+    # over ``min_dwell`` so a sweep can move it on its own; the R5 grid does not.
+    exhaustion_dwell: int = 12
 
     def __post_init__(self) -> None:
         for name in (
@@ -149,6 +182,32 @@ class StateMachine:
         _require_bar_count("min_dwell", self.min_dwell, minimum=1)
         # Zero is a legal cooldown: it means RESET lasts its own single bar.
         _require_bar_count("cooldown", self.cooldown, minimum=0)
+        # One, not zero. Both states are held for at least the bar they are
+        # entered on, so 0 and 1 are the same machine either way -- but
+        # ``cooldown=0`` reads as "no cooldown" and is worth being able to say,
+        # while ``exhaustion_dwell=0`` reads as an EXHAUSTION that never happens,
+        # which is not what it would do.
+        _require_bar_count("exhaustion_dwell", self.exhaustion_dwell, minimum=1)
+
+    @property
+    def convergence_bars(self) -> int:
+        """Bars after which a constant tail has erased where the machine began.
+
+        The longest walk this configuration allows between the two attractors a
+        constant tail can have: ``EXHAUSTION`` runs out its dwell, ``RESET``
+        serves its cooldown, and the lifecycle then climbs three dwell periods
+        back to ``RIDING``. Two spare bars cover the transitions that fire on
+        entry rather than on age. Measured exhaustively against an enumeration
+        of tails and starting configurations in
+        ``tests/test_state_machine.py``, which also asserts the bound is not
+        loose by more than a factor of two.
+
+        This is the *proven* bound and it holds for constant tails only. Real
+        input is not constant, and the machine's memory on realistic input is
+        longer -- which is why the strategy adapter multiplies this rather than
+        using it directly.
+        """
+        return self.exhaustion_dwell + self.cooldown + 3 * self.min_dwell + 2
 
     def run(self, features: pd.DataFrame) -> pd.Series:
         """One :class:`MarketState` per row of ``features``.
@@ -180,7 +239,6 @@ class StateMachine:
         advancing = (strength >= self.enter_strength) & (
             np.abs(direction) >= self.direction_floor
         )
-        decaying = strength < self.enter_strength
         failing = ~measurable | (strength < self.exit_strength)
         unstable = stability < self.stability_floor
         crowded = np.abs(crowding - 0.5) >= self.crowding_extreme
@@ -189,7 +247,6 @@ class StateMachine:
             self._walk(
                 direction=direction,
                 advancing=advancing,
-                decaying=decaying,
                 failing=failing,
                 unstable=unstable,
                 crowded=crowded,
@@ -204,43 +261,67 @@ class StateMachine:
         *,
         direction: np.ndarray,
         advancing: np.ndarray,
-        decaying: np.ndarray,
         failing: np.ndarray,
         unstable: np.ndarray,
         crowded: np.ndarray,
     ) -> list[MarketState]:
         """The sequential core: one pass, saturating counters, no lookahead."""
         # Counting past these changes no decision; saturating there is what makes
-        # the machine finite-state. See the module docstring.
-        age_cap = max(self.min_dwell, self.cooldown)
+        # the machine finite-state. ``exhaustion_dwell`` belongs in the cap or a
+        # dwell longer than the other two would never be reached.
+        age_cap = max(self.min_dwell, self.cooldown, self.exhaustion_dwell)
 
         state = self.INITIAL_STATE
         bars_in_state = 0
         advance_run = 0
+        stall_run = 0
         # +1 / -1 while a move is live: the side it was entered on, which is
         # what a later ``direction`` reading can flip *against*.
         side = 0
 
         states: list[MarketState] = []
         for position in range(len(direction)):
-            advance_run = min(advance_run + 1, self.min_dwell) if advancing[position] else 0
+            if advancing[position]:
+                advance_run, stall_run = min(advance_run + 1, self.min_dwell), 0
+            else:
+                advance_run, stall_run = 0, min(stall_run + 1, self.min_dwell)
             stepping_up = bars_in_state >= self.min_dwell and advance_run >= self.min_dwell
+            stalled = stall_run >= self.min_dwell
             flipped = side != 0 and direction[position] * side <= -self.direction_floor
+            # A move may only start under the conditions that would let it
+            # continue. Gating the entry on less than the exits check is what
+            # let an unstable or crowded tail cycle COMPRESSION -> BREAKOUT ->
+            # RESET forever, at a phase a cold start could not reproduce.
+            admissible = not (failing[position] or unstable[position] or crowded[position])
 
             if state is MarketState.COMPRESSION:
-                following = MarketState.BREAKOUT if stepping_up else state
+                following = MarketState.BREAKOUT if stepping_up and admissible else state
             elif state is MarketState.RESET:
                 following = (
                     MarketState.COMPRESSION if bars_in_state >= self.cooldown else state
                 )
             elif failing[position] or unstable[position] or flipped:
                 following = MarketState.RESET
-            elif state is MarketState.RIDING and (decaying[position] or crowded[position]):
-                following = MarketState.EXHAUSTION
-            elif state is MarketState.BREAKOUT and stepping_up:
-                following = MarketState.CONFIRMED
-            elif state is MarketState.CONFIRMED and stepping_up:
-                following = MarketState.RIDING
+            elif state is MarketState.EXHAUSTION:
+                following = (
+                    MarketState.RESET if bars_in_state >= self.exhaustion_dwell else state
+                )
+            elif state is MarketState.RIDING:
+                following = (
+                    MarketState.EXHAUSTION
+                    if not advancing[position] or crowded[position]
+                    else state
+                )
+            # Only BREAKOUT and CONFIRMED reach here; the other four states are
+            # each handled above, so the two branches below are exhaustive.
+            elif stepping_up:
+                following = (
+                    MarketState.CONFIRMED
+                    if state is MarketState.BREAKOUT
+                    else MarketState.RIDING
+                )
+            elif stalled:
+                following = MarketState.RESET
             else:
                 following = state
 
