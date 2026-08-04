@@ -231,6 +231,61 @@ def diagnose_features(
     )
 
 
+def to_record(result: DiagnosticSet) -> dict:
+    """The whole diagnostic as JSON-safe data: ``NaN`` becomes ``null``, nothing else.
+
+    One definition, used by both the on-disk record and the report page's
+    payload, so the two cannot drift into disagreeing about the same run. NaN is
+    not valid JSON, and a browser that cannot parse the payload drops the detail
+    silently rather than complaining.
+    """
+    return {
+        "horizons": list(result.horizons),
+        "features": [_feature_record(diagnostic, result) for diagnostic in result.diagnostics],
+        "correlations": {
+            name: {other: _json_float(value) for other, value in row.items()}
+            for name, row in result.correlations.items()
+        },
+        "redundant_pairs": [
+            {"features": [first, second], "r": value}
+            for first, second, value in result.redundant_pairs()
+        ],
+    }
+
+
+def _feature_record(diagnostic: FeatureDiagnostic, result: DiagnosticSet) -> dict:
+    partner, correlation = result.max_correlation(diagnostic.name)
+    return {
+        "name": diagnostic.name,
+        "version": diagnostic.version,
+        "warmup_bars": diagnostic.warmup_bars,
+        "observations": diagnostic.observations,
+        "coverage": _json_float(diagnostic.coverage),
+        "min": _json_float(diagnostic.minimum),
+        "median": _json_float(diagnostic.median),
+        "max": _json_float(diagnostic.maximum),
+        "iqr": _json_float(diagnostic.iqr),
+        "autocorrelation": _json_float(diagnostic.autocorrelation),
+        "turnover": _json_float(diagnostic.turnover),
+        "max_correlation": {"feature": partner, "r": _json_float(correlation)},
+        "ic": [
+            {
+                "horizon": entry.horizon,
+                "ic": _json_float(entry.ic),
+                "first_half_ic": _json_float(entry.first_half_ic),
+                "second_half_ic": _json_float(entry.second_half_ic),
+                "observations": entry.observations,
+                "halves_agree": entry.halves_agree,
+            }
+            for entry in diagnostic.ics
+        ],
+    }
+
+
+def _json_float(value: float) -> float | None:
+    return None if value != value else value
+
+
 def _diagnose(
     feature: StateFeature,
     values: pd.Series,

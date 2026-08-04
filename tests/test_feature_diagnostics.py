@@ -22,6 +22,8 @@ The two lies:
 
 from __future__ import annotations
 
+import json
+import re
 from dataclasses import dataclass
 
 import numpy as np
@@ -36,7 +38,9 @@ from strategy_lab.features.diagnostics import (
     diagnose_features,
     forward_return,
     information_coefficient,
+    to_record,
 )
+from strategy_lab.features.diagnostics_report import render_diagnostics_html
 from strategy_lab.features.registry import get_feature, list_features
 from tests.conftest import synthetic_ohlcv_with_funding
 
@@ -379,3 +383,106 @@ def test_every_registered_feature_can_be_diagnosed(name):
     assert all(np.isfinite(h.first_half_ic) for h in diagnostic.ics)
     assert all(np.isfinite(h.second_half_ic) for h in diagnostic.ics)
     assert np.isfinite(diagnostic.turnover)
+
+
+# --- the JSON record ---------------------------------------------------------
+
+
+def _record_for(features, n=800):
+    return to_record(diagnose_features(features, noisy_price(n=n), horizons=(1, 6)))
+
+
+def test_the_record_is_valid_json_with_nulls_where_nothing_was_measured():
+    """``NaN`` is not valid JSON; a page that cannot parse its payload fails silently."""
+    record = _record_for([_CurrentBarDeviation(), _Constant()])
+    text = json.dumps(record, allow_nan=False)
+
+    assert "NaN" not in text
+    constant = next(f for f in record["features"] if f["name"] == "constant")
+    assert constant["ic"][0]["ic"] is None
+    assert constant["max_correlation"]["r"] is None
+
+
+def test_the_record_carries_every_feature_and_horizon():
+    record = _record_for([_CurrentBarDeviation(), _Echo()])
+    assert record["horizons"] == [1, 6]
+    assert [f["name"] for f in record["features"]] == ["current_bar_deviation", "echo"]
+    for feature in record["features"]:
+        assert [entry["horizon"] for entry in feature["ic"]] == [1, 6]
+        assert {"ic", "first_half_ic", "second_half_ic"} <= set(feature["ic"][0])
+    assert record["redundant_pairs"][0]["features"] == ["current_bar_deviation", "echo"]
+
+
+# --- the report --------------------------------------------------------------
+
+
+def _html(features=None, n=800, config=None):
+    features = features or [_CurrentBarDeviation(), _Echo(), _RegimeSplit()]
+    result = diagnose_features(features, noisy_price(n=n), horizons=(1, 6))
+    return render_diagnostics_html(result=result, config=config or {"candle_count": n})
+
+
+def test_report_is_self_contained():
+    html = _html()
+    assert "<script src=" not in html, "must not reference external assets"
+    assert "<link" not in html
+    assert "http://" not in html and "https://" not in html
+    assert html.lstrip().startswith("<!DOCTYPE html>")
+
+
+def test_report_renders_one_row_per_feature():
+    html = _html()
+    rows = re.findall(r'<th class="row-label">([^<]+)</th>', html)
+    assert rows == ["current_bar_deviation", "echo", "regime_split"]
+
+
+def test_report_shows_both_halves_beside_every_full_sample_ic():
+    """The split is the reading; the full-sample number alone is the lie this catches."""
+    result = diagnose_features([_RegimeSplit()], noisy_price(n=1200), horizons=(1,))
+    html = render_diagnostics_html(result=result, config={})
+    [entry] = result.diagnostics[0].ics
+
+    assert f"{entry.ic:+.3f}" in html
+    assert f"{entry.first_half_ic:+.3f} / {entry.second_half_ic:+.3f}" in html
+    # And the halves are not the full-sample number wearing two labels.
+    assert f"{entry.ic:+.3f} / {entry.ic:+.3f}" not in html
+
+
+def test_a_feature_whose_halves_disagree_is_marked():
+    marked = _html([_RegimeSplit()], n=1200)
+    steady = _html([_CurrentBarDeviation()], n=1200)
+    assert "cell split" in marked
+    assert marked.count("cell split") > steady.count("cell split")
+
+
+def test_report_flags_a_redundant_pair_by_name():
+    html = _html([_CurrentBarDeviation(), _Echo()])
+    assert "Redundancy" in html
+    assert "current_bar_deviation" in html and "echo" in html
+    assert "r = +1.000" in html
+
+
+def test_report_says_so_when_nothing_is_redundant():
+    """Silence would read as 'not checked', which is the one thing it must not."""
+    html = _html([_CurrentBarDeviation(), _RegimeSplit()])
+    assert "No pair reaches" in html
+
+
+def test_report_names_what_was_skipped():
+    """A feature left out has to appear on the page, or it shipped unexamined."""
+    html = _html(config={"skipped": {"crowding": "needs a funding_rate column"}})
+    assert "Not examined" in html
+    assert "crowding" in html and "funding_rate" in html
+
+
+def test_report_escapes_interpolated_values():
+    html = _html(config={"identity": {"symbol": "<script>alert(1)</script>"}})
+    assert "<script>alert(1)</script>" not in html
+    assert "&lt;script&gt;" in html
+
+
+def test_rendering_no_features_is_refused():
+    result = diagnose_features([_Constant()], noisy_price(n=400), horizons=(1,))
+    empty = type(result)(horizons=result.horizons, diagnostics=(), correlations={})
+    with pytest.raises(ValueError, match="no features"):
+        render_diagnostics_html(result=empty, config={})
