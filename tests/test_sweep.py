@@ -90,12 +90,15 @@ def test_the_sweep_warms_up_every_cell_for_the_deepest_grid_entry(monkeypatch):
         "beside it, so the deepened warmup never reached the returns"
     )
     # ``trades`` is what a reader multiplies by a cost assumption to check a
-    # cell, so it has to cover the same bars the returns do. A 12-bar cell
-    # turns over freely through the 588 bars the deepened warmup discards.
-    evaluated_bars = len(df) - deepest
-    assert 0 < shallow.trades <= evaluated_bars, (
-        f"the shallow cell reports {shallow.trades} trades over {evaluated_bars} "
-        f"evaluated bars; the count includes pre-warmup transitions"
+    # cell, so it has to cover the same bars the returns do. A 12-bar cell turns
+    # over freely through the bars the deepened warmup discards, so its count
+    # must fall by exactly those transitions. A ceiling of ``len(df) - deepest``
+    # does not pin this: measured here the full-frame count is 101 against 300
+    # evaluated bars, so the unsliced count sits comfortably under it.
+    assert shallow.trades < alone.trades, (
+        f"the shallow cell reports {shallow.trades} trades with and without a "
+        f"deeper cell beside it; the count still includes transitions from the "
+        f"pre-warmup bars whose returns were excluded"
     )
 
 
