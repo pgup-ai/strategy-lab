@@ -84,10 +84,13 @@ def run_backtest(
     present and is the headline run. Funding is never stressed: it is a market
     rate, so tripling it models a different instrument rather than a worse fill.
 
-    ``size_mode`` selects between fixed-fractional entries and volatility
-    targeting; ``vol_target``, ``max_weight`` and ``vol_span`` configure the
-    latter and are ignored under ``fixed``, which is bit-for-bit the behaviour
-    that predates them.
+    ``size_mode`` selects between fixed-fractional entries and volatility-scaled
+    ones; ``vol_target``, ``max_weight`` and ``vol_span`` configure the latter
+    and are ignored under ``fixed``, which is bit-for-bit the behaviour that
+    predates them. ``vol-scaled-entry`` scales the *entry* and nothing after it:
+    ``from_signals`` fills once per state change, so an open position keeps the
+    weight it was opened with however far volatility moves. See
+    ``backtests/sizing.py`` for the measurement and for where the real fix lives.
     """
     try:
         import vectorbt as vbt
@@ -101,7 +104,7 @@ def run_backtest(
     signals = strategy.generate_signals(df)
     exit_mode = ExitMode(exit_mode)
     size_mode = SizeMode(size_mode)
-    signals = _volatility_targeted(
+    signals = _vol_scaled_entry_weights(
         signals,
         df=df,
         strategy=strategy,
@@ -266,7 +269,7 @@ def run_backtest(
     )
 
 
-def _volatility_targeted(
+def _vol_scaled_entry_weights(
     signals: SignalSet,
     *,
     df: pd.DataFrame,
@@ -278,25 +281,29 @@ def _volatility_targeted(
     vol_span: int,
     position_pct: float,
 ) -> SignalSet:
-    """``signals`` with ``position_size`` replaced by volatility-target weights.
+    """``signals`` with ``position_size`` replaced by inverse-volatility weights.
+
+    Only the weight on each entry bar is executed -- ``from_signals`` does not
+    resize a position it has already opened -- so this scales entries and does
+    not target risk continuously. ``backtests/sizing.py`` has the measurement.
 
     A strategy that already ships a ``position_size`` is refused rather than
     overridden or multiplied. ``trend_rider_v1_deepseek_v4_pro`` is the case
     that exists: its scale is ``0.06 / (ATR/close)``, itself an inverse-vol
     weight, so multiplying the two would size on ``1 / vol**2`` and land nowhere
-    near ``vol_target`` -- the run would still be labelled as targeting 30% while
-    holding neither 30% nor anything stable. Overriding instead would silently
-    delete a documented part of the strategy. Neither failure is visible in the
-    artifacts, so the combination is rejected at the boundary.
+    near ``vol_target`` -- the run would still be labelled for 30% while sizing
+    entries at neither 30% nor anything stable. Overriding instead would
+    silently delete a documented part of the strategy. Neither failure is
+    visible in the artifacts, so the combination is rejected at the boundary.
     """
     if size_mode is SizeMode.FIXED:
         return signals
     if signals.position_size is not None:
         raise ValueError(
             f"{strategy.name} already sizes its own positions, and stacking "
-            f"volatility targeting on top targets neither its scale nor "
+            f"volatility scaling on top sizes entries at neither its scale nor "
             f"{vol_target:.0%} annualized volatility. Run it with "
-            f"--size-mode fixed, or vol-target a strategy that leaves sizing to "
+            f"--size-mode fixed, or vol-scale a strategy that leaves sizing to "
             f"the engine."
         )
 
@@ -327,7 +334,7 @@ def _executable_max_weight(max_weight: float, position_pct: float) -> float:
 
     Without this the run silently does something other than what it advertises:
     vectorbt fills what the cash covers rather than rejecting the order, so a
-    ``--max-weight 2.0`` run at the default 95% deployment targets 30% vol on
+    ``--max-weight 2.0`` run at the default 95% deployment sizes for 30% vol on
     paper and holds whatever fit in practice, with ``config.json`` recording the
     number that was asked for.
     """
@@ -343,7 +350,7 @@ def _sizing_config(
     vol_span: int,
     position_pct: float,
 ) -> dict[str, Any]:
-    """The vol-target settings, recorded only on runs that actually used them.
+    """The vol-scaling settings, recorded only on runs that actually used them.
 
     Both caps are recorded: ``max_weight`` is what was asked for and
     ``max_weight_effective`` is what the book could fill, so a run stays

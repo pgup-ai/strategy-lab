@@ -105,8 +105,11 @@ pass-through mode.
   2. continuation failure — 3 consecutive lower closes (`failure_bars=3`, internal);
   3. regime break — close falls below SMA40;
   4. momentum divergence — 26-bar rate of change turns negative.
-- **Sizing**: ATR volatility targeting — `scale = 0.06 / (ATR14/close)`, clipped to
-  [0.3, 1.0], multiplied into `position_pct`. Position shrinks when vol is high.
+- **Sizing**: ATR-scaled *entries* — `scale = 0.06 / (ATR14/close)`, clipped to
+  [0.3, 1.0], multiplied into `position_pct`. A position is **entered** smaller when vol
+  is high; like `--size-mode vol-scaled-entry` it does not resize a position already open
+  (`from_signals` fills once per state change), so this is not continuous vol targeting
+  however much the `0.06` target reads like one.
 - **Params**: `sma_trend_span=40`, `roc_momentum_period=26`, `atr_period=14`,
   `atr_max_ratio=0.10`, `failure_bars=3`, `target_atr_ratio=0.06`,
   `min_position_scale=0.3`, `max_position_scale=1.0`.
@@ -285,14 +288,25 @@ R0 baselines (verified against the engine on 5,000 synthetic bars, 2026-08-03):
 - **Sizing is non-compounding**: entry shares = initial cash × `position_pct` × scale ÷
   close. Sizes are anchored to *initial* cash, never to current equity.
 - **`--size-mode` chooses where that scale comes from.** `fixed` (default) uses whatever
-  the strategy supplied, and is bit-for-bit the pre-sizing behaviour. `vol-target` sets it
-  to `--vol-target ÷ realized volatility`, clipped to `[0, --max-weight]`, so *risk* rather
-  than notional is what stays constant. `--max-weight` is further clipped to
+  the strategy supplied, and is bit-for-bit the pre-sizing behaviour. `vol-scaled-entry`
+  sets it to `--vol-target ÷ realized volatility`, clipped to `[0, --max-weight]`, so a
+  violent regime is *entered* smaller. `--max-weight` is further clipped to
   `1 ÷ --position-pct` — an entry is sized as `cash × position_pct × weight` and the book
   has no leverage, so anything above that cannot be filled — with a warning naming both
   numbers and `max_weight_effective` in `config.json`. At the default 95% deployment the
-  advertised `--max-weight 2.0` is really **1.053**. Two more things to know before reading a
-  `vol-target` run: the estimator is an EWM (span 96) that decays its seed rather than dropping it, so
+  advertised `--max-weight 2.0` is really **1.053**.
+- **`vol-scaled-entry` scales the entry and never retargets an open position** — the name
+  is deliberate, and it is *not* volatility targeting. `Portfolio.from_signals` defaults to
+  `accumulate=False`, so a repeated same-direction entry is ignored while a position is
+  open and the per-bar weight series is consumed on exactly one bar per position: the one
+  that opens it. A position held from a calm regime into a violent one carries its
+  calm-regime notional the whole way, and realized risk is therefore *not* held constant.
+  Continuous rebalancing needs order-level control `from_signals` cannot express; it is
+  **R6**, where the engine moves to `from_orders` or a custom simulator (charter Q4).
+  `tests/test_sizing.py::test_only_the_entry_bar_weight_lands_and_a_later_one_never_resizes`
+  pins the real behaviour. The withdrawn `vol-target` spelling is **rejected, not aliased**.
+- Two more things to know before reading a
+  `vol-scaled-entry` run: the estimator is an EWM (span 96) that decays its seed rather than dropping it, so
   weights need roughly **20× span ≈ 1,900 bars** to converge and a shorter frame quietly
   under-trades its early bars; and volatility is annualized from *calendar* bars per
   timeframe, which is exact for 24/7 crypto and overstates the bar count (so understates

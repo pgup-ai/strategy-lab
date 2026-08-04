@@ -143,10 +143,10 @@ def _entry_notional(result) -> pd.Series:
 
 
 def test_a_calm_regime_gets_a_larger_entry_than_a_violent_one(tmp_path):
-    """The whole claim of vol targeting, measured through the engine's own orders.
+    """The whole claim of vol *scaling*, measured through the engine's own orders.
 
     Fixed sizing deploys the same notional whatever the market is doing, which
-    is what makes its risk swing with volatility. Vol targeting has to move that
+    is what makes its risk swing with volatility. Vol scaling has to move that
     notional the other way -- and it has to survive the trip through
     ``SignalSet.position_size`` and vectorbt, not merely be correct in the
     module.
@@ -155,13 +155,78 @@ def test_a_calm_regime_gets_a_larger_entry_than_a_violent_one(tmp_path):
     split = df.index[len(df) // 2]
 
     fixed = _entry_notional(_run(tmp_path, df))
-    targeted = _entry_notional(_run(tmp_path, df, size_mode=SizeMode.VOL_TARGET))
+    targeted = _entry_notional(_run(tmp_path, df, size_mode=SizeMode.VOL_SCALED_ENTRY))
 
     assert fixed.to_numpy() == pytest.approx(fixed.iloc[0])
     assert targeted[targeted.index < split].mean() > 3 * targeted[targeted.index >= split].mean()
 
 
-def test_vol_target_refuses_a_strategy_that_already_sizes_itself(tmp_path):
+def test_only_the_entry_bar_weight_lands_and_a_later_one_never_resizes(tmp_path):
+    """The mode scales *entries*; it does not retarget a position it already holds.
+
+    ``vbt.Portfolio.from_signals`` defaults to ``accumulate=False``, so a
+    repeated same-direction entry while a position is open is ignored and the
+    per-bar weight series is consumed on exactly one bar per position -- the one
+    that opens it. This test is the guard against someone reading the weights as
+    continuous volatility targeting: it pins each fill to the weight at *its own*
+    entry bar, on a frame where the weight moves by more than 5x during at least
+    one holding period. If the engine ever gains real rebalancing (R6), this test
+    is what will fail and say so.
+
+    ``max_weight=1.0`` keeps every requested weight inside the book's buying
+    power, so a fill is never clipped for a reason unrelated to what is being
+    measured and the notional matches to float precision rather than loosely.
+    """
+    df = _regime_shift_frame(wild=0.05)
+    result = _run(tmp_path, df, size_mode=SizeMode.VOL_SCALED_ENTRY, max_weight=1.0)
+
+    weights = volatility_target_weights(
+        df["close"].pct_change(),
+        target_annual_vol=0.30,
+        bars_per_year=2191.5,
+        span=96,
+        max_weight=1.0,
+    )
+    trades = pd.read_csv(
+        result.trades_path, parse_dates=["Entry Timestamp", "Exit Timestamp"]
+    )
+    assert not trades.empty
+
+    notional = trades["Size"] * trades["Avg Entry Price"]
+    entry_weights = weights.reindex(trades["Entry Timestamp"]).to_numpy()
+    assert notional.to_numpy() == pytest.approx(10_000.0 * 0.95 * entry_weights, rel=1e-9)
+
+    held = [
+        weights.loc[entry:exit]
+        for entry, exit in zip(trades["Entry Timestamp"], trades["Exit Timestamp"])
+    ]
+    assert max((span.max() / span.min()) for span in held if span.min() > 0) > 5.0
+
+
+def test_from_signals_ignores_a_repeat_entry_which_is_why_rebalancing_is_absent(tmp_path):
+    """The upstream fact the whole ``vol-scaled-entry`` naming rests on.
+
+    Pinned directly rather than only inferred through the engine, so that a
+    vectorbt upgrade which starts honouring later sizes fails *here* -- next to
+    the docstring claiming it does not -- instead of silently making
+    ``backtests/sizing.py`` describe behaviour the package no longer has.
+    """
+    vbt = pytest.importorskip("vectorbt")
+    index = pd.date_range("2024-01-01", periods=8, freq="4h", tz="UTC", name="timestamp")
+    pf = vbt.Portfolio.from_signals(
+        close=pd.Series(100.0, index=index),
+        entries=pd.Series(True, index=index),
+        exits=pd.Series(False, index=index),
+        size=pd.Series([1, 1, 1, 1, 5, 5, 5, 5], index=index, dtype="float64"),
+        init_cash=100_000.0,
+        freq="4h",
+    )
+
+    assert len(pf.orders.records_readable) == 1
+    assert pf.assets().to_numpy() == pytest.approx(1.0)
+
+
+def test_vol_scaling_refuses_a_strategy_that_already_sizes_itself(tmp_path):
     """Multiplying two inverse-vol scales targets neither of them, and says nothing."""
     df = _regime_shift_frame()
 
@@ -170,7 +235,7 @@ def test_vol_target_refuses_a_strategy_that_already_sizes_itself(tmp_path):
             tmp_path,
             df,
             name="trend_rider_v1_deepseek_v4_pro",
-            size_mode=SizeMode.VOL_TARGET,
+            size_mode=SizeMode.VOL_SCALED_ENTRY,
         )
 
 
@@ -182,7 +247,7 @@ def test_the_sizing_choice_is_recorded_for_reproducibility(tmp_path):
     targeted = json.loads(
         (
             _run(
-                tmp_path, df, size_mode=SizeMode.VOL_TARGET, vol_target=0.25, max_weight=1.5
+                tmp_path, df, size_mode=SizeMode.VOL_SCALED_ENTRY, vol_target=0.25, max_weight=1.5
             ).report_dir
             / "config.json"
         ).read_text()
@@ -190,7 +255,7 @@ def test_the_sizing_choice_is_recorded_for_reproducibility(tmp_path):
 
     assert fixed["size_mode"] == "fixed"
     assert "vol_target" not in fixed
-    assert targeted["size_mode"] == "vol-target"
+    assert targeted["size_mode"] == "vol-scaled-entry"
     assert targeted["vol_target"] == 0.25
     assert targeted["max_weight"] == 1.5
     assert targeted["max_weight_effective"] == pytest.approx(1 / 0.95)
@@ -205,7 +270,7 @@ def test_a_weight_above_buying_power_is_capped_and_named(tmp_path):
     df = _regime_shift_frame()
 
     with pytest.warns(UserWarning, match="1.053"):
-        result = _run(tmp_path, df, size_mode=SizeMode.VOL_TARGET, max_weight=2.0)
+        result = _run(tmp_path, df, size_mode=SizeMode.VOL_SCALED_ENTRY, max_weight=2.0)
 
     config = json.loads((result.report_dir / "config.json").read_text())
     assert config["max_weight"] == 2.0
@@ -220,7 +285,7 @@ def test_a_weight_the_book_can_fill_is_left_alone(tmp_path):
     with warnings.catch_warnings():
         warnings.simplefilter("error")
         result = _run(
-            tmp_path, df, size_mode=SizeMode.VOL_TARGET, max_weight=2.0, position_pct=0.5
+            tmp_path, df, size_mode=SizeMode.VOL_SCALED_ENTRY, max_weight=2.0, position_pct=0.5
         )
 
     config = json.loads((result.report_dir / "config.json").read_text())
