@@ -343,25 +343,28 @@ def backtest(
         SizeMode.FIXED,
         "--size-mode",
         help=(
-            "fixed deploys --position-pct on every entry. vol-target scales it by "
-            "target / realized volatility, so risk rather than notional is what stays "
-            "constant. The estimator is an EWM (span 96) that decays its seed instead "
-            "of dropping it, so weights need roughly 20x span -- about 1,900 bars -- to "
-            "converge; a shorter frame under-trades its early bars rather than erroring."
+            "fixed deploys --position-pct on every entry. vol-scaled-entry scales it by "
+            "target / realized volatility, so a violent regime is entered smaller. It "
+            "scales the ENTRY only: an open position is never resized, because "
+            "from_signals fills once per state change, so a position held through a "
+            "calm-to-violent shift keeps its calm-regime notional. The estimator is an "
+            "EWM (span 96) that decays its seed instead of dropping it, so weights need "
+            "roughly 20x span -- about 1,900 bars -- to converge; a shorter frame "
+            "under-trades its early bars rather than erroring."
         ),
     ),
     vol_target: float = typer.Option(
         0.30,
         "--vol-target",
         min=0.0001,
-        help="Annualized volatility to hold under --size-mode vol-target.",
+        help="Annualized volatility each entry is sized for under --size-mode vol-scaled-entry.",
     ),
     max_weight: float = typer.Option(
         2.0,
         "--max-weight",
         min=0.0001,
         help=(
-            "Cap on the vol-target size multiplier, so a calm stretch cannot lever up. "
+            "Cap on the entry size multiplier, so a calm stretch cannot lever up. "
             "The book has no leverage, so anything above 1 / --position-pct cannot be "
             "filled and is capped, with a warning and the effective value in config.json."
         ),
