@@ -393,6 +393,59 @@ had not (2019-09-08 to 2019-11-27). Mean breadth over the **14,651 complete
 cross-sections** is **0.512**; the partial ones are skipped rather than scored,
 which is what the guard in the loop above is doing.
 
+## State Features
+
+Nine registered features score one dimension of market state each, all through
+`StateFeature` — the same `name` / `version` / `warmup_bars` / `compute(df)`
+shape as `Strategy`, so the lookahead poison probe covers them without a second
+implementation. `list_features()` and `get_feature(name)` mirror the strategy
+registry, and registration is manual in the same two places.
+
+```bash
+strategy-lab features --exchange binance --market-type perp --symbol BTC/USDT \
+  --timeframe 4h --horizons 1,6,30 --start 2019-09-10T08:00:00
+```
+
+That writes a timestamped `reports/` directory holding `features.html` — one row
+per feature, self-contained — and `diagnostics.json`, the full record. Each row
+carries coverage, distribution, lag-1 autocorrelation, turnover, the Spearman
+information coefficient at every horizon, and the strongest correlation with any
+other feature.
+
+**Every percentile and z-score is rolling, never full-sample.** A full-sample
+rank at bar *t* moves when bars after *t* arrive: measured on a 200-bar ramp
+poisoned downward from row 121, `series.rank(pct=True)` at row 120 goes
+0.605 → 1.000 while the rolling form does not move at all. That is lookahead with
+no `shift(-1)` anywhere to grep for, so `rolling_percentile` and `rolling_zscore`
+in `features/base.py` are the only two places it is implemented, and
+`tests/test_feature_lookahead.py` poisons the future of every registered feature
+on every run.
+
+**The IC is measured against the return over `[t+1, t+1+h]`,** anchored one bar
+after the feature's own. `close[t+h] / close[t]` contains no *return* from bar
+*t*, which is why it reads as safe, but it does contain bar *t*'s *price* as its
+denominator — so any feature reading that print divides a high number into its
+own target and is paid for it. Measured on a random walk plus an i.i.d. print
+error, with a feature that predicts nothing: IC −0.53 anchored at `close[t]`,
+−0.01 anchored at `close[t+1]`.
+
+**Both half-sample ICs are reported, not just the full-sample number.** A feature
+that works in one half and not the other is a regime, not a signal, and the
+average hides exactly that.
+
+`crowding` needs a `funding_rate` column and **raises without one** rather than
+returning a neutral 0.5, which would claim nobody is crowded. The `features`
+command attaches funding on a perp automatically; on any other market it skips
+`crowding`, says so on stderr, and records the skip in `diagnostics.json` —
+a silent skip is how a feature ships unexamined.
+
+Measured on 15,118 BTC/USDT perp 4h bars, no feature reaches |IC| 0.07 at any
+horizon, which is normal at this frequency. The interesting numbers are
+conditional: `direction`'s IC@30b goes from +0.038 unconditionally to +0.131
+inside `strength`'s top tercile. See
+[§9.1 of the charter](docs/research/2026-08-03-market-dynamics-engine.md#91-r4-feature-diagnostics--btcusdt-perp-4h)
+for the full table and the keep/cut calls.
+
 ## Live Report Serving
 
 Reports are static files, but `strategy-lab serve` adds a delayed live feed:
