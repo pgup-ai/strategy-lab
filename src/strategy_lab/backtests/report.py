@@ -14,7 +14,11 @@ _DOWN = "#ef5350"
 _UP_DIM = "rgba(38, 166, 154, 0.45)"
 _DOWN_DIM = "rgba(239, 83, 80, 0.45)"
 
+# A funded run stores no bare path statistic -- each names its curve -- so
+# exactly one of the first two rows renders: the gross key on a funded run, the
+# plain one everywhere else.
 _STAT_KEYS = [
+    ("Total Return [%] (gross of funding)", "Gross of Funding", "signed_pct"),
     ("Total Return [%]", "Total Return", "signed_pct"),
     ("Net Return [%]", "Net Return", "signed_pct"),
     ("Benchmark Return [%]", "Benchmark", "signed_pct"),
@@ -23,6 +27,14 @@ _STAT_KEYS = [
     ("Sharpe Ratio", "Sharpe", "num"),
     ("Profit Factor", "Profit Factor", "num"),
     ("Total Trades", "Trades", "int"),
+]
+
+_RISK_ROWS = [
+    ("Max Drawdown [%]", "Max Drawdown", "pct"),
+    ("Annualized Volatility [%]", "Annualized Volatility", "pct"),
+    ("Sharpe Ratio", "Sharpe", "num"),
+    ("Sortino Ratio", "Sortino", "num"),
+    ("Calmar Ratio", "Calmar", "num"),
 ]
 
 
@@ -139,7 +151,37 @@ def _stress_rows(stress: list[dict], funding_applied: bool) -> str:
     return "\n".join(rows)
 
 
-def _cost_section(costs: dict | None) -> str:
+def _risk_table(stats: dict) -> str:
+    """Every risk statistic funding moves, gross beside net.
+
+    The curve plotted above is the net one while ``pf.stats()`` measures the
+    simulated book, which never sees a settlement. Publishing only one of the
+    two is how a drawdown gets quoted off a curve nobody is looking at.
+    """
+    rows = []
+    for key, label, kind in _RISK_ROWS:
+        gross = stats.get(f"{key} (gross of funding)")
+        net = stats.get(f"{key} (net of funding)")
+        if gross is None or net is None:
+            continue
+        rows.append(
+            f"<tr><td>{escape(label)}</td>"
+            f"<td>{escape(_fmt_stat(gross, kind))}</td>"
+            f"<td>{escape(_fmt_stat(net, kind))}</td></tr>"
+        )
+    if not rows:
+        return ""
+    return (
+        '<div class="table-wrap cost-table">'
+        "<table><thead><tr>"
+        "<th>Risk</th><th>Gross of funding</th><th>Net of funding</th>"
+        "</tr></thead><tbody>"
+        f"{''.join(rows)}"
+        "</tbody></table></div>"
+    )
+
+
+def _cost_section(costs: dict | None, stats: dict) -> str:
     if not costs or not costs.get("stress"):
         return ""
 
@@ -173,6 +215,7 @@ def _cost_section(costs: dict | None) -> str:
         f"<h2>Costs{warn}</h2>"
         f'<div class="flow">{_cost_flow(base, funding_applied)}</div>'
         f'<p class="note">{escape(note)}</p>'
+        f"{_risk_table(stats)}"
         f"{table}"
         "</section>"
     )
@@ -292,18 +335,30 @@ def _trade_rows(trades: pd.DataFrame) -> str:
     return "\n".join(rows)
 
 
+def _stat_lookup(stats: dict, key: str) -> tuple[str, object] | None:
+    """``(label suffix, value)`` for ``key``, following the funded-run rename.
+
+    A funded run splits every path statistic into a gross and a net key, so a
+    chip either finds the plain name or finds the net-of-funding variant -- and
+    when it is the latter the chip says so, because the drawdown a reader takes
+    away must match the curve drawn beside it.
+    """
+    if key in stats:
+        return "", stats[key]
+    net = f"{key} (net of funding)"
+    if net in stats:
+        return " (net)", stats[net]
+    return None
+
+
 def _stat_chips(stats: dict) -> str:
-    # A funding-bearing run reports two returns, and the first chip a reader
-    # sees must not be the one they cannot trade: the vectorbt total is
-    # relabelled as gross, and the net figure gets the emphasis.
-    net_return = "Net Return [%]" in stats
     chips = []
     for key, label, kind in _STAT_KEYS:
-        if key not in stats:
+        found = _stat_lookup(stats, key)
+        if found is None:
             continue
-        if key == "Total Return [%]" and net_return:
-            label = "Gross of Funding"
-        value = stats[key]
+        suffix, value = found
+        label += suffix
         cls = ""
         if kind == "signed_pct" and isinstance(value, (int, float)) and value == value:
             cls = f" {_pnl_class(float(value))}"
@@ -348,7 +403,7 @@ def render_report_html(
         .replace("__META__", escape(" · ".join(str(b) for b in meta_bits if b)))
         .replace("__RANGE__", escape(date_range))
         .replace("__CHIPS__", _stat_chips(stats))
-        .replace("__COSTS__", _cost_section(costs))
+        .replace("__COSTS__", _cost_section(costs, stats))
         .replace("__ROWS__", _trade_rows(trades))
         .replace("__PAYLOAD__", payload)
     )

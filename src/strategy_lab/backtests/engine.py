@@ -203,10 +203,18 @@ def run_backtest(
     costs_path = report_dir / "costs.json"
     _write_json(costs_path, costs)
 
+    equity = pf.value() + flows[1.0].cumsum()
+
     stats = pf.stats().to_dict()
     if funding_applied:
+        stats = _split_by_curve(
+            stats,
+            gross_equity=pf.value(),
+            net_equity=equity,
+            cash=cash,
+            freq=timeframe_to_pandas_freq(identity.timeframe),
+        )
         stats["Funding Paid"] = headline["funding_paid"]
-        stats["Net Return [%]"] = headline["net_return_pct"]
     stats_path = report_dir / "stats.json"
     _write_json(stats_path, stats)
 
@@ -220,7 +228,6 @@ def run_backtest(
         ledger.to_csv(funding_path)
 
     equity_curve_path = report_dir / "equity_curve.csv"
-    equity = pf.value() + flows[1.0].cumsum()
     equity.to_frame("equity").to_csv(equity_curve_path)
 
     plot_path = report_dir / "plot.html"
@@ -322,6 +329,75 @@ def _stress_multiples(cost_stress: Sequence[float]) -> list[float]:
             raise ValueError(f"cost stress multiples must be > 0, got {multiple!r}")
         multiples.add(value)
     return sorted(multiples)
+
+
+_PATH_STATS = (
+    "Total Return [%]",
+    "End Value",
+    "Max Drawdown [%]",
+    "Max Drawdown Duration",
+    "Annualized Return [%]",
+    "Annualized Volatility [%]",
+    "Sharpe Ratio",
+    "Sortino Ratio",
+    "Calmar Ratio",
+    "Omega Ratio",
+)
+
+
+def _equity_risk(equity: pd.Series, *, cash: float, freq: str) -> dict[str, Any]:
+    """Risk statistics for one equity path, on vectorbt's own definitions.
+
+    Reusing the returns accessor rather than hand-rolling a Sharpe is what makes
+    the gross and net columns comparable: the same estimator sees both curves,
+    so any difference between them is funding and nothing else.
+
+    The first bar's return is measured against ``cash`` rather than dropped,
+    because ``pf.stats()`` counts it and a curve scored over one fewer
+    observation would differ from the simulated book for a reason that has
+    nothing to do with funding.
+    """
+    returns = equity.pct_change()
+    returns.iloc[0] = equity.iloc[0] / cash - 1.0
+    acc = returns.vbt.returns(freq=freq)
+    return {
+        "Total Return [%]": float(acc.total()) * 100.0,
+        "End Value": float(equity.iloc[-1]),
+        "Max Drawdown [%]": -float(acc.max_drawdown()) * 100.0,
+        "Max Drawdown Duration": acc.drawdowns.max_duration(),
+        "Annualized Return [%]": float(acc.annualized()) * 100.0,
+        "Annualized Volatility [%]": float(acc.annualized_volatility()) * 100.0,
+        "Sharpe Ratio": float(acc.sharpe_ratio()),
+        "Sortino Ratio": float(acc.sortino_ratio()),
+        "Calmar Ratio": float(acc.calmar_ratio()),
+        "Omega Ratio": float(acc.omega_ratio()),
+    }
+
+
+def _split_by_curve(
+    stats: dict[str, Any],
+    *,
+    gross_equity: pd.Series,
+    net_equity: pd.Series,
+    cash: float,
+    freq: str,
+) -> dict[str, Any]:
+    """``stats`` with every path statistic named for the curve it describes.
+
+    Funding is settled outside the simulation, so ``pf.stats()`` measures
+    drawdown, Sharpe and the rest on a curve the report does not plot. On the
+    BTC perp that gap is not cosmetic -- funding runs to a third of initial
+    capital -- so on a funded run no path statistic is left bare: each appears
+    once per curve, and the reader is never asked which one they are holding.
+    Trade-level statistics are untouched, because funding is a carry on the
+    book rather than a cost attributable to any trade.
+    """
+    split = {key: value for key, value in stats.items() if key not in _PATH_STATS}
+    for curve, equity in (("gross", gross_equity), ("net", net_equity)):
+        for key, value in _equity_risk(equity, cash=cash, freq=freq).items():
+            split[f"{key} ({curve} of funding)"] = value
+    split["Net Return [%]"] = split.pop("Total Return [%] (net of funding)")
+    return split
 
 
 def _funding_notional(pf, df: pd.DataFrame) -> pd.Series:

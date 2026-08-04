@@ -77,7 +77,8 @@ def _gap_is_exactly_the_funding(result) -> bool:
     this file exists to prevent.
     """
     stats, cash = _stats(result), _config(result)["cash"]
-    return stats["Total Return [%]"] - stats["Net Return [%]"] == pytest.approx(
+    gross = stats["Total Return [%] (gross of funding)"]
+    return gross - stats["Net Return [%]"] == pytest.approx(
         stats["Funding Paid"] / cash * 100, rel=1e-9
     )
 
@@ -211,6 +212,42 @@ def test_a_cost_model_matches_the_legacy_fee_and_slippage_arguments(tmp_path):
     legacy = _run(tmp_path / "a", fees=0.0009, slippage=0.0003)
     modelled = _run(tmp_path / "b", cost_model=CostModel(fee=0.0009, slippage=0.0003))
     assert _stats(modelled) == _stats(legacy)
+
+
+def test_risk_statistics_are_measured_on_the_curve_that_is_plotted(tmp_path):
+    """Funding settles outside the simulation, so ``pf.stats()`` scores a curve
+    the report never draws. On a 35%-of-capital funding bill that is the
+    difference between a publishable drawdown and a real one."""
+    result = _run(tmp_path, funding=_funding(_frame(), rate=0.002))
+    stats = _stats(result)
+    equity = _equity(result)
+
+    peak = equity.cummax()
+    assert stats["Max Drawdown [%] (net of funding)"] == pytest.approx(
+        float((1 - equity / peak).max() * 100)
+    )
+    assert (
+        stats["Max Drawdown [%] (net of funding)"]
+        > stats["Max Drawdown [%] (gross of funding)"]
+    )
+    assert stats["Sharpe Ratio (net of funding)"] < stats["Sharpe Ratio (gross of funding)"]
+
+
+def test_no_path_statistic_is_left_without_a_curve_named(tmp_path):
+    """A bare Sharpe on a funded run is the defect: two curves exist and the
+    reader has no way to tell which one they are holding."""
+    stats = _stats(_run(tmp_path, funding=_funding(_frame())))
+    bare = {"Total Return [%]", "Max Drawdown [%]", "Sharpe Ratio", "Sortino Ratio"}
+    assert bare.isdisjoint(stats)
+    assert "Win Rate [%]" in stats
+
+
+def test_the_report_shows_both_curves_risk_side_by_side(tmp_path):
+    page = _run(tmp_path, funding=_funding(_frame())).plot_path.read_text()
+    assert "Gross of funding" in page
+    assert "Net of funding" in page
+    assert "Sortino" in page
+    assert "Max Drawdown (net)" in page
 
 
 def test_a_run_without_funding_leaves_the_stats_dict_untouched(tmp_path):
