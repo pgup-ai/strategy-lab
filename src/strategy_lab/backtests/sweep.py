@@ -107,9 +107,12 @@ def _evaluate(
         total_return=float(equity.iloc[-1] - 1) if len(equity) else 0.0,
         sharpe=sharpe,
         max_drawdown=float(drawdown) if len(equity) else 0.0,
-        # Bars on which the position changed. A flip counts once, not twice --
-        # this is a turnover comparison between cells, not a fill count.
-        trades=int(position.diff().abs().gt(0).sum()),
+        # Bars on which the position changed, over the same window ``returns``
+        # covers -- a reader multiplies this by a cost assumption to sanity-check
+        # a cell, so counting transitions whose returns were excluded overstates
+        # the cost of the returns actually reported. A flip counts once, not
+        # twice: this is a turnover comparison between cells, not a fill count.
+        trades=int(position.diff().abs().gt(0).iloc[warmup:].sum()),
     )
 
 
