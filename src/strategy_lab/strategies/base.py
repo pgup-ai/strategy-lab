@@ -29,6 +29,25 @@ class Strategy(Protocol):
         ...
 
 
+def require_positive_span(strategy: str, field: str, value: object) -> None:
+    """Reject a lookback pandas would turn into lookahead or into silence.
+
+    ``pct_change(-1)`` compares each row against the *next* one, so a negative
+    lookback makes a strategy non-causal -- the exact failure this repo exists to
+    prevent, and one ``tests/test_lookahead.py`` cannot catch, because the poison
+    probe iterates ``list_strategies()`` and so only ever sees defaults, while
+    ``sweep_parameters`` rebuilds every cell with ``dataclasses.replace`` over any
+    field. Zero is the quieter half: ``pct_change(0)`` and ``rolling(0)`` raise
+    nothing and yield a strategy that simply never trades, which reads on a
+    surface as a parameter region with no edge rather than as a broken cell.
+
+    ``bool`` is rejected separately because it is an ``int`` subclass: without
+    that, ``lookback=True`` passes and silently behaves as ``lookback=1``.
+    """
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        raise ValueError(f"{strategy} {field} must be a positive integer, got {value!r}")
+
+
 def validate_ohlcv(df: pd.DataFrame) -> None:
     required = {"open", "high", "low", "close", "volume"}
     missing = required.difference(df.columns)

@@ -4,7 +4,7 @@ Source of truth for what each strategy does, how it is meant to be run, and what
 about its behavior. Update this file whenever strategy logic, parameters, or engine exit
 behavior changes — the README only carries quick-start commands.
 
-Last reviewed: 2026-08-02 at commit `31334c4`.
+Last reviewed: 2026-08-03 at commit `498eed5`.
 
 ## At a glance
 
@@ -14,8 +14,17 @@ Last reviewed: 2026-08-02 at commit `31334c4`.
 | `turnaround_v2` | long + short | crypto intraday (15m spot) | same as v1 | EMA200 trend + EMA20 extension | engine | flat | active — crypto |
 | `trend_following_deepseek_v4` | long only | weekly equity ETFs | same pattern within uptrend | SMA40 trend + 1.20× max extension | engine (`trend_structure`) | flat | active — weekly ETF, simple variant |
 | `trend_rider_v1_deepseek_v4_pro` | long only (short path exists) | weekly equity ETFs | same pattern within uptrend | SMA40 trend + ATR volatility gate | strategy (run pass-through) | ATR-scaled | active — weekly ETF, current focus |
+| `tsmom` | long + short | any (MDE R0 baseline) | sign of the 96-bar trailing return | none | engine | flat | R0 baseline |
+| `ema_cross` | long + short | any (MDE R0 baseline) | EMA48 vs EMA192 | none | engine | flat | R0 baseline |
+| `donchian` | long + short | any (MDE R0 baseline) | close breaks the 96-bar channel | none | strategy (48-bar reverse channel) | flat | R0 baseline |
+| `multi_horizon` | long + short | any (MDE R0 baseline) | sign of a 24/48/96/192 vol-normalized blend | none | engine | flat | R0 baseline |
 
 \* Status is inferred from report history — correct these labels as research priorities change.
+
+The bottom four are the [Market Dynamics Engine](docs/research/2026-08-03-market-dynamics-engine.md)
+R0 baselines: the floor every later state-estimation model has to clear out-of-sample.
+They are deliberately unfiltered and unoptimized — a baseline that has been tuned is not
+a baseline.
 
 ## How signals flow
 
@@ -26,8 +35,10 @@ ingredients actually fire. The same strategy can therefore behave very different
 run — always record the `exit_mode` when comparing results (it is written to each
 report's `config.json`).
 
-All entries share the same three-candle turnaround pattern: two adverse candles followed
-by one reversal candle, evaluated and filled on the signal bar's close.
+The four original strategies share the same three-candle turnaround pattern: two adverse
+candles followed by one reversal candle, evaluated and filled on the signal bar's close.
+The R0 baselines do not — they are continuous trend-state rules (or, for `donchian`, a
+channel break), which is what makes them a fair floor for a trend program.
 
 ---
 
@@ -94,8 +105,11 @@ pass-through mode.
   2. continuation failure — 3 consecutive lower closes (`failure_bars=3`, internal);
   3. regime break — close falls below SMA40;
   4. momentum divergence — 26-bar rate of change turns negative.
-- **Sizing**: ATR volatility targeting — `scale = 0.06 / (ATR14/close)`, clipped to
-  [0.3, 1.0], multiplied into `position_pct`. Position shrinks when vol is high.
+- **Sizing**: ATR-scaled *entries* — `scale = 0.06 / (ATR14/close)`, clipped to
+  [0.3, 1.0], multiplied into `position_pct`. A position is **entered** smaller when vol
+  is high; like `--size-mode vol-scaled-entry` it does not resize a position already open
+  (`from_signals` fills once per state change), so this is not continuous vol targeting
+  however much the `0.06` target reads like one.
 - **Params**: `sma_trend_span=40`, `roc_momentum_period=26`, `atr_period=14`,
   `atr_max_ratio=0.10`, `failure_bars=3`, `target_atr_ratio=0.06`,
   `min_position_scale=0.3`, `max_position_scale=1.0`.
@@ -119,6 +133,114 @@ The ETF universe for weekly runs lives in [universe/etfs.py](src/strategy_lab/un
 
 ---
 
+# MDE R0 baselines
+
+Four unfiltered trend rules that exist to be beaten. None of them provides a setup stop
+or a trend-failure series, so `setup_invalidation_stop` and `trend_failure` raise for all
+four. Default parameters are quoted in bars, and were chosen to be round numbers on a 15m
+grid (96 bars = one day) rather than tuned — the R0 parameter sweep is what tests whether
+any of them sits on a stable plateau.
+
+**All four are `warmup_bars`-measured, not `warmup_bars`-declared.** `tsmom`, `donchian`
+and `multi_horizon` use `rolling`/`pct_change` only, so warmup is exactly the longest
+lookback. `ema_cross` uses `ewm(adjust=False)`, which recurses from bar 0, so its warmup
+is 20× the slow span — see the note in [CLAUDE.md](CLAUDE.md) and
+`tests/test_strategy_metadata.py`.
+
+**And all four *derive* it in `__post_init__` rather than storing a constant**, because
+the spans are swept: `sweep_parameters` rebuilds every cell with `dataclasses.replace`,
+so a warmup frozen at the default under-warms the larger cells. A `warmup_bars=` passed
+to a constructor is overwritten — it is a consequence of the spans, not a free parameter.
+The sweep in turn evaluates every cell at the *deepest* cell's warmup, which is the only
+value that keeps the surface on one sample while leaving each cell converged.
+
+## tsmom
+
+The single most-documented trend effect in the literature, and the reference floor.
+
+- **Entry**: long while the `lookback`-bar trailing return is positive, short while it is
+  negative. A continuous state, not an event — it re-asserts on every bar.
+- **Exits provided**: opposite state only.
+- **Params**: `lookback=96`, `warmup_bars` = `lookback`.
+
+## ema_cross
+
+- **Entry**: long while EMA(`fast_span`) > EMA(`slow_span`), short while it is below.
+- **Exits provided**: opposite state only.
+- **Params**: `fast_span=48`, `slow_span=192`, `warmup_bars` = 20 × `slow_span` (3840 at
+  the default).
+- **Note**: 3840 is not conservatism. At `warmup_bars=192` the span-192 EMA is wrong by up
+  to 2.6e-2 *relative* on 299 of 300 probed bars, and the fast-vs-slow comparison still
+  comes out identical on all 300 — so the signal-level cold-start test cannot see it.
+  `test_recursive_ema_is_bit_exact_after_the_declared_warmup` is what pins this.
+
+## donchian
+
+Turtle-style channel breakout: enter slowly, leave faster, so a trend can be ridden
+rather than round-tripped.
+
+- **Entry**: long when close exceeds the prior `entry_span`-bar high; short when it falls
+  below the prior `entry_span`-bar low.
+- **Exits provided**: reverse break of the shorter `exit_span` channel — a separate
+  signal rather than the inverse of the entry state, which is what lets the exit be
+  faster than the entry.
+- **Params**: `entry_span=96`, `exit_span=48`, `warmup_bars` = `max(entry_span,
+  exit_span)` — either channel can be the longer one.
+- **Note**: every channel is `.rolling(n).max().shift(1)`. The `shift(1)` is load-bearing
+  but *not* a lookahead guard — bar *t*'s own high is known at bar *t*'s close, so the
+  poison probe passes without it. What it prevents is degeneracy: `high >= close` within a
+  bar, so an unshifted channel makes `close > entry_high` unsatisfiable and the strategy
+  never trades at all.
+- **Known issue — `exit_span >= entry_span` makes `exit_span` inert, with shorts on.**
+  `long_exits` is `close < exit_low` and `short_entries` is `close < entry_low`; a wider
+  exit channel means `exit_low <= entry_low`, so every bar that trips the exit also trips
+  the reversal, and an opposite entry outranks a same-side exit. Measured on the
+  15,128-bar BTC perp 4h frame: **zero** bars where a long exit fires without a short
+  entry beside it, and `exit_span` 20/40/80 produce bit-identical positions at
+  `entry_span=20`. Only `exit_span < entry_span` — the Turtle configuration this is
+  modelled on — is a live parameter. With `--no-allow-shorts` there is no reversal to
+  outrank the exit and the channel matters again. Pinned by
+  `tests/test_sweep.py::test_donchians_exit_channel_is_inert_once_it_is_no_narrower_than_the_entry`.
+
+## multi_horizon
+
+Averages volatility-normalized trailing returns across several lookbacks. The point is
+not a better number — it is removing the single-lookback choice, which is where most trend
+backtests quietly overfit.
+
+- **Entry**: long while the blended score exceeds `entry_threshold`, short while it is
+  below its negative.
+- **Score**: mean over `lookbacks` of `pct_change(lookback) / (rolling(96).std() *
+  sqrt(lookback))` — each horizon becomes a unit-scale t-statistic under a random walk, so
+  neither a noisier regime nor a longer horizon can dominate the blend by raw magnitude.
+- **Exits provided**: opposite state only.
+- **Params**: `lookbacks=(24, 48, 96, 192)`, `entry_threshold=0.0`, `warmup_bars` =
+  `max(max(lookbacks), 96)` — the volatility window is a lookback too, and binds whenever
+  every horizon is shorter than it.
+- **Note**: `rolling(...).std()` is not bit-reproducible across a cold start (pandas adds
+  and removes observations one at a time, and the removals leave rounding residue).
+  Measured at warmup 192 the score differs from the whole-history value on 195/300 bars —
+  by at most 1.1e-15, against a smallest observed |score| of 5.9e-3. Signals are identical
+  on every bar, which is why `warmup_bars` is the longest lookback and not a multiple.
+
+### `--no-allow-shorts` gates the short entry only, never the long exit
+
+`tsmom`, `ema_cross` and `multi_horizon` all wire `long_exits = short_state`, so the
+trend flip is both "close the long" and "open the short". Only the second is optional:
+`allow_shorts=False` zeroes `short_entries` and leaves `long_exits` on the raw flip.
+Measured on 5,000 synthetic bars, all four baselines emit **identical** `long_exits` with
+shorts on and off (2,889 for `tsmom`, 3,191 `ema_cross`, 275 `donchian`, 2,745
+`multi_horizon`), so a long-only run under `opposite_signal_only` is a real long/cash
+strategy rather than buy-and-hold.
+
+This was wrong until 2026-08-03: the flip state itself was gated, which took the long
+exit with it and dropped all three to **0** long exits under `--no-allow-shorts`.
+`donchian` was never affected — its exits come from the reverse channel rather than the
+entry state, which is the Turtle asymmetry paying off structurally.
+`test_disabling_shorts_does_not_disable_the_long_exit` pins all four.
+
+---
+
 ## Exit mode × strategy matrix
 
 Engine defaults: `exit_mode=continuation_failure`, `failure_bars=4`.
@@ -131,12 +253,77 @@ Engine defaults: `exit_mode=continuation_failure`, `failure_bars=4`.
 | `setup_invalidation_stop` | opposite signal + stop at setup extreme | ✗ raises | ✗ raises |
 | `trend_structure` | long-only: raises if short entries exist; SMA40 via fallback | ✅ canonical: SMA40 break OR N adverse closes | long-only (raises if short entries exist — pass `--no-allow-shorts`); replaces the internal exits |
 
+R0 baselines (verified against the engine on 5,000 synthetic bars, 2026-08-03):
+
+| `exit_mode` | tsmom / ema_cross / multi_horizon | donchian |
+|---|---|---|
+| `continuation_failure` (default) | opposite state OR N adverse closes | channel exit OR N adverse closes |
+| `opposite_signal_only` | ✅ canonical — opposite state, unaffected by `--no-allow-shorts` | ✅ canonical — channel exit, unaffected by `--no-allow-shorts` |
+| `trend_failure` | ✗ raises (no trend-failure series) | ✗ raises (no trend-failure series) |
+| `setup_invalidation_stop` | ✗ raises (no setup stop) | ✗ raises (no setup stop) |
+| `trend_structure` | long-only (raises if short entries exist — pass `--no-allow-shorts`); SMA40 via fallback | same; note it *replaces* the channel exit |
+
 ## Engine behavior worth remembering
 
 - **Costs**: default `fees=0.0005` and `slippage=0.0005` per side, `cash=10_000`,
-  `position_pct=0.95`.
+  `position_pct=0.95`. `--cost-stress 1,2,3` re-prices the same signals at 2× and 3×
+  execution frictions and renders the comparison in the report.
+- **Funding is charged on perps, and it is first-order.** `backtest` loads stored
+  funding automatically for `--market-type perp` and *refuses to run* without it —
+  a gross-of-carry perp number reads exactly like a net one, and BTC funding averages
+  +11.65%/yr paid by longs. Pass `--no-funding` to opt out on purpose. It is charged as
+  a discrete cash flow at each venue settlement, matched to the bar whose interval
+  contains it (Binance stamps settlements up to 47 ms late; an equality match drops 43%
+  of them), against the notional held *into* that bar. Cost stress never scales it —
+  funding is a market rate, so tripling it models a different instrument.
+- **A partial funding history is refused too**, not just an empty one: the stored series
+  must span the candle window with no gap past 1.5× the contract's own measured cadence.
+  A missing settlement is charged as zero and is indistinguishable from "the venue paid
+  nothing". This bites on real data — BTC/USDT perp klines start `2019-09-08 16:00` but
+  the venue's first funding settlement is `2019-09-10 08:00`, so the canonical 4h run
+  needs `--start "2019-09-10 08:00:00"`.
+- **A funded run's `stats.json` names the curve behind every path statistic.** Funding
+  settles outside `Portfolio.from_signals`, so vectorbt's drawdown and Sharpe describe a
+  book that never paid carry. Each path statistic (total return, end value, max drawdown
+  and its duration, annualized return and volatility, Sharpe, Sortino, Calmar, Omega) is
+  therefore emitted twice — `X (gross of funding)` and `X (net of funding)` — and never
+  bare; `Net Return [%]` is the net total return under its established name, and
+  `Funding Paid` is the total. Trade statistics are unsplit: funding is carry on the
+  book, not a cost attributable to any trade. `equity_curve.csv` is the net curve and
+  `funding.csv` is the per-settlement audit trail. When funding does *not* apply,
+  `stats.json`, `trades.csv` and `equity_curve.csv` are byte-identical to a pre-costs
+  run — but only those three. `costs.json` is always written, `config.json` always
+  carries `cost_model` / `cost_stress` / `funding_applied` / `funding_settlements`, and
+  the report always renders its Costs section.
 - **Sizing is non-compounding**: entry shares = initial cash × `position_pct` × scale ÷
   close. Sizes are anchored to *initial* cash, never to current equity.
+- **`--size-mode` chooses where that scale comes from.** `fixed` (default) uses whatever
+  the strategy supplied, and is bit-for-bit the pre-sizing behaviour. `vol-scaled-entry`
+  sets it to `--vol-target ÷ realized volatility`, clipped to `[0, --max-weight]`, so a
+  violent regime is *entered* smaller. `--max-weight` is further clipped to
+  `1 ÷ --position-pct` — an entry is sized as `cash × position_pct × weight` and the book
+  has no leverage, so anything above that cannot be filled — with a warning naming both
+  numbers and `max_weight_effective` in `config.json`. At the default 95% deployment the
+  advertised `--max-weight 2.0` is really **1.053**.
+- **`vol-scaled-entry` scales the entry and never retargets an open position** — the name
+  is deliberate, and it is *not* volatility targeting. `Portfolio.from_signals` defaults to
+  `accumulate=False`, so a repeated same-direction entry is ignored while a position is
+  open and the per-bar weight series is consumed on exactly one bar per position: the one
+  that opens it. A position held from a calm regime into a violent one carries its
+  calm-regime notional the whole way, and realized risk is therefore *not* held constant.
+  Continuous rebalancing needs order-level control `from_signals` cannot express; it is
+  **R6**, where the engine moves to `from_orders` or a custom simulator (charter Q4).
+  `tests/test_sizing.py::test_only_the_entry_bar_weight_lands_and_a_later_one_never_resizes`
+  pins the real behaviour. The withdrawn `vol-target` spelling is **rejected, not aliased**.
+- Two more things to know before reading a
+  `vol-scaled-entry` run: the estimator is an EWM (span 96) that decays its seed rather than dropping it, so
+  weights need roughly **20× span ≈ 1,900 bars** to converge and a shorter frame quietly
+  under-trades its early bars; and volatility is annualized from *calendar* bars per
+  timeframe, which is exact for 24/7 crypto and overstates the bar count (so understates
+  the weight) on an instrument that closes. Combining it with a strategy that already sets
+  `position_size` — only `trend_rider_v1_deepseek_v4_pro` — is **rejected**, not stacked:
+  its ATR scale is itself an inverse-vol weight, so multiplying would size on `1/vol²` and
+  hold neither target.
 - **Data**: Yahoo OHLC is rescaled by adj close, so ETF series are dividend-adjusted
   (total-return-like). Crypto candles are raw exchange OHLCV.
 - **Timeframe strings are identity**: candles are keyed by the literal timeframe string —
@@ -144,7 +331,13 @@ Engine defaults: `exit_mode=continuation_failure`, `failure_bars=4`.
   per instrument and stick to it.
 - **Reports**: every run writes `reports/<UTC>_<exchange>_<market>_<symbol>_<tf>_<strategy>/`
   with `config.json` (full parameter snapshot), `stats.json`, `trades.csv`,
-  `equity_curve.csv`, `plot.html`. `config.json` is the reproducibility boundary.
+  `equity_curve.csv`, `costs.json`, `plot.html`, plus `funding.csv` when funding
+  applies. `config.json` is the reproducibility boundary; `costs.json` is the
+  gross → fees → slippage → funding → size effect → net breakdown at every stress level.
+  **Gross is a second simulation priced at zero**, not net with the costs added back:
+  worse fills buy less size in a cash-constrained book, so the two differ. `size_effect`
+  is the P&L the shrunken book never earned — the term that closes the waterfall — and
+  gross is identical across stress levels because scaling a zero rate changes nothing.
 
 ## Known issues (review of 2026-08-02)
 

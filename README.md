@@ -89,6 +89,59 @@ strategy-lab fetch-etf-universe \
   --start 2020-01-01
 ```
 
+## Perp And Funding Data
+
+Binance USD-M perpetuals, fetched over the venue's REST API rather than ccxt
+(which does not expose funding or open interest cleanly). Run `strategy-lab
+migrate` once first — `funding_rates` and `open_interest` are created by the
+migrations, not by `init-db`.
+
+Perp candles land in `market_candles` under `market_type=perp`, through the same
+`normalize_candle_frame` + `upsert_candles` path as every other candle source:
+
+```bash
+strategy-lab fetch-perp --symbol BTC/USDT --timeframe 4h --since 2019-09-01
+strategy-lab fetch-perp --symbol ETH/USDT --timeframe 4h --since 2019-11-01
+```
+
+Funding is a settlement cash flow, not a candle field, so it gets its own table:
+
+```bash
+strategy-lab fetch-funding --symbol BTC/USDT --since 2019-09-01
+strategy-lab fetch-funding --symbol ETH/USDT --since 2019-11-01
+```
+
+### Open interest is only ~30 days deep and cannot be backfilled
+
+**Binance serves roughly 30 days of open-interest history and no more.**
+Measured 2026-08-03: a `startTime` 40 days back returns
+`{"code":-1130,"msg":"parameter 'startTime' is invalid."}`. `fetch-open-interest`
+therefore takes no `--since` and refuses an out-of-window request rather than
+clamping it, because a silently narrowed range would make a 30-day sample look
+like history. OI accumulates forward from the first run — schedule it if you
+want a series:
+
+```bash
+strategy-lab fetch-open-interest --symbol BTC/USDT --period 4h
+```
+
+Any study needing years of open interest is not answerable from this source.
+
+### What the venue actually returns
+
+Three things measured while backfilling to 2019, each of which will bite someone
+who assumes otherwise:
+
+- **`markPrice` is an empty string on older funding records.** Binance only
+  began populating it on 2023-10-31; every earlier row has `markPrice: ""`,
+  stored as NULL. `Decimal("")` raises, so this aborted the first backfill run.
+- **Funding times are not exactly on the 8h grid.** They land on the boundary or
+  up to 47 ms after it (3,260 of BTC's 7,559 settlements). Match funding to bars
+  by flooring or reindexing, never by equality against a generated 8h range.
+- **The settlement interval is per-contract**, so nothing in this repo hardcodes
+  8h. BTC/USDT and ETH/USDT have used 8h continuously since inception, but that
+  is an observed property of those two contracts rather than a rule.
+
 ## Backtest
 
 ```bash

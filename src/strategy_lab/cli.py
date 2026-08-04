@@ -1,20 +1,30 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import uuid
 from pathlib import Path
 
 import typer
 
-from strategy_lab.backtests import ExitMode, run_backtest
+from strategy_lab.backtests import ExitMode, SizeMode, run_backtest
+from strategy_lab.backtests.sizing import DEFAULT_VOL_SPAN
 from strategy_lab.db import init_db, list_candle_sets, load_candles, upsert_candles
 from strategy_lab.db.candles import normalize_candle_frame
 from strategy_lab.market_data.base import MarketDataIdentity
+from strategy_lab.market_data.binance_futures import OPEN_INTEREST_HISTORY_DAYS
+from strategy_lab.market_data.binance_futures import SOURCE as BINANCE_FUTURES_SOURCE
 from strategy_lab.strategies import get_strategy, list_strategies
 from strategy_lab.universe.etfs import ETF_UNIVERSE
 
 
 app = typer.Typer(help="Fetch candles, store them locally, and run reproducible backtests.")
+
+# The perp/funding/OI commands all go through `BinanceFuturesClient`, which is
+# hardwired to `fapi.binance.com`. The --exchange value is only a label written
+# into the stored identity, so anything else here files Binance data under
+# another venue's name.
+SUPPORTED_PERP_EXCHANGES = ("binance",)
 
 
 @app.command("init-db")
@@ -58,6 +68,178 @@ def fetch_crypto(
     )
     count = upsert_candles(records)
     typer.echo(f"Upserted {count} candles for {exchange}/{market_type}/{symbol}/{timeframe}.")
+
+
+@app.command("fetch-perp")
+def fetch_perp(
+    symbol: str = typer.Option("BTC/USDT", help="Contract symbol, for example BTC/USDT."),
+    timeframe: str = typer.Option("4h", help="Candle timeframe, for example 4h."),
+    since: str = typer.Option("2019-09-01", help="UTC start time. History begins 2019-09-09."),
+    until: str | None = typer.Option(None, help="UTC end time. Defaults to now."),
+    exchange: str = typer.Option(
+        "binance", help="Venue id used in the stored identity. Only 'binance' is supported."
+    ),
+    dry_run: bool = typer.Option(False, "--dry-run", help="Fetch and report, but store nothing."),
+) -> None:
+    """Backfill Binance USD-M perp candles into `market_candles`.
+
+    Stored under `market_type="perp"`, through the same
+    `normalize_candle_frame` + `upsert_candles` path as spot and equity candles,
+    so perp prices get the same Decimal binding rather than a second code path
+    that would have to relearn it.
+    """
+    client = _futures_client(exchange=exchange)
+    df = _fetch(lambda: client.fetch_klines(symbol, timeframe, since=since, until=until))
+    identity = MarketDataIdentity(
+        exchange=exchange, market_type="perp", symbol=symbol, timeframe=timeframe
+    )
+    if df.empty:
+        _raise_empty_fetch(f"{exchange}/perp/{symbol}/{timeframe}", since, until)
+
+    records = normalize_candle_frame(
+        df,
+        exchange=identity.exchange,
+        market_type=identity.market_type,
+        symbol=identity.symbol,
+        timeframe=identity.timeframe,
+        source=BINANCE_FUTURES_SOURCE,
+    )
+    label = f"{exchange}/perp/{symbol}/{timeframe}"
+    if dry_run:
+        typer.echo(f"Dry run: {len(records)} candles for {label}, nothing written.")
+        return
+
+    count = upsert_candles(records)
+    typer.echo(
+        f"Upserted {count} candles for {label} "
+        f"({df.index.min()} -> {df.index.max()})."
+    )
+
+
+@app.command("fetch-funding")
+def fetch_funding(
+    symbol: str = typer.Option("BTC/USDT", help="Contract symbol, for example BTC/USDT."),
+    since: str = typer.Option("2019-09-01", help="UTC start time. History begins 2019-09-10."),
+    until: str | None = typer.Option(None, help="UTC end time. Defaults to now."),
+    exchange: str = typer.Option(
+        "binance", help="Venue id used in the stored identity. Only 'binance' is supported."
+    ),
+    dry_run: bool = typer.Option(False, "--dry-run", help="Fetch and report, but store nothing."),
+) -> None:
+    """Backfill perp funding rates into `funding_rates`.
+
+    Settlement times are stored exactly as the venue reports them. The interval
+    is per-contract -- 8h for most Binance perps but not all and not always --
+    so nothing here assumes or enforces one.
+    """
+    client = _futures_client(exchange=exchange)
+    rows = _fetch(lambda: client.fetch_funding(symbol, since=since, until=until))
+    label = f"{exchange}/perp/{symbol}"
+    if not rows:
+        _raise_empty_fetch(f"funding for {label}", since, until)
+
+    if dry_run:
+        typer.echo(f"Dry run: {len(rows)} funding rows for {label}, nothing written.")
+        return
+
+    count = _upsert_funding(rows)
+    first = _utc(rows[0]["funding_time_ms"])
+    last = _utc(rows[-1]["funding_time_ms"])
+    typer.echo(f"Upserted {count} funding rows for {label} ({first} -> {last}).")
+
+
+@app.command("fetch-open-interest")
+def fetch_open_interest(
+    symbol: str = typer.Option("BTC/USDT", help="Contract symbol, for example BTC/USDT."),
+    period: str = typer.Option("4h", help="Snapshot period: 5m, 15m, 30m, 1h, 2h, 4h, 6h, 12h, 1d."),
+    exchange: str = typer.Option(
+        "binance", help="Venue id used in the stored identity. Only 'binance' is supported."
+    ),
+    dry_run: bool = typer.Option(False, "--dry-run", help="Fetch and report, but store nothing."),
+) -> None:
+    """Collect open-interest snapshots into `open_interest`.
+
+    There is deliberately no `--since`: Binance serves only ~30 days of OI
+    history. Each run collects that whole window -- paginated backward, so a
+    fine `--period` is not silently cut to one 500-row page -- and anything
+    older is simply not available from this venue. Run it on a schedule if OI is
+    wanted as a series reaching further back than 30 days.
+    """
+    typer.secho(
+        f"Warning: Binance serves only ~{OPEN_INTEREST_HISTORY_DAYS} days of open-interest "
+        "history, so this cannot be backfilled -- it accumulates forward from the first run. "
+        "Do not read a short OI series as history.",
+        fg=typer.colors.YELLOW,
+    )
+    client = _futures_client(exchange=exchange)
+    rows = _fetch(lambda: client.fetch_open_interest(symbol, period=period))
+    label = f"{exchange}/perp/{symbol}/{period}"
+    if not rows:
+        _raise_empty_fetch(f"open interest for {label}", None, None)
+
+    if dry_run:
+        typer.echo(f"Dry run: {len(rows)} open-interest rows for {label}, nothing written.")
+        return
+
+    count = _upsert_open_interest(rows)
+    first = _utc(rows[0]["ts_ms"])
+    last = _utc(rows[-1]["ts_ms"])
+    typer.echo(f"Upserted {count} open-interest rows for {label} ({first} -> {last}).")
+
+
+# These four exist so the fetch tests can substitute the venue and storage,
+# matching `_create_run`/`_write_signals` below.
+def _futures_client(*, exchange: str, **kwargs):
+    from strategy_lab.market_data.binance_futures import BinanceFuturesClient
+
+    if exchange not in SUPPORTED_PERP_EXCHANGES:
+        raise typer.BadParameter(
+            f"{exchange!r} is not supported: this client only speaks to Binance USD-M "
+            f"futures, so another --exchange would file Binance data under that venue's "
+            f"name. Supported: {', '.join(SUPPORTED_PERP_EXCHANGES)}."
+        )
+    return BinanceFuturesClient(exchange=exchange, **kwargs)
+
+
+def _upsert_funding(rows):
+    from strategy_lab.db.funding import upsert_funding
+
+    return upsert_funding(rows)
+
+
+def _upsert_open_interest(rows):
+    from strategy_lab.db.funding import upsert_open_interest
+
+    return upsert_open_interest(rows)
+
+
+def _fetch(call):
+    """Turn a venue error into a clean non-zero exit rather than a traceback."""
+    from strategy_lab.market_data.binance_futures import BinanceFuturesError
+
+    try:
+        return call()
+    except (BinanceFuturesError, ValueError) as exc:
+        raise typer.BadParameter(str(exc)) from exc
+
+
+def _raise_empty_fetch(label: str, since: str | None, until: str | None) -> None:
+    """An empty fetch exits non-zero on purpose.
+
+    Reporting "stored 0" and exiting 0 is how a hole in a series gets mistaken
+    for a market that did not trade.
+    """
+    window = f" for {since} -> {until or 'now'}" if since else ""
+    raise typer.BadParameter(
+        f"The venue returned no rows for {label}{window}. "
+        "Check the symbol and that the requested window is within the venue's history."
+    )
+
+
+def _utc(ms: int) -> str:
+    import pandas as pd
+
+    return str(pd.Timestamp(ms, unit="ms", tz="UTC"))
 
 
 @app.command("fetch-stock")
@@ -124,7 +306,9 @@ def fetch_etf_universe(
 
 @app.command("backtest")
 def backtest(
-    symbols: str = typer.Option("BTC/USDT", help="Comma-separated symbols."),
+    symbols: str = typer.Option(
+        "BTC/USDT", "--symbols", "--symbol", help="Comma-separated symbols."
+    ),
     strategy_name: str = typer.Option("turnaround_v2", "--strategy", help="Strategy name."),
     exchange: str = typer.Option("binance", help="Data exchange/source."),
     market_type: str = typer.Option("spot", help="spot, perp, or equity."),
@@ -156,10 +340,61 @@ def backtest(
         max=1.0,
         help="Fraction of capital deployed per trade.",
     ),
+    size_mode: SizeMode = typer.Option(
+        SizeMode.FIXED,
+        "--size-mode",
+        help=(
+            "fixed deploys --position-pct on every entry. vol-scaled-entry scales it by "
+            "target / realized volatility, so a violent regime is entered smaller. It "
+            "scales the ENTRY only: an open position is never resized, because "
+            "from_signals fills once per state change, so a position held through a "
+            "calm-to-violent shift keeps its calm-regime notional. The estimator is an "
+            "EWM that decays its seed instead of dropping it, so weights need roughly "
+            "20x --vol-span to converge and no entry is taken before that."
+        ),
+    ),
+    vol_span: int = typer.Option(
+        DEFAULT_VOL_SPAN,
+        "--vol-span",
+        min=1,
+        help=(
+            "Span of the EWM volatility estimator under --size-mode vol-scaled-entry. "
+            "It also sets the run's warmup: entries are masked for 20x this many bars, "
+            "and a frame shorter than that is refused rather than sized off an "
+            "estimate that has not converged."
+        ),
+    ),
+    vol_target: float = typer.Option(
+        0.30,
+        "--vol-target",
+        min=0.0001,
+        help="Annualized volatility each entry is sized for under --size-mode vol-scaled-entry.",
+    ),
+    max_weight: float = typer.Option(
+        2.0,
+        "--max-weight",
+        min=0.0001,
+        help=(
+            "Cap on the entry size multiplier, so a calm stretch cannot lever up. "
+            "The book has no leverage, so anything above 1 / --position-pct cannot be "
+            "filled and is capped, with a warning and the effective value in config.json."
+        ),
+    ),
+    cost_stress: str = typer.Option(
+        "1",
+        "--cost-stress",
+        help="Comma-separated fee/slippage multiples to compare, for example 1,2,3.",
+    ),
+    funding: bool = typer.Option(
+        True,
+        "--funding/--no-funding",
+        help="Charge stored perp funding at its settlement times.",
+    ),
     report_root: Path = typer.Option(Path("reports"), help="Report output folder."),
 ) -> None:
     """Run a vectorbt backtest for one or more stored symbols."""
     strategy = get_strategy(strategy_name, allow_shorts=allow_shorts)
+    multiples = _parse_cost_stress(cost_stress)
     for symbol in _split_symbols(symbols):
         identity = MarketDataIdentity(
             exchange=exchange,
@@ -177,19 +412,227 @@ def backtest(
         )
         if df.empty:
             _raise_missing_candles(identity)
-        result = run_backtest(
-            df=df,
-            strategy=strategy,
-            identity=identity,
-            fees=fees,
-            slippage=slippage,
-            cash=cash,
-            exit_mode=exit_mode,
-            failure_bars=failure_bars,
-            position_pct=position_pct,
-            report_root=report_root,
-        )
+        rates = _funding_rates(identity, df) if funding else None
+        try:
+            result = run_backtest(
+                df=df,
+                strategy=strategy,
+                identity=identity,
+                fees=fees,
+                slippage=slippage,
+                cash=cash,
+                exit_mode=exit_mode,
+                failure_bars=failure_bars,
+                position_pct=position_pct,
+                report_root=report_root,
+                funding=rates,
+                cost_stress=multiples,
+                size_mode=size_mode,
+                vol_target=vol_target,
+                max_weight=max_weight,
+                vol_span=vol_span,
+            )
+        except ValueError as exc:
+            # Incompatible flag combinations (sizing collisions, exit modes a
+            # strategy cannot serve) are user input, not a crash.
+            raise typer.BadParameter(str(exc)) from exc
         typer.echo(f"Wrote report for {symbol}: {result.report_dir}")
+        _echo_costs(result)
+
+
+def _parse_cost_stress(raw: str) -> tuple[float, ...]:
+    try:
+        multiples = tuple(float(part) for part in raw.split(",") if part.strip())
+    except ValueError as exc:
+        raise typer.BadParameter(f"--cost-stress must be comma-separated numbers: {exc}") from exc
+    if not multiples or any(multiple <= 0 for multiple in multiples):
+        raise typer.BadParameter("--cost-stress values must all be > 0, for example 1,2,3")
+    return multiples
+
+
+def _funding_rates(identity: MarketDataIdentity, df):
+    """Stored funding for a perp, bounded to the candle window.
+
+    A perp backtest that quietly skips funding reports a gross number that reads
+    exactly like a net one -- and on this instrument the carry is roughly the
+    size of buy-and-hold. Missing funding is therefore an error with an explicit
+    opt-out, not a silent zero. A *partial* history is the same error wearing a
+    disguise, so the stored series has to cover the window as well as exist.
+    """
+    if identity.market_type != "perp":
+        return None
+
+    from strategy_lab.backtests.costs import funding_coverage_gaps, window_end
+    from strategy_lab.db.funding import load_funding
+
+    # The right bound is the last bar's exclusive right edge, not its opening
+    # timestamp: a bar covers an interval, and Binance stamps settlements up to
+    # 47 ms past the boundary, so bounding at the open drops a settlement that
+    # falls inside the final bar -- either failing the coverage check on a
+    # complete history or charging that settlement as zero.
+    rates = load_funding(
+        exchange=identity.exchange,
+        market_type=identity.market_type,
+        symbol=identity.symbol,
+        start=str(df.index.min()),
+        end=str(window_end(df.index)),
+    )
+    if rates.empty:
+        raise typer.BadParameter(
+            f"No stored funding for {identity.exchange}/perp/{identity.symbol} over "
+            f"{df.index.min()} -> {df.index.max()}.\n\n"
+            "A perp backtest without funding is gross of carry and not a tradeable "
+            "number. Fetch it first:\n"
+            f"strategy-lab fetch-funding --symbol {identity.symbol} --since 2019-09-01\n\n"
+            "Pass --no-funding to run gross of funding on purpose."
+        )
+
+    gaps = funding_coverage_gaps(funding=rates["funding_rate"], index=df.index)
+    if gaps:
+        raise typer.BadParameter(_uncovered_funding(identity, df, gaps))
+    return rates["funding_rate"]
+
+
+def _uncovered_funding(identity: MarketDataIdentity, df, gaps) -> str:
+    shown = ", ".join(f"{start} -> {end}" for start, end in gaps[:3])
+    more = f" (+{len(gaps) - 3} more)" if len(gaps) > 3 else ""
+    return (
+        f"Stored funding for {identity.exchange}/perp/{identity.symbol} does not "
+        f"cover {df.index.min()} -> {df.index.max()}.\n\n"
+        f"Uncovered: {shown}{more}\n\n"
+        "Every settlement missing from those stretches is charged as zero, so the "
+        "run would report a net-of-funding number that is gross of carry across "
+        "them. Backfill the range:\n"
+        f"strategy-lab fetch-funding --symbol {identity.symbol} "
+        f"--since {gaps[0][0]:%Y-%m-%d}\n\n"
+        "If the venue genuinely settled nothing there, narrow the run with --start. "
+        "Pass --no-funding to run gross of funding on purpose."
+    )
+
+
+def _echo_costs(result) -> None:
+    breakdown = json.loads(result.costs_path.read_text())
+    base = next(row for row in breakdown["stress"] if row["multiple"] == 1.0)
+    typer.echo(
+        f"  gross {base['gross_return_pct']:+.2f}%  "
+        f"fees {base['fees_paid']:,.2f}  slippage {base['slippage_paid']:,.2f}  "
+        f"funding {base['funding_paid']:,.2f}  "
+        f"size effect {base['size_effect']:,.2f}  "
+        f"net {base['net_return_pct']:+.2f}%"
+    )
+    for row in breakdown["stress"]:
+        if row["multiple"] != 1.0:
+            typer.echo(f"  {row['multiple']:g}x costs: net {row['net_return_pct']:+.2f}%")
+
+
+@app.command("sweep")
+def sweep_command(
+    symbol: str = typer.Option("BTC/USDT", help="Symbol to sweep."),
+    strategy_name: str = typer.Option("donchian", "--strategy", help="Strategy name."),
+    grid: str = typer.Option(
+        ...,
+        "--grid",
+        help='Parameter grid as JSON, e.g. \'{"entry_span":[48,96],"exit_span":[24,48]}\'.',
+    ),
+    exchange: str = typer.Option("binance", help="Data exchange/source."),
+    market_type: str = typer.Option("spot", help="spot, perp, or equity."),
+    timeframe: str = typer.Option("15m", help="Candle timeframe."),
+    start: str | None = typer.Option(None, help="Optional sweep start time."),
+    end: str | None = typer.Option(None, help="Optional sweep end time."),
+    report_root: Path = typer.Option(Path("reports"), help="Report output folder."),
+) -> None:
+    """Score a strategy across a parameter grid and render the stability surface.
+
+    A single tuned parameter proves nothing; the R0 gate is a broad region where
+    neighbouring parameters behave similarly. The stability score and the
+    heatmap both exist to make a lone spike look like the overfit it is rather
+    than like a result.
+    """
+    from dataclasses import asdict
+    from datetime import UTC, datetime
+
+    from strategy_lab.backtests.engine import build_report_dir
+    from strategy_lab.backtests.sweep import stability_score, sweep_parameters
+    from strategy_lab.backtests.sweep_report import render_sweep_html
+
+    parsed_grid = _parse_grid(grid)
+    identity = MarketDataIdentity(
+        exchange=exchange, market_type=market_type, symbol=symbol, timeframe=timeframe
+    )
+    df = load_candles(
+        exchange=exchange,
+        market_type=market_type,
+        symbol=symbol,
+        timeframe=timeframe,
+        start=start,
+        end=end,
+    )
+    if df.empty:
+        _raise_missing_candles(identity)
+
+    try:
+        points = sweep_parameters(
+            df=df, strategy_name=strategy_name, grid=parsed_grid, timeframe=timeframe
+        )
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+
+    score = stability_score(points)
+    config = {
+        "identity": asdict(identity),
+        "strategy": strategy_name,
+        "grid": parsed_grid,
+        "data_start": str(df.index.min()),
+        "data_end": str(df.index.max()),
+        "candle_count": int(len(df)),
+        "generated_at": datetime.now(UTC).isoformat(),
+    }
+
+    report_dir = build_report_dir(report_root, identity, f"{strategy_name}_sweep")
+    report_dir.mkdir(parents=True, exist_ok=False)
+    (report_dir / "sweep.html").write_text(
+        render_sweep_html(points=points, config=config), encoding="utf-8"
+    )
+    (report_dir / "points.json").write_text(
+        json.dumps(
+            {
+                "config": config,
+                "stability_score": score,
+                "points": [asdict(point) for point in points],
+            },
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    positive = sum(1 for point in points if point.sharpe > 0)
+    best = max(points, key=lambda point: point.sharpe)
+    typer.echo(f"Wrote sweep for {symbol}: {report_dir}")
+    typer.echo(
+        f"Stability score: {score:.3f} "
+        f"({positive}/{len(points)} cells with positive Sharpe, best {best.sharpe:+.2f} "
+        f"at {best.params})"
+    )
+
+
+def _parse_grid(raw: str) -> dict[str, list]:
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise typer.BadParameter(f"--grid is not valid JSON: {exc}") from exc
+
+    if not isinstance(parsed, dict) or not parsed:
+        raise typer.BadParameter(
+            '--grid must be a non-empty JSON object, e.g. \'{"lookback":[24,48,96]}\''
+        )
+    for name, values in parsed.items():
+        if not isinstance(values, list) or not values:
+            raise typer.BadParameter(
+                f"--grid entry {name!r} must be a non-empty list of values, got {values!r}"
+            )
+    return parsed
 
 
 @app.command("replay")

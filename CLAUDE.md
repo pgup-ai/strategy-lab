@@ -21,6 +21,8 @@ strategy-lab fetch-stock --symbol SPY --timeframe 1w --start 2020-01-01
 strategy-lab fetch-etf-universe    # batch-fetch the configured ETF universe (weekly)
 strategy-lab backtest --exchange yahoo --market-type equity --symbols SPY \
   --timeframe 1w --strategy trend_following_deepseek_v4 --exit-mode trend_structure
+strategy-lab sweep --symbol BTC/USDT --timeframe 15m --strategy donchian \
+  --grid '{"entry_span":[48,96,192],"exit_span":[24,48,96]}'
 strategy-lab serve                 # serve reports/ with the live candle-refresh API
 ```
 
@@ -49,6 +51,15 @@ live feed will drive it later through the same protocol, with no change to the
 runner or to strategy code. See
 [the Phase 1a design doc](docs/design/2026-08-02-realtime-trading-framework.md)
 for the full rationale.
+
+A third flow scores a strategy across a *grid* rather than at one setting:
+`sweep_parameters` (`backtests/sweep.py`) rebuilds the strategy per cell with
+`dataclasses.replace`, converts each `SignalSet` to a ±1 position with
+`positions_from_signals`, and reduces the surface to a `stability_score` that
+ranks a broad plateau above a lone spike. `backtests/sweep_report.py` renders it
+as a self-contained heatmap. This path is deliberately vectorbt-free and
+**gross of costs** — it answers "is this parameter region stable", not "what
+would this have earned".
 
 Key design decisions that span multiple files:
 
@@ -98,6 +109,28 @@ Key design decisions that span multiple files:
   Python `float` to a `NUMERIC` column, so `normalize_candle_frame` emits
   `Decimal(str(float(x)))`; binding a bare `float` there quietly re-corrupts
   what the migration fixed, on every re-fetch.
+- **Funding and open interest are their own tables, not candle columns.**
+  Funding is a cash flow settled on the venue's own schedule and OI is a
+  point-in-time snapshot, so `funding_rates` and `open_interest`
+  (`db/funding.py`, DDL in `storage/migrations.py`) sit beside `market_candles`
+  rather than inside it. Perp *candles* do live in `market_candles` under
+  `market_type="perp"`, via the same `normalize_candle_frame` +
+  `upsert_candles` path as everything else. Three measured facts that are not
+  in any doc: **Binance serves only ~30 days of open interest** (a `startTime`
+  40 days back returns `-1130`), so OI can only accumulate forward and any
+  historical OI study is unanswerable from this source; **`markPrice` is `""`
+  on funding records before 2023-10-31**, and `Decimal("")` raises, so it is
+  parsed as NULL; and **funding timestamps are up to 47 ms past the 8h
+  boundary**, so match funding to the bar whose interval contains it, never by
+  equality against a
+  generated 8h range. The settlement interval is per-contract — nothing here
+  hardcodes 8h.
+- **Values that arrive as exchange strings stay `Decimal` end to end.**
+  `db/candles.py` uses `Decimal(str(float(x)))` because its input is float64
+  out of pandas; `db/funding.py` binds an incoming `Decimal` unchanged, since
+  routing an exact decimal through float64 would discard digits the
+  `NUMERIC(38,18)` column can hold. Both rules exist to keep a bare `float` out
+  of a `NUMERIC` bind — that is the failure mode, not the specific coercion.
 - **`signals` is append-only**, enforced by two triggers — row-level `BEFORE
   UPDATE OR DELETE` and statement-level `BEFORE TRUNCATE` (`TRUNCATE` bypasses
   row-level triggers, so both are required). There is no ordinary SQL path to

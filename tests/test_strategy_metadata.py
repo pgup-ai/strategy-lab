@@ -30,9 +30,16 @@ SIGNAL_FIELDS = (
 # The strategies whose trend indicator is a recursive EMA, and the parameter
 # naming its span. ``rolling`` windows are exactly windowed and need no entry
 # here; ``ewm`` is recursive from the first bar and never fully forgets its seed.
+# For ``ema_cross`` the SLOW span is the binding one: the fast EMA converges far
+# sooner, so a warmup that makes the slow one bit-exact makes both exact. It has
+# to be listed here, because for ema_cross specifically the signal-level check
+# above is blind: measured at warmup=192, the span-192 EMA is wrong on 299/300
+# probed bars by up to 2.6e-2 RELATIVE, and the fast-vs-slow comparison still
+# comes out identical on 300/300. Only bit-exactness notices.
 EWM_TREND_SPANS = {
     "turnaround_v1": "trend_failure_ema_span",
     "turnaround_v2": "ema_trend_span",
+    "ema_cross": "slow_span",
 }
 
 
