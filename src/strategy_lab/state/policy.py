@@ -41,6 +41,21 @@ at every horizon R4 measured -- high carry, lower forward return -- so it
 shrinks a position on the side that is *paying* and leaves the other side
 alone. Shrinking both symmetrically would throw away the sign of the only
 measurement this input has.
+
+**``direction`` sets the sign and nothing else.** Scaling the target by
+``abs(direction)`` is the obvious next step and is deliberately not taken, for
+two reasons. R4 measured direction's information *coefficient*, which is a
+claim about which way, not about how much; sizing by its magnitude is a second
+claim nothing has measured. And it would make the size a continuous function of
+a feature built on pandas rolling means, whose online accumulation is only
+~1e-12 reproducible from a cold start -- measured here as a one-ULP
+disagreement that no amount of ``warmup_bars`` removes, because it is not a
+convergence problem. State scales are a small table of constants instead, so
+the size is exactly reproducible wherever the state is.
+
+The one continuous term left is the crowding damping, which inherits that same
+~1e-12 rolling noise. It only bites on frames that carry funding, and it moves
+a position size by less than a millionth of a basis point.
 """
 
 from __future__ import annotations
@@ -131,10 +146,9 @@ def target_risk_series(
     live = np.isfinite(lean) & np.isfinite(quality) & np.isfinite(carry)
     side = np.where(live & (quality >= noise_band), side, 0.0)
 
-    conviction = np.minimum(np.abs(lean), 1.0)
     damping = 1.0 - crowding_penalty * _carry_pressure_against(side, carry)
 
-    target = side * scale * conviction * damping
+    target = side * scale * damping
     # A flat bar is flat, whatever NaN the arithmetic above carried into it.
     return pd.Series(np.where(side == 0.0, 0.0, target), index=states.index, dtype="float64")
 

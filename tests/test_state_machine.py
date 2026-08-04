@@ -169,7 +169,7 @@ def test_extreme_crowding_ends_a_ride_while_strength_still_holds():
     have ended the ride.
     """
     machine = StateMachine(min_dwell=4, cooldown=0)
-    crowding = [0.5] * 40 + [0.97] * 10
+    crowding = [0.5] * 40 + [0.99] * 10
     states = machine.run(
         quiet(50, direction=[0.8] * 50, strength=[0.9] * 50, crowding=crowding)
     )

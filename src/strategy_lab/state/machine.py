@@ -62,8 +62,6 @@ from enum import Enum
 import numpy as np
 import pandas as pd
 
-from strategy_lab.strategies.base import require_positive_span
-
 REQUIRED_COLUMNS = ("direction", "strength", "stability", "crowding")
 
 
@@ -127,10 +125,17 @@ class StateMachine:
     # A lean this small has no usable sign, so it neither starts a move nor
     # counts as having flipped against one.
     direction_floor: float = 0.10
+    # Rank space, so this is the bottom 15% of trailing stability -- a collapse
+    # relative to how cleanly this instrument usually tracks its own trend line,
+    # rather than an absolute residual that means different things per market.
     stability_floor: float = 0.15
     # Distance from the neutral 0.5 at which carry is extreme enough to call a
-    # ride exhausted. 0.40 is the top and bottom decile of the crowding axis.
-    crowding_extreme: float = 0.40
+    # ride exhausted. Crowding is a tanh, so it bunches near its rails: measured
+    # on the 14,944 stored BTC/USDT perp 4h bars that carry funding, the median
+    # |crowding - 0.5| is already 0.313 and a 0.40 threshold fires on 31.2% of
+    # bars. 0.475 is the 90th percentile, which is what "extreme" has to mean if
+    # it is going to end a ride on its own.
+    crowding_extreme: float = 0.475
     min_dwell: int = 4
     cooldown: int = 8
 
@@ -151,13 +156,9 @@ class StateMachine:
                 f"exit_strength ({self.exit_strength}); one constant compared twice "
                 "is exactly the no-dead-band case hysteresis exists to avoid"
             )
-        require_positive_span("StateMachine", "min_dwell", self.min_dwell)
-        # Zero is a legal cooldown -- it means RESET lasts its own single bar and
-        # no more -- so this cannot delegate to ``require_positive_span``.
-        if isinstance(self.cooldown, bool) or not isinstance(self.cooldown, int):
-            raise ValueError(f"StateMachine cooldown must be an integer, got {self.cooldown!r}")
-        if self.cooldown < 0:
-            raise ValueError(f"StateMachine cooldown must be >= 0, got {self.cooldown!r}")
+        _require_bar_count("min_dwell", self.min_dwell, minimum=1)
+        # Zero is a legal cooldown: it means RESET lasts its own single bar.
+        _require_bar_count("cooldown", self.cooldown, minimum=0)
 
     def run(self, features: pd.DataFrame) -> pd.Series:
         """One :class:`MarketState` per row of ``features``.
@@ -189,7 +190,7 @@ class StateMachine:
         advancing = (strength >= self.enter_strength) & (
             np.abs(direction) >= self.direction_floor
         )
-        decaying = measurable & (strength < self.enter_strength)
+        decaying = strength < self.enter_strength
         failing = ~measurable | (strength < self.exit_strength)
         unstable = stability < self.stability_floor
         crowded = np.abs(crowding - 0.5) >= self.crowding_extreme
@@ -278,6 +279,21 @@ def _flipped(direction: float, side: int, floor: float) -> bool:
     on a trend passing through flat.
     """
     return side != 0 and direction * side <= -floor
+
+
+def _require_bar_count(field: str, value: object, *, minimum: int) -> None:
+    """Reject a dwell or cooldown that would quietly become no rule at all.
+
+    ``bool`` is rejected separately because it is an ``int`` subclass: without
+    that, ``min_dwell=True`` passes and silently behaves as ``min_dwell=1``.
+    This restates ``strategies.base.require_positive_span`` rather than
+    importing it, because ``strategies`` imports ``state`` and the reverse edge
+    would close the loop.
+    """
+    if isinstance(value, bool) or not isinstance(value, int) or value < minimum:
+        raise ValueError(
+            f"StateMachine {field} must be an integer >= {minimum}, got {value!r}"
+        )
 
 
 def _require_columns(features: pd.DataFrame) -> None:
