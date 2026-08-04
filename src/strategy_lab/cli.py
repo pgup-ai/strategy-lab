@@ -635,6 +635,153 @@ def _parse_grid(raw: str) -> dict[str, list]:
     return parsed
 
 
+@app.command("features")
+def features_command(
+    exchange: str = typer.Option("binance", help="Data exchange/source."),
+    market_type: str = typer.Option("perp", help="spot, perp, or equity."),
+    symbol: str = typer.Option("BTC/USDT", help="Symbol to diagnose."),
+    timeframe: str = typer.Option("4h", help="Candle timeframe."),
+    horizons: str = typer.Option(
+        "1,6,30", help="Comma-separated forward-return horizons, in bars."
+    ),
+    start: str | None = typer.Option(None, help="Optional start time."),
+    end: str | None = typer.Option(None, help="Optional end time."),
+    funding: bool = typer.Option(
+        True,
+        "--funding/--no-funding",
+        help="Attach stored perp funding, which Crowding needs. Perps only.",
+    ),
+    report_root: Path = typer.Option(Path("reports"), help="Report output folder."),
+) -> None:
+    """Score every registered state feature on one stored series.
+
+    The R4 gate is that no feature ships unexamined, and this is the examination:
+    coverage, distribution, lag-1 persistence, turnover, and the Spearman
+    information coefficient against the forward return at each horizon -- each
+    reported for both halves of the sample as well as the whole, because a
+    feature that works in one half and not the other is a regime, not a signal.
+    Expect small numbers: one feature rarely reaches |IC| 0.05 on 4h crypto.
+    """
+    from dataclasses import asdict
+    from datetime import UTC, datetime
+
+    from strategy_lab.backtests.engine import build_report_dir
+    from strategy_lab.features.diagnostics import diagnose_features, to_record
+    from strategy_lab.features.diagnostics_report import render_diagnostics_html
+    from strategy_lab.features.registry import list_features
+
+    parsed_horizons = _parse_horizons(horizons)
+    identity = MarketDataIdentity(
+        exchange=exchange, market_type=market_type, symbol=symbol, timeframe=timeframe
+    )
+    df = load_candles(
+        exchange=exchange,
+        market_type=market_type,
+        symbol=symbol,
+        timeframe=timeframe,
+        start=start,
+        end=end,
+    )
+    if df.empty:
+        _raise_missing_candles(identity)
+
+    if funding and market_type == "perp":
+        from strategy_lab.features.flow import FUNDING_COLUMN, align_funding_to_bars
+
+        rates = _funding_rates(identity, df)
+        df = df.assign(**{FUNDING_COLUMN: align_funding_to_bars(df.index, rates)})
+
+    diagnosable, skipped = _diagnosable_features(list_features(), df)
+    if not diagnosable:
+        raise typer.BadParameter(
+            "No registered feature can be computed on this frame:\n"
+            + "\n".join(f"  {name}: {reason}" for name, reason in skipped.items())
+        )
+    for name, reason in skipped.items():
+        typer.secho(f"Skipping {name}: {reason}", fg=typer.colors.YELLOW)
+
+    try:
+        result = diagnose_features(diagnosable, df, horizons=parsed_horizons)
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+
+    config = {
+        "identity": asdict(identity),
+        "horizons": list(parsed_horizons),
+        "data_start": str(df.index.min()),
+        "data_end": str(df.index.max()),
+        "candle_count": int(len(df)),
+        "funding_attached": bool(funding and market_type == "perp"),
+        "skipped": skipped,
+        "generated_at": datetime.now(UTC).isoformat(),
+    }
+
+    report_dir = build_report_dir(report_root, identity, "features")
+    report_dir.mkdir(parents=True, exist_ok=False)
+    (report_dir / "features.html").write_text(
+        render_diagnostics_html(result=result, config=config), encoding="utf-8"
+    )
+    (report_dir / "diagnostics.json").write_text(
+        json.dumps({"config": config, **to_record(result)}, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+
+    typer.echo(f"Wrote feature diagnostics for {symbol}: {report_dir}")
+    for line in _feature_lines(result):
+        typer.echo(line)
+    for first, second, value in result.redundant_pairs():
+        typer.echo(f"  redundant: {first} · {second} r={value:+.3f}")
+
+
+def _parse_horizons(raw: str) -> tuple[int, ...]:
+    try:
+        parsed = tuple(int(part) for part in raw.split(",") if part.strip())
+    except ValueError as exc:
+        raise typer.BadParameter(f"--horizons must be comma-separated integers: {exc}") from exc
+    if not parsed or any(horizon < 1 for horizon in parsed):
+        raise typer.BadParameter("--horizons values must all be >= 1 bar, for example 1,6,30")
+    return parsed
+
+
+def _diagnosable_features(names, df):
+    """Split registered features into those this frame can support and those it cannot.
+
+    Crowding refuses a frame with no funding, so an equity or spot series simply
+    cannot carry it. Skipping is the honest outcome; a *silent* skip is how a
+    feature ships unexamined, so every skip is echoed and written into the config.
+    """
+    from strategy_lab.features.registry import get_feature
+
+    diagnosable, skipped = [], {}
+    for name in names:
+        feature = get_feature(name)
+        try:
+            feature.compute(df.head(feature.warmup_bars + 2))
+        except ValueError as exc:
+            skipped[name] = str(exc).splitlines()[0]
+            continue
+        diagnosable.append(feature)
+    return diagnosable, skipped
+
+
+def _feature_lines(result) -> list[str]:
+    """One line per feature: the ICs with their halves, and the closest neighbour."""
+    lines = []
+    for diagnostic in result.diagnostics:
+        partner, correlation = result.max_correlation(diagnostic.name)
+        ics = "  ".join(
+            f"IC@{entry.horizon}b {entry.ic:+.4f} "
+            f"({entry.first_half_ic:+.3f}/{entry.second_half_ic:+.3f})"
+            for entry in diagnostic.ics
+        )
+        neighbour = f"  max|r| {correlation:+.3f} {partner}" if partner else ""
+        lines.append(
+            f"  {diagnostic.name:<20} cov {diagnostic.coverage:6.1%}  "
+            f"turn {diagnostic.turnover:.4f}  {ics}{neighbour}"
+        )
+    return lines
+
+
 @app.command("replay")
 def replay_command(
     exchange: str = typer.Option("binance", help="Data exchange/source."),

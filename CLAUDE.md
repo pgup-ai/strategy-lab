@@ -23,6 +23,8 @@ strategy-lab backtest --exchange yahoo --market-type equity --symbols SPY \
   --timeframe 1w --strategy trend_following_deepseek_v4 --exit-mode trend_structure
 strategy-lab sweep --symbol BTC/USDT --timeframe 15m --strategy donchian \
   --grid '{"entry_span":[48,96,192],"exit_span":[24,48,96]}'
+strategy-lab features --exchange binance --market-type perp --symbol BTC/USDT \
+  --timeframe 4h --horizons 1,6,30 --start 2019-09-10T08:00:00
 strategy-lab serve                 # serve reports/ with the live candle-refresh API
 ```
 
@@ -68,6 +70,18 @@ as a self-contained heatmap. This path is deliberately vectorbt-free and
 **gross of costs** — it answers "is this parameter region stable", not "what
 would this have earned".
 
+A fourth flow scores *market state* rather than a strategy. `StateFeature`
+(`features/base.py`) has the same shape as `Strategy` — `name`, `version`,
+`warmup_bars`, `compute(df) -> pd.Series` — with its own manual registry
+(`features/registry.py`) so the poison probe covers it. `diagnose_features`
+(`features/diagnostics.py`) reduces each feature to coverage, distribution,
+lag-1 autocorrelation, turnover, forward-return IC at several horizons **and in
+each half of the sample**, plus the pairwise correlations between features;
+`features/diagnostics_report.py` and the `features` CLI command render and store
+that. Signed features range −1..1, unsigned ones 0..1, and warmup rows are `NaN`
+— a 0.0 there reads as "measured and neutral", a different claim from "not yet
+measurable".
+
 Key design decisions that span multiple files:
 
 - **Candle identity is `(exchange, market_type, symbol, timeframe)`** with the timeframe
@@ -105,6 +119,30 @@ Key design decisions that span multiple files:
   signals; `tests/test_lookahead.py` poisons every bar after *t* and asserts
   row *t* is unchanged, which is the direct causality proof. **A strategy that
   fails either test is not safe to trade.**
+- **Every percentile, rank and z-score in `features/` is rolling or expanding —
+  never full-sample.** This is the lookahead that has no `shift(-1)` to grep
+  for. Measured on a 200-bar ramp poisoned downward from row 121,
+  `series.rank(pct=True)` at row 120 moves 0.605 → 1.000 while the rolling form
+  does not move at all: bar *t* changed its mind because of bars that had not
+  happened yet. That is the shape of `_SubtleCheat` in `tests/test_lookahead.py`,
+  and swapping `Energy`'s rolling percentile for a full-sample one passed the
+  entire 412-test suite that preceded `tests/test_feature_lookahead.py`. So
+  `rolling_percentile` and `rolling_zscore` (`features/base.py`) are the only two
+  implementations, no feature hand-rolls either, and `mask_warmup` draws the
+  warmup boundary in one place because `rolling(n)` declines to answer early
+  while `ewm(adjust=False)` returns a converging number from bar zero.
+- **A feature's forward return is anchored one bar *after* the feature's own.**
+  `diagnostics.forward_return` measures `[t+1, t+1+h]`. The obvious
+  `close[t+h] / close[t] - 1` contains no *return* from bar *t*, which is why it
+  reads as safe, but it does contain bar *t*'s *price* as its denominator — and
+  every feature here is a function of that same print, so anything rising with a
+  high `close[t]` divides a high number into its own target and is paid for it.
+  Measured on a random walk plus an i.i.d. print error, with a feature that
+  predicts nothing: IC −0.53 anchored at `close[t]`, −0.01 anchored at
+  `close[t+1]`. It is also the only convention that is executable. **Both
+  half-sample ICs are reported beside the full-sample one**, because a feature
+  that works in one half and not the other is a regime, not a signal, and the
+  average is what hides that.
 - **A timestamp is complete only once an event with a *later* timestamp
   arrives** — never by looking ahead, which is the same lookahead the two
   suites above exist to prevent, and the only completeness a live feed can
@@ -203,3 +241,16 @@ Once registered, a strategy is automatically exercised by
 needed. A new strategy that fails either is not a test problem: it means the
 strategy reads future data, or the two execution paths genuinely disagree for
 it.
+
+## Adding a state feature
+
+Same shape, same two-place manual registration — new module under
+`src/strategy_lab/features/`, then both `list_features()` and `get_feature()` in
+`features/registry.py`. Registering is what enrols it in
+`tests/test_feature_lookahead.py` (the poison probe, plus a check that the
+feature is actually measurable at its own declared `warmup_bars` — otherwise the
+probe compares NaN to NaN and passes without testing anything) and in the
+`features` CLI command. Percentiles and z-scores go through `features/base.py`;
+warmup rows are `NaN`, never 0.0. A feature that cannot be computed from a given
+frame should **raise** rather than return a neutral value, as `Crowding` does
+without funding.
