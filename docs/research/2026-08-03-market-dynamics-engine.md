@@ -228,8 +228,8 @@ not a second repo. Phase 1c+ concern.
 
 | # | Blocker | Why it matters | Status |
 |---|---|---|---|
-| B1 | **No perp data.** The 83,348 BTC/USDT bars are **spot**. | Funding, OI, basis, liquidations only exist on perps — they carry most of hypotheses C1/C2/C5 | Open |
-| B2 | **Funding and OI have no schema.** | Funding is a settlement cash flow on its own schedule; OI is a point-in-time snapshot. Neither is a candle field. | Open |
+| B1 | **No perp data.** The 83,348 BTC/USDT bars are **spot**. | Funding, OI, basis, liquidations only exist on perps — they carry most of hypotheses C1/C2/C5 | **Cleared by R1** — perp 4h backfilled to contract inception. |
+| B2 | **Funding and OI have no schema.** | Funding is a settlement cash flow on its own schedule; OI is a point-in-time snapshot. Neither is a candle field. | **Cleared by R1** — `funding_rates` and `open_interest` tables. |
 | B3 | **`ReplayFeed` is single-asset in practice.** `stream()` with two subscriptions yields all of A then all of B, not time-interleaved. | Every cross-sectional feature (breadth, RSP-confirms-SPY, portfolio vol targeting, GlobalRiskScore) is blocked on this | **Cleared by R3** — `stream()` is a k-way merge, `MarketClock` groups it into complete snapshots |
 
 **B3 is the one the original 24-week plan under-weights.** Multi-asset time-aligned
@@ -273,11 +273,11 @@ not begin until the previous gate passes.
 
 | # | Phase | Gate to pass | Needs | Status |
 |---|---|---|---|---|
-| **R0** | **Baselines** — TSMOM, EMA cross, Donchian, multi-horizon ensemble | Reproducible baseline on existing data; broad stable parameter regions, not one magic setting | Nothing new | **NEXT** |
-| R1 | Perp + funding/OI data layer | Funding applied at real settlement times in PnL; no lookahead in availability timing | B1, B2 | Blocked |
-| R2 | Cost + portfolio layer | Survives 2× and 3× cost stress | R0, R1 | — |
+| **R0** | **Baselines** — TSMOM, EMA cross, Donchian, multi-horizon ensemble | Reproducible baseline on existing data; broad stable parameter regions, not one magic setting | Nothing new | **Done** — gate failed at 15m (turnover), passed at 4h once R1 landed the data: donchian 16/16 positive cells. Five progress-log corrections apply; read them before quoting a figure. |
+| R1 | Perp + funding/OI data layer | Funding applied at real settlement times in PnL; no lookahead in availability timing | B1, B2 | **Done** — BTC/ETH perp 4h to 2019, full funding, zero gaps. OI forward-only (C1 blocked). |
+| R2 | Cost + portfolio layer | Survives 2× and 3× cost stress | R0, R1 | **Done** — donchian nets +260.2% (1×), +113.6% (2×), +26.6% (3×). Beats the perp, loses to spot. |
 | R3 | Multi-asset feed | Time-interleaved multi-symbol streaming; determinism test still passes | B3 | **Done** |
-| R4 | State features v1 | Each feature has a univariate diagnostic; no feature dumped in unexamined | R3 | — |
+| R4 | State features v1 | Each feature has a univariate diagnostic; no feature dumped in unexamined | R3 | **NEXT** |
 | R5 | Rule-based state machine | Beats R0 baseline out-of-sample, with hysteresis + dwell time + cooldown | R4 | — |
 | R6 | Continuous-exposure contract | Second strategy contract; vectorbt replaced for this path | R5 | — |
 | R7 | Meta-model (logistic) | Improves position sizing, not direction | R6 | — |
