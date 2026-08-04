@@ -95,9 +95,6 @@ class CompressionRelease:
     the information is. This is that derivative, with the sign chosen so the
     name is the reading: positive means compression is falling, which is a
     release. Differencing ``Compression`` by hand gives the opposite.
-
-    Equal to the bar-over-bar change in Energy, necessarily, since Compression is
-    its complement. It is named for the event a state machine cares about.
     """
 
     name: str = "compression_release"

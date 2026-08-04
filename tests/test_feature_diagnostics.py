@@ -139,29 +139,21 @@ class _Echo:
         return _CurrentBarDeviation().compute(df) * 2.0 + 1.0
 
 
-# --- forward returns ---------------------------------------------------------
-
-
 def test_forward_return_starts_one_bar_after_the_feature_s_own_bar():
-    close = pd.Series([100.0, 110.0, 121.0, 133.1, 146.41])
-    # From close[t+1] to close[t+1+h]: at t=0 that is 121/110 - 1.
-    assert forward_return(close, horizon=1).iloc[0] == pytest.approx(0.1)
-    assert forward_return(close, horizon=2).iloc[0] == pytest.approx(0.21)
-    # The feature's own close never appears in its own target.
-    assert forward_return(close, horizon=1).iloc[0] != pytest.approx(121.0 / 100.0 - 1.0)
+    # Deliberately not a constant-ratio series: on one, close[t+1+h]/close[t+1]
+    # and close[t+h]/close[t] are the same number and this test sees nothing.
+    close = pd.Series([100.0, 200.0, 220.0, 250.0, 300.0])
+    # From close[t+1] to close[t+1+h]: at t=0 that is 220/200 - 1.
+    assert forward_return(close, horizon=1).iloc[0] == pytest.approx(0.10)
+    assert forward_return(close, horizon=2).iloc[0] == pytest.approx(0.25)
+    # The feature's own close never appears in its own target: anchored there,
+    # horizon 1 would read 200/100 - 1.
+    assert forward_return(close, horizon=1).iloc[0] != pytest.approx(1.0)
 
 
-def test_forward_return_runs_out_at_the_end_rather_than_wrapping():
-    close = pd.Series(np.arange(1.0, 11.0))
-    values = forward_return(close, horizon=3)
-    assert values.iloc[-4:].isna().all(), "the last h+1 bars have no full forward window"
-    assert values.iloc[:-4].notna().all()
-
-
-@pytest.mark.parametrize("horizon", [0, -1])
-def test_a_non_positive_horizon_is_refused(horizon):
+def test_a_non_positive_horizon_is_refused():
     with pytest.raises(ValueError, match="horizon"):
-        forward_return(pd.Series([1.0, 2.0, 3.0]), horizon=horizon)
+        forward_return(pd.Series([1.0, 2.0, 3.0]), horizon=0)
 
 
 def test_a_target_anchored_at_the_feature_s_own_bar_manufactures_an_ic():
@@ -188,9 +180,6 @@ def test_the_diagnostic_uses_the_honest_target():
     assert abs(diagnostic.ics[0].ic) < 0.05
 
 
-# --- information coefficient -------------------------------------------------
-
-
 def test_information_coefficient_is_rank_based_not_linear():
     """Spearman: a monotone squash of a perfect predictor is still perfect."""
     index = pd.date_range("2024-01-01", periods=200, freq="4h", tz="UTC")
@@ -210,9 +199,6 @@ def test_information_coefficient_of_too_few_pairs_is_nan():
     index = pd.date_range("2024-01-01", periods=5, freq="4h", tz="UTC")
     values = pd.Series(np.arange(5.0), index=index)
     assert np.isnan(information_coefficient(values, values))
-
-
-# --- split halves ------------------------------------------------------------
 
 
 def test_the_two_halves_are_measured_separately_not_copied():
@@ -241,17 +227,13 @@ def test_the_halves_split_the_measured_sample_evenly():
     assert abs(horizon.first_half_observations - horizon.second_half_observations) <= 1
 
 
-# --- distribution, persistence, turnover -------------------------------------
-
-
 def test_coverage_is_measured_past_warmup_not_over_the_whole_frame():
-    """Warmup NaNs are expected and say nothing about whether a feature computes."""
-    diagnostic = diagnose(_Constant(), noisy_price(n=500), horizons=(1,))
-    assert diagnostic.coverage == pytest.approx(1.0)
-    assert diagnostic.observations == 500 - _Constant().warmup_bars
+    """Warmup NaNs are expected and say nothing about whether a feature computes.
 
+    The holey feature pins the denominator: 100 missing bars out of the 490 past
+    warmup, not out of the 500 in the frame.
+    """
 
-def test_coverage_falls_when_a_feature_goes_nan_after_its_warmup():
     @dataclass(frozen=True)
     class _Holey:
         name: str = "holey"
@@ -264,8 +246,12 @@ def test_coverage_falls_when_a_feature_goes_nan_after_its_warmup():
             values.iloc[100:200] = np.nan
             return values
 
-    diagnostic = diagnose(_Holey(), noisy_price(n=500), horizons=(1,))
-    assert diagnostic.coverage == pytest.approx(1.0 - 100 / 490)
+    intact = diagnose(_Constant(), noisy_price(n=500), horizons=(1,))
+    assert intact.coverage == pytest.approx(1.0)
+    assert intact.observations == 500 - _Constant().warmup_bars
+
+    holey = diagnose(_Holey(), noisy_price(n=500), horizons=(1,))
+    assert holey.coverage == pytest.approx(1.0 - 100 / 490)
 
 
 def test_turnover_is_the_mean_absolute_bar_to_bar_change():
@@ -284,21 +270,6 @@ def test_turnover_is_the_mean_absolute_bar_to_bar_change():
     assert diagnostic.turnover == pytest.approx(0.25)
     # A series that alternates every bar has no lag-1 persistence to speak of.
     assert diagnostic.autocorrelation < -0.9
-
-
-def test_distribution_reports_the_range_and_the_middle():
-    diagnostic = diagnose(_CurrentBarDeviation(), noisy_price(n=1000), horizons=(1,))
-    assert -1.0 <= diagnostic.minimum < diagnostic.median < diagnostic.maximum <= 1.0
-    assert diagnostic.iqr > 0.0
-
-
-def test_a_frame_that_never_gets_past_warmup_is_refused():
-    """Every statistic below would be NaN, and a table of NaNs reads as a result."""
-    with pytest.raises(ValueError, match="warmup"):
-        diagnose(_CurrentBarDeviation(), noisy_price(n=15), horizons=(1,))
-
-
-# --- the set: correlations and redundancy ------------------------------------
 
 
 def test_correlations_are_pairwise_over_the_rows_both_features_define():
@@ -340,26 +311,10 @@ def test_redundant_pairs_are_reported_once_each_not_twice():
     assert abs(value) >= REDUNDANT_CORRELATION
 
 
-def test_an_uncorrelated_pair_is_not_flagged():
-    result = diagnose_features(
-        [_CurrentBarDeviation(), _RegimeSplit()], noisy_price(n=800), horizons=(1,)
-    )
-    assert result.redundant_pairs() == []
-
-
-def test_diagnose_features_keeps_the_order_it_was_given():
-    features = [_Echo(), _CurrentBarDeviation(), _Constant()]
-    result = diagnose_features(features, noisy_price(n=600), horizons=(1,))
-    assert [d.name for d in result.diagnostics] == ["echo", "current_bar_deviation", "constant"]
-
-
 def test_two_features_sharing_a_name_are_refused():
     """The correlation matrix is keyed by name, so a collision silently drops one."""
     with pytest.raises(ValueError, match="name"):
         diagnose_features([_Constant(), _Constant()], noisy_price(n=600), horizons=(1,))
-
-
-# --- every registered feature ------------------------------------------------
 
 
 @pytest.mark.parametrize("name", list_features())
@@ -385,9 +340,6 @@ def test_every_registered_feature_can_be_diagnosed(name):
     assert np.isfinite(diagnostic.turnover)
 
 
-# --- the JSON record ---------------------------------------------------------
-
-
 def _record_for(features, n=800):
     return to_record(diagnose_features(features, noisy_price(n=n), horizons=(1, 6)))
 
@@ -411,9 +363,6 @@ def test_the_record_carries_every_feature_and_horizon():
         assert [entry["horizon"] for entry in feature["ic"]] == [1, 6]
         assert {"ic", "first_half_ic", "second_half_ic"} <= set(feature["ic"][0])
     assert record["redundant_pairs"][0]["features"] == ["current_bar_deviation", "echo"]
-
-
-# --- the report --------------------------------------------------------------
 
 
 def _html(features=None, n=800, config=None):

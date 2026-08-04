@@ -49,9 +49,6 @@ class Direction:
     and reaches 7.5, so feeding it straight to ``tanh`` -- whose implicit unit is
     then one ATR -- pins 21.6% of bars past |0.99| and 51.6% past |0.9|. Scaled,
     nothing reaches |0.86| and the 5th/95th percentiles sit at -0.46/+0.54.
-
-    Both EMAs are ``ewm(adjust=False)``, so warmup is 20x the slower span rather
-    than the span itself.
     """
 
     name: str = "direction"
@@ -65,7 +62,6 @@ class Direction:
         require_positive_span(self.name, "fast_span", self.fast_span)
         require_positive_span(self.name, "slow_span", self.slow_span)
         require_positive_span(self.name, "atr_window", self.atr_window)
-        # Recomputed rather than trusted: warmup is a consequence of the spans.
         # The larger span binds, not ``slow_span`` -- a caller is free to set
         # ``fast_span`` above it, and then the "fast" EMA is the slower recursion.
         object.__setattr__(
@@ -124,7 +120,7 @@ class Strength:
         net_move = (close - close.shift(self.window)).abs()
         path_length = close.diff().abs().rolling(self.window).sum()
         # A window that never moved travelled no distance either, so the ratio is
-        # 0/0. No displacement is no efficiency. NaN != 0, so warmup keeps its NaN.
+        # 0/0. No displacement is no efficiency.
         efficiency = (net_move / path_length).where(path_length != 0, 0.0)
         return mask_warmup(efficiency, warmup_bars=self.warmup_bars)
 

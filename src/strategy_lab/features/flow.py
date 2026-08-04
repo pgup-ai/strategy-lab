@@ -11,9 +11,8 @@ about a market this feature never looked at.
 
 Funding arrives on the venue's own schedule -- 8h against 4h bars, stamped up to
 47 ms past the boundary -- so :func:`align_funding_to_bars` delegates to
-``backtests.costs.apply_funding`` rather than reimplementing containment. That
-module imports nothing from this package, so the direction is safe; the point is
-that one copy of the 47 ms rule exists, not which module holds it.
+``backtests.costs.apply_funding`` rather than reimplementing containment. One
+copy of the 47 ms rule exists; which module holds it matters less than that.
 """
 
 from __future__ import annotations

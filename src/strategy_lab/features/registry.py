@@ -9,11 +9,10 @@ from strategy_lab.features.volatility import Compression, CompressionRelease, En
 def list_features() -> list[str]:
     """Every feature the lookahead probe and the diagnostics run over.
 
-    Registration is manual and in two places, exactly as in
-    ``strategies/registry.py``. The cost is remembering both; the benefit is that
-    a feature is covered by ``tests/test_feature_lookahead.py`` the moment it is
-    named here, and half of these are percentiles -- the one construction that
-    leaks the future without a ``shift(-1)`` anywhere in sight.
+    Manual in two places, exactly as in ``strategies/registry.py``: naming a
+    feature here is what enrols it in ``tests/test_feature_lookahead.py``, and
+    half of these are percentiles -- the one construction that leaks the future
+    without a ``shift(-1)`` anywhere in sight.
     """
     return [
         "direction",

@@ -1,10 +1,9 @@
 """The univariate diagnostic as one page, in the same house style as the sweep.
 
 One row per feature, one column group per horizon. The IC cell carries the
-full-sample number *and* both halves, because the halves are the reading and the
-full-sample number is the summary -- a feature strong in one half and absent in
-the other is a regime, and averaging it produces a middling number that looks
-like a weak signal instead of a broken one.
+full-sample number *and* both halves, because averaging a feature that works in
+one half and not the other produces a middling number that looks like a weak
+signal instead of a broken one.
 
 Self-contained by the same rule as every other report here: no external asset,
 no network, so a report opened in two years renders exactly as it did the day it
@@ -24,7 +23,6 @@ from strategy_lab.features.diagnostics import (
     to_record,
 )
 
-_UP = "#26a69a"
 _DOWN = "#ef5350"
 _UP_RGB = "38, 166, 154"
 _DOWN_RGB = "239, 83, 80"
@@ -162,16 +160,16 @@ def _chips(result: DiagnosticSet) -> str:
         best = f"{_fmt_ic(entry.ic)} {owner} @{entry.horizon}b"
 
     chips = [
-        ("Features", str(len(result.diagnostics)), ""),
-        ("Horizons", " · ".join(f"{h}b" for h in result.horizons), ""),
-        ("Strongest IC", best, ""),
-        ("Halves Agree", f"{agreeing}/{len(result.diagnostics)}", ""),
-        ("Redundant Pairs", str(len(result.redundant_pairs())), ""),
+        ("Features", str(len(result.diagnostics))),
+        ("Horizons", " · ".join(f"{h}b" for h in result.horizons)),
+        ("Strongest IC", best),
+        ("Halves Agree", f"{agreeing}/{len(result.diagnostics)}"),
+        ("Redundant Pairs", str(len(result.redundant_pairs()))),
     ]
     return "\n".join(
         f'<div class="chip"><span class="chip-label">{escape(label)}</span>'
-        f'<span class="chip-value{cls}">{escape(value)}</span></div>'
-        for label, value, cls in chips
+        f'<span class="chip-value">{escape(value)}</span></div>'
+        for label, value in chips
     )
 
 
@@ -226,7 +224,6 @@ def render_diagnostics_html(*, result: DiagnosticSet, config: dict) -> str:
         )
         .replace("__IC_SCALE__", escape(f"{_IC_SCALE:+.3f}"))
         .replace("__NEG_IC_SCALE__", escape(f"{-_IC_SCALE:+.3f}"))
-        .replace("__UP__", _UP)
         .replace("__DOWN__", _DOWN)
         .replace("__PAYLOAD__", _payload(result))
     )
@@ -241,7 +238,7 @@ _TEMPLATE = """<!DOCTYPE html>
 <style>
   :root {
     --bg: #131722; --panel: #1e222d; --border: #2a2e39; --border-soft: #232733;
-    --ink: #d1d4dc; --ink-dim: #787b86; --up: __UP__; --down: __DOWN__;
+    --ink: #d1d4dc; --ink-dim: #787b86; --down: __DOWN__;
   }
   * { box-sizing: border-box; margin: 0; padding: 0; }
   body {
@@ -264,7 +261,6 @@ _TEMPLATE = """<!DOCTYPE html>
   .chip-label { color: var(--ink-dim); font-size: 10px; text-transform: uppercase;
     letter-spacing: 0.7px; }
   .chip-value { font-size: 15px; font-weight: 600; }
-  .up { color: var(--up); } .down { color: var(--down); }
   section { padding: 4px 20px 20px; }
   h2 { font-size: 13px; color: var(--ink-dim); text-transform: uppercase;
     letter-spacing: 0.8px; margin: 16px 0 10px; }

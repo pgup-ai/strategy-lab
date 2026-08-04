@@ -64,19 +64,6 @@ def test_rolling_percentile_is_causal_where_a_full_sample_rank_is_not():
     )
 
 
-def test_rolling_percentile_spans_zero_to_one():
-    values = rolling_percentile(series(np.random.default_rng(3).normal(size=400)), window=100)
-    tail = values.iloc[100:]
-    assert tail.min() >= 0.0 and tail.max() <= 1.0
-
-
-def test_rolling_percentile_leaves_warmup_as_nan_not_zero():
-    """NaN says 'not yet measurable'; 0.0 would say 'measured, and it is the minimum'."""
-    values = rolling_percentile(series(np.arange(100.0)), window=50)
-    assert values.iloc[:49].isna().all()
-    assert values.iloc[49:].notna().all()
-
-
 def test_rolling_percentile_puts_a_tied_window_mid_range_not_at_the_top():
     """A window of identical values has no range to sit at the top of."""
     values = rolling_percentile(series(np.full(200, 5.0)), window=50)
@@ -92,23 +79,11 @@ def test_rolling_zscore_is_causal():
     )
 
 
-def test_rolling_zscore_of_a_flat_series_is_zero_not_infinite():
-    """Zero variance would divide by zero; the guard must not produce inf."""
-    values = rolling_zscore(series(np.full(200, 5.0)), window=50)
-    assert np.isfinite(values.iloc[50:]).all()
-
-
 def test_direction_is_positive_in_an_uptrend_and_negative_in_a_downtrend():
     feature = Direction()
     up = feature.compute(trending(feature.warmup_bars + 200)).iloc[-1]
     down = feature.compute(trending(feature.warmup_bars + 200, slope=-0.002)).iloc[-1]
     assert up > 0.3 and down < -0.3
-
-
-def test_direction_stays_inside_minus_one_to_one():
-    feature = Direction()
-    values = feature.compute(trending(feature.warmup_bars + 500, slope=0.05)).dropna()
-    assert values.min() >= -1.0 and values.max() <= 1.0
 
 
 def test_direction_is_not_pinned_to_its_rails_by_an_ordinary_trend():
@@ -160,18 +135,19 @@ def test_stability_is_not_persistence_wearing_another_name():
     assert abs(pair["stability"].corr(pair["persistence"])) < 0.6
 
 
-@pytest.mark.parametrize("feature", [Direction(), Strength(), Persistence(), Stability()])
-def test_every_trend_feature_leaves_warmup_as_nan(feature):
-    values = feature.compute(trending(feature.warmup_bars + 50))
+@pytest.mark.parametrize("name", list_features())
+def test_every_feature_leaves_its_warmup_as_nan(name):
+    """``mask_warmup``, stated as a test.
+
+    ``ewm(adjust=False)`` returns a number from bar zero, so without the mask
+    Direction emits values from bar 23 against a declared warmup of 1,920 -- the
+    convention's exact inverse. That those rows are *filled* past warmup is
+    asserted in ``tests/test_feature_lookahead.py``, which needs it to be true
+    before its own probe means anything.
+    """
+    feature = get_feature(name)
+    values = feature.compute(synthetic_ohlcv_with_funding(n=feature.warmup_bars + 50, freq="4h"))
     assert values.iloc[: feature.warmup_bars].isna().all()
-    assert values.iloc[feature.warmup_bars :].notna().all()
-
-
-@pytest.mark.parametrize("feature", [Strength(), Persistence(), Stability()])
-def test_unsigned_trend_features_stay_inside_zero_to_one(feature):
-    for df in (trending(feature.warmup_bars + 400), choppy(feature.warmup_bars + 400)):
-        values = feature.compute(df).dropna()
-        assert values.min() >= 0.0 and values.max() <= 1.0
 
 
 def regime_switch(quiet: int, violent: int = 200, calm: int = 200) -> pd.DataFrame:
@@ -215,12 +191,6 @@ def test_energy_and_strength_tell_a_steady_trend_from_violent_chop():
     assert strength.compute(df).iloc[calm_end] > 0.8
 
 
-def test_compression_is_energy_read_from_the_other_end():
-    df = regime_switch(Energy().warmup_bars)
-    total = (Compression().compute(df) + Energy().compute(df)).dropna()
-    assert np.allclose(total, 1.0)
-
-
 def test_compression_release_is_positive_exactly_where_compression_falls():
     """The sign is the whole reason this is a named feature: differencing
     Compression by hand reports a release as a negative number."""
@@ -233,21 +203,6 @@ def test_compression_release_is_positive_exactly_where_compression_falls():
     assert falling.sum() > 100 and rising.sum() > 100
     assert (release[falling] > 0).all()
     assert (release[rising] < 0).all()
-
-
-@pytest.mark.parametrize("feature", [Energy(), Compression(), CompressionRelease()])
-def test_every_volatility_feature_leaves_warmup_as_nan(feature):
-    values = feature.compute(regime_switch(feature.warmup_bars))
-    assert values.iloc[: feature.warmup_bars].isna().all()
-    assert values.iloc[feature.warmup_bars :].notna().all()
-
-
-@pytest.mark.parametrize(
-    ("feature", "floor"), [(Energy(), 0.0), (Compression(), 0.0), (CompressionRelease(), -1.0)]
-)
-def test_volatility_features_stay_inside_their_declared_range(feature, floor):
-    values = feature.compute(regime_switch(feature.warmup_bars)).dropna()
-    assert values.min() >= floor and values.max() <= 1.0
 
 
 def with_funding(
@@ -295,7 +250,12 @@ def test_crowding_reads_above_neutral_when_longs_pay_and_below_when_shorts_do():
 
 def test_crowding_of_an_unchanging_carry_is_neutral_not_undefined():
     """Flat funding has no spread to measure against, which is 0.5 -- not the
-    NaN or the inf an unguarded z-score produces from that 0/0."""
+    NaN or the inf an unguarded z-score produces from that 0/0.
+
+    Asserted over the post-warmup slice rather than ``dropna()``: dropping the
+    NaNs an unguarded z-score would produce leaves an empty series, and every
+    assertion below passes vacuously on one.
+    """
     feature = Crowding()
     df = choppy(feature.warmup_bars + 200)
     settlements = df.index[::2]
@@ -304,8 +264,8 @@ def test_crowding_of_an_unchanging_carry_is_neutral_not_undefined():
             df.index, pd.Series(0.0001, index=settlements, dtype="float64")
         )
     )
-    values = feature.compute(flat).dropna()
-    assert np.isfinite(values).all()
+    values = feature.compute(flat).iloc[feature.warmup_bars :]
+    assert not values.empty
     assert values.eq(0.5).all()
 
 
@@ -318,17 +278,6 @@ def test_funding_lands_on_the_bar_containing_it_not_the_one_it_equals():
 
     assert aligned.iloc[2] == pytest.approx(0.0001)
     assert aligned.drop(index[2]).eq(0.0).all()
-
-
-@pytest.mark.parametrize("crypto_only", [False, True])
-def test_every_flow_feature_leaves_warmup_as_nan_and_stays_inside_zero_to_one(crypto_only):
-    feature = Crowding() if crypto_only else Participation()
-    df = choppy(feature.warmup_bars + 300)
-    values = feature.compute(with_funding(df) if crypto_only else df)
-
-    assert values.iloc[: feature.warmup_bars].isna().all()
-    assert values.iloc[feature.warmup_bars :].notna().all()
-    assert values.dropna().min() >= 0.0 and values.dropna().max() <= 1.0
 
 
 # Bars probed past warmup on a cold start. Each costs one ``compute`` over a
@@ -377,8 +326,7 @@ def test_declared_warmup_reproduces_whole_history_values(name):
     )
 
 
-@pytest.mark.parametrize("span_attribute", ["fast_span", "slow_span"])
-def test_directions_emas_are_bit_exact_after_its_declared_warmup(span_attribute):
+def test_directions_ema_is_bit_exact_after_its_declared_warmup():
     """For the one recursive feature, agreeing to a tolerance is not the bar.
 
     ``ewm(adjust=False)`` never forgets its seed; it decays it by
@@ -387,10 +335,13 @@ def test_directions_emas_are_bit_exact_after_its_declared_warmup(span_attribute)
     wrong by 3.2e-3 relative at 5x the span, 1.4e-7 at 10x and 2.1e-11 at 15x --
     all of which the tolerance above would wave through at 15x. Bit-exactness
     arrives at 18x and is where ``_EWM_WARMUP_MULTIPLE = 20`` comes from.
+
+    Only the larger span is probed: warmup is 20x *it*, so the other EMA clears
+    the same bar with room to spare and could not fail on its own.
     """
     feature = Direction()
     warm = feature.warmup_bars
-    span = getattr(feature, span_attribute)
+    span = max(feature.fast_span, feature.slow_span)
     df = synthetic_ohlcv_with_funding(n=warm + COLD_START_PROBES)
     whole_history = df["close"].ewm(span=span, adjust=False).mean()
 

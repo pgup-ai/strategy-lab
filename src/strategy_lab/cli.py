@@ -660,10 +660,7 @@ def features_command(
     information coefficient against the forward return at each horizon -- each
     reported for both halves of the sample as well as the whole, because a
     feature that works in one half and not the other is a regime, not a signal.
-
-    Expect small ICs. A single feature rarely reaches |IC| 0.05 on 4h crypto, and
-    one that predicts nothing directly can still earn its place as a regime
-    filter; that judgement is not something this command makes.
+    Expect small numbers: one feature rarely reaches |IC| 0.05 on 4h crypto.
     """
     from dataclasses import asdict
     from datetime import UTC, datetime

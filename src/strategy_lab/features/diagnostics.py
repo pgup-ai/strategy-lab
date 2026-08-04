@@ -68,11 +68,7 @@ class HorizonIC:
 
     @property
     def halves_agree(self) -> bool:
-        """Both halves point the same way and neither is a rounding error.
-
-        The question the split is for. A feature can post a respectable
-        full-sample IC out of one half alone, and this is what says so.
-        """
+        """Both halves point the same way and neither is a rounding error."""
         first, second = self.first_half_ic, self.second_half_ic
         if not (np.isfinite(first) and np.isfinite(second)):
             return False
@@ -200,8 +196,7 @@ def diagnose_features(
 ) -> DiagnosticSet:
     """Measure several features on one frame, and how much they duplicate each other.
 
-    Order is preserved so a report reads in the order the caller asked for, which
-    is the registry's order and therefore groups features by what they measure.
+    Order is preserved, so a report reads in the registry's order.
     """
     ordered = list(features)
     names = [feature.name for feature in ordered]
@@ -302,21 +297,21 @@ def _diagnose(
         )
 
     defined = measured.dropna()
-    quartiles = defined.quantile([0.25, 0.75]) if not defined.empty else None
+    quartiles = defined.quantile([0.25, 0.75])
     return FeatureDiagnostic(
         name=feature.name,
         version=feature.version,
         warmup_bars=feature.warmup_bars,
         observations=int(len(measured)),
         coverage=float(measured.notna().mean()),
-        minimum=_scalar(defined.min()),
-        median=_scalar(defined.median()),
-        maximum=_scalar(defined.max()),
-        iqr=float(quartiles.iloc[1] - quartiles.iloc[0]) if quartiles is not None else float("nan"),
+        minimum=float(defined.min()),
+        median=float(defined.median()),
+        maximum=float(defined.max()),
+        iqr=float(quartiles.iloc[1] - quartiles.iloc[0]),
         autocorrelation=_pearson(measured, measured.shift(1)),
         # Over the measured stretch only: the step out of warmup is a jump from
         # NaN, not a bar-to-bar change anyone would trade.
-        turnover=_scalar(measured.diff().abs().mean()),
+        turnover=float(measured.diff().abs().mean()),
         ics=tuple(
             _horizon_ic(measured, forward_return(close, horizon=horizon), horizon=horizon)
             for horizon in horizons
@@ -343,7 +338,6 @@ def _horizon_ic(values: pd.Series, forward: pd.Series, *, horizon: int) -> Horiz
 
 
 def _paired(values: pd.Series, forward: pd.Series) -> pd.DataFrame:
-    """Rows where the feature and its forward return are both defined, in time order."""
     return pd.DataFrame({"feature": values, "forward": forward}).dropna()
 
 
@@ -363,9 +357,4 @@ def _pearson(left: pd.Series, right: pd.Series) -> float:
     paired = pd.DataFrame({"left": left, "right": right}).dropna()
     if paired["left"].nunique() < 2 or paired["right"].nunique() < 2:
         return float("nan")
-    return _scalar(paired["left"].corr(paired["right"]))
-
-
-def _scalar(value: object) -> float:
-    """A plain float, so ``NaN`` stays ``NaN`` instead of becoming ``None``."""
-    return float(value) if value is not None else float("nan")
+    return float(paired["left"].corr(paired["right"]))
