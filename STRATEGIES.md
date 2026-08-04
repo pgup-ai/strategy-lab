@@ -191,6 +191,16 @@ rather than round-tripped.
   poison probe passes without it. What it prevents is degeneracy: `high >= close` within a
   bar, so an unshifted channel makes `close > entry_high` unsatisfiable and the strategy
   never trades at all.
+- **Known issue — `exit_span >= entry_span` makes `exit_span` inert, with shorts on.**
+  `long_exits` is `close < exit_low` and `short_entries` is `close < entry_low`; a wider
+  exit channel means `exit_low <= entry_low`, so every bar that trips the exit also trips
+  the reversal, and an opposite entry outranks a same-side exit. Measured on the
+  15,128-bar BTC perp 4h frame: **zero** bars where a long exit fires without a short
+  entry beside it, and `exit_span` 20/40/80 produce bit-identical positions at
+  `entry_span=20`. Only `exit_span < entry_span` — the Turtle configuration this is
+  modelled on — is a live parameter. With `--no-allow-shorts` there is no reversal to
+  outrank the exit and the channel matters again. Pinned by
+  `tests/test_sweep.py::test_donchians_exit_channel_is_inert_once_it_is_no_narrower_than_the_entry`.
 
 ## multi_horizon
 

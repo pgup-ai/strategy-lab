@@ -535,3 +535,53 @@ def test_max_drawdown_counts_a_loss_on_the_first_evaluated_bar():
     point = sweep_module._evaluate(df, _AlwaysLong(), {}, 3, "15m")
 
     assert point.max_drawdown == pytest.approx(-0.1)
+
+
+def test_donchians_exit_channel_is_inert_once_it_is_no_narrower_than_the_entry():
+    """A measured degeneracy in the published R0 grid, not a property of the sweep.
+
+    ``long_exits`` is ``close < exit_low`` and ``short_entries`` is ``close <
+    entry_low``. With ``exit_span >= entry_span`` the exit channel is the wider
+    one, so ``exit_low <= entry_low`` and every bar that triggers the exit also
+    triggers the reversal -- which outranks it. Measured on the 15,128-bar BTC
+    perp 4h frame: **zero** bars where a long exit fires without a short entry
+    beside it, and the positions for ``exit_span`` 20, 40 and 80 are identical
+    at ``entry_span=20``.
+
+    So 5 of the gate's 16 cells are exact duplicates of another cell. The
+    degeneracy needs shorts: with ``allow_shorts=False`` there is no reversal to
+    outrank the exit and the channel is live again, which is what this asserts
+    second so the first half cannot pass for a trivial reason.
+    """
+    df = synthetic_ohlcv(n=900)
+    template = get_strategy("donchian")
+
+    reference = None
+    for exit_span in (48, 96, 192):
+        strategy = dataclasses.replace(template, entry_span=48, exit_span=exit_span)
+        signals = strategy.generate_signals(df)
+        assert int((signals.long_exits & ~signals.short_entries).sum()) == 0, (
+            f"exit_span={exit_span}: a long exit fired without a reversal beside "
+            f"it, so the channel is not inert after all"
+        )
+        position = positions_from_signals(signals)
+        if reference is None:
+            reference = position
+        assert position.equals(reference), (
+            f"exit_span={exit_span} produced a different position from the "
+            f"48/48 cell, so the exit channel is doing something"
+        )
+
+    long_only = [
+        positions_from_signals(
+            dataclasses.replace(
+                template, entry_span=48, exit_span=span, allow_shorts=False
+            ).generate_signals(df)
+        )
+        for span in (48, 192)
+    ]
+    assert not long_only[0].equals(long_only[1]), (
+        "with shorts disabled there is no reversal to outrank the exit, so the "
+        "exit channel must matter again; if it does not, this frame simply never "
+        "exits and the assertions above prove nothing"
+    )
