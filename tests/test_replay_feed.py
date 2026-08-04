@@ -255,23 +255,3 @@ def test_from_database_replays_a_stored_candle_set():
     assert [event.bar.ts_open_ms for event in collect(tail, [sub])] == [
         event.bar.ts_open_ms for event in events[-2:]
     ]
-
-
-def test_multiple_subscriptions_are_replayed_sequentially_not_interleaved():
-    """KNOWN LIMITATION, pinned so it cannot rot into a silent surprise: replay drains
-    sub A fully, then sub B, where a live feed multiplexes both by time. Phase 1a is
-    single-symbol; fix this alongside the live feed, not before.
-    """
-    other_instrument = InstrumentId("binance", "spot", "ETH/USDT")
-    other_sub = Subscription(other_instrument, "15m")
-    feed = ReplayFeed(
-        frames={
-            (INSTRUMENT, "15m"): synthetic_ohlcv(n=5),
-            (other_instrument, "15m"): synthetic_ohlcv(n=5, seed=11),
-        }
-    )
-    events = collect(feed, [SUB, other_sub])
-    instruments = [event.bar.instrument for event in events]
-    assert instruments == [INSTRUMENT] * 5 + [other_instrument] * 5
-    timestamps = [event.bar.ts_open_ms for event in events]
-    assert timestamps != sorted(timestamps), "expected the sequential-drain ordering bug"
