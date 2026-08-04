@@ -74,6 +74,48 @@ def test_reconfiguring_a_baseline_rederives_its_warmup(name, params, expected):
     assert reconfigured.warmup_bars == expected
 
 
+@pytest.mark.parametrize(
+    ("name", "params", "offender"),
+    [
+        # ``pct_change(-1)`` compares each row against the *next* one, so these
+        # two configurations are literally non-causal.
+        ("tsmom", {"lookback": -1}, "lookback"),
+        ("multi_horizon", {"lookbacks": (24, -1)}, "lookbacks[1]"),
+        # Zero is the quiet half: pandas raises nothing and the strategy simply
+        # never trades, which reads on a surface as a dead parameter region.
+        ("tsmom", {"lookback": 0}, "lookback"),
+        ("donchian", {"entry_span": 0}, "entry_span"),
+        ("donchian", {"exit_span": 0}, "exit_span"),
+        ("multi_horizon", {"lookbacks": (24, 0)}, "lookbacks[1]"),
+        # These three already raised, but out of pandas at signal time, naming
+        # neither the strategy nor the field the caller actually set.
+        ("donchian", {"entry_span": -1}, "entry_span"),
+        ("ema_cross", {"fast_span": 0}, "fast_span"),
+        ("ema_cross", {"slow_span": -1}, "slow_span"),
+        ("multi_horizon", {"lookbacks": ()}, "lookbacks"),
+        ("multi_horizon", {"entry_threshold": -0.1}, "entry_threshold"),
+    ],
+)
+def test_a_baseline_rejects_a_parameter_it_cannot_honour(name, params, offender):
+    """Construction must fail, and the message must say which field is wrong.
+
+    ``tests/test_lookahead.py`` cannot cover this: its poison probe iterates
+    ``list_strategies()``, which yields **default** instances only, while
+    ``sweep_parameters`` rebuilds every cell with ``dataclasses.replace`` over
+    any field a grid names. A negative lookback reaching a cell that way is a
+    non-causal strategy that every existing guard passes.
+
+    ``multi_horizon``'s ``entry_threshold`` is the non-lookback case: signals are
+    ``score > threshold`` for long and ``score < -threshold`` for short, so a
+    negative threshold leaves a band around zero satisfying both at once.
+    """
+    with pytest.raises(ValueError) as raised:
+        dataclasses.replace(get_strategy(name), **params)
+    assert offender in str(raised.value), (
+        f"{name} rejected {params} without naming the offending field: {raised.value}"
+    )
+
+
 @pytest.mark.parametrize("name", BASELINES)
 def test_a_baseline_is_long_and_never_short_in_a_clean_uptrend(name):
     strategy = get_strategy(name)

@@ -4,7 +4,7 @@ from dataclasses import dataclass
 
 import pandas as pd
 
-from strategy_lab.strategies.base import SignalSet, validate_ohlcv
+from strategy_lab.strategies.base import SignalSet, require_positive_span, validate_ohlcv
 
 _VOL_SPAN = 96
 
@@ -36,6 +36,16 @@ class MultiHorizon:
     entry_threshold: float = 0.0
 
     def __post_init__(self) -> None:
+        if not self.lookbacks:
+            raise ValueError(f"{self.name} lookbacks must name at least one horizon, got ()")
+        for index, lookback in enumerate(self.lookbacks):
+            require_positive_span(self.name, f"lookbacks[{index}]", lookback)
+        if self.entry_threshold < 0:
+            raise ValueError(
+                f"{self.name} entry_threshold must be >= 0, got {self.entry_threshold!r}; "
+                f"a negative threshold satisfies both ``score > threshold`` and "
+                f"``score < -threshold``, leaving every near-zero bar long and short at once"
+            )
         # Always recomputed, so a ``warmup_bars=`` passed by a caller is
         # overwritten: it is a measured consequence of the windows, not a free
         # parameter. Left as a field so ``dataclasses.fields`` still reports it.

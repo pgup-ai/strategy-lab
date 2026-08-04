@@ -4,7 +4,7 @@ from dataclasses import dataclass
 
 import pandas as pd
 
-from strategy_lab.strategies.base import SignalSet, validate_ohlcv
+from strategy_lab.strategies.base import SignalSet, require_positive_span, validate_ohlcv
 
 
 @dataclass(frozen=True)
@@ -26,6 +26,8 @@ class Donchian:
     warmup_bars: int = 96
 
     def __post_init__(self) -> None:
+        require_positive_span(self.name, "entry_span", self.entry_span)
+        require_positive_span(self.name, "exit_span", self.exit_span)
         # Always recomputed, so a ``warmup_bars=`` passed by a caller is
         # overwritten: it is a measured consequence of the channel spans, not a
         # free parameter. Left as a field so ``dataclasses.fields`` still

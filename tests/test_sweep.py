@@ -109,6 +109,26 @@ def test_sweep_names_the_cell_whose_warmup_exceeds_the_frame():
     )
 
 
+def test_a_sweep_over_a_negative_lookback_fails_instead_of_scoring_it():
+    """The reachable path to a non-causal strategy, and the only one.
+
+    ``tests/test_lookahead.py`` proves every *registered* strategy is causal, but
+    it instantiates defaults; a grid axis reaching -1 builds a cell that reads the
+    next bar, and every cost, Sharpe and stability number on that surface would be
+    fiction. The sweep must refuse the grid rather than report the cell.
+    """
+    with pytest.raises(ValueError) as raised:
+        sweep_parameters(
+            df=synthetic_ohlcv(n=900),
+            strategy_name="tsmom",
+            grid={"lookback": [24, -1]},
+            timeframe="15m",
+        )
+    assert "lookback" in str(raised.value), (
+        f"error does not name the offending parameter: {raised.value}"
+    )
+
+
 def _alternating_frame(n: int = 400) -> pd.DataFrame:
     """Strictly alternating up/down closes, so bar *t* never predicts bar *t+1*.
 

@@ -4,7 +4,7 @@ from dataclasses import dataclass
 
 import pandas as pd
 
-from strategy_lab.strategies.base import SignalSet, validate_ohlcv
+from strategy_lab.strategies.base import SignalSet, require_positive_span, validate_ohlcv
 
 
 @dataclass(frozen=True)
@@ -25,6 +25,7 @@ class Tsmom:
     allow_shorts: bool = True
 
     def __post_init__(self) -> None:
+        require_positive_span(self.name, "lookback", self.lookback)
         # Always recomputed, so a ``warmup_bars=`` passed by a caller is
         # overwritten: it is a measured consequence of the lookback, not a free
         # parameter. Left as a field so ``dataclasses.fields`` still reports it.

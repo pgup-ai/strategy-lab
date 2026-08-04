@@ -4,7 +4,7 @@ from dataclasses import dataclass
 
 import pandas as pd
 
-from strategy_lab.strategies.base import SignalSet, validate_ohlcv
+from strategy_lab.strategies.base import SignalSet, require_positive_span, validate_ohlcv
 
 # ewm(adjust=False) is recursive from bar 0 and decays its seed rather than
 # dropping it, so a span-n EMA is still wrong after n bars. Measured in Phase 1a:
@@ -24,6 +24,8 @@ class EmaCross:
     warmup_bars: int = _EWM_WARMUP_MULTIPLE * 192
 
     def __post_init__(self) -> None:
+        require_positive_span(self.name, "fast_span", self.fast_span)
+        require_positive_span(self.name, "slow_span", self.slow_span)
         # Always recomputed, so a ``warmup_bars=`` passed by a caller is
         # overwritten: it is a measured consequence of the slow span, not a free
         # parameter. Left as a field so ``dataclasses.fields`` still reports it.
