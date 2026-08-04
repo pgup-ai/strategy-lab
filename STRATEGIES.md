@@ -265,7 +265,10 @@ R0 baselines (verified against the engine on 5,000 synthetic bars, 2026-08-03):
   funding is a market rate, so tripling it models a different instrument.
   When funding applies, `stats.json` gains `Funding Paid` and `Net Return [%]`,
   `equity_curve.csv` becomes the net curve, and `funding.csv` is the per-settlement
-  audit trail. When it does not, every artifact is byte-identical to a pre-costs run.
+  audit trail. When it does not, `stats.json`, `trades.csv` and `equity_curve.csv` are
+  byte-identical to a pre-costs run — but only those three. `costs.json` is always
+  written, `config.json` always carries `cost_model` / `cost_stress` / `funding_applied` /
+  `funding_settlements`, and the report always renders its Costs section.
 - **Sizing is non-compounding**: entry shares = initial cash × `position_pct` × scale ÷
   close. Sizes are anchored to *initial* cash, never to current equity.
 - **`--size-mode` chooses where that scale comes from.** `fixed` (default) uses whatever
