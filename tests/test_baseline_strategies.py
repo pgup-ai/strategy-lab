@@ -67,8 +67,10 @@ def test_reconfiguring_a_baseline_rederives_its_warmup(name, params, expected):
 
     ``sweep_parameters`` rebuilds every cell with ``dataclasses.replace`` over the
     span fields, so a warmup frozen at the default silently under-warms the larger
-    cells. The R0 gate swept ``donchian`` to ``entry_span=384`` against a declared
-    warmup of 96 and scored those cells on a series that had not converged.
+    cells. The 4h R0 gate -- the run whose numbers were published and later
+    corrected -- swept ``donchian`` to ``entry_span=160`` against a declared warmup
+    of 96 and scored those cells on a series that had not converged. The 384 in the
+    cases below is the earlier 15m gate's reach, kept as a regression case.
     """
     reconfigured = dataclasses.replace(get_strategy(name), **params)
     assert reconfigured.warmup_bars == expected
