@@ -32,6 +32,9 @@ def test_continuation_failure_exits_after_consecutive_adverse_closes() -> None:
 @dataclass(frozen=True)
 class _ShortOnlyStrategy:
     name: str = "short_only_stub"
+    version: str = "1.0.0"
+    # The hand-placed entry is on bar 2, so any warmup at all would mask it.
+    warmup_bars: int = 0
 
     def generate_signals(self, df: pd.DataFrame) -> SignalSet:
         no_signal = pd.Series(False, index=df.index)

@@ -101,6 +101,7 @@ def run_backtest(
         raise ValueError(f"No candles loaded for {identity}")
 
     df = df.sort_index()
+    warmup = _warmup_bars(strategy, df)
     signals = strategy.generate_signals(df)
     exit_mode = ExitMode(exit_mode)
     size_mode = SizeMode(size_mode)
@@ -122,6 +123,8 @@ def run_backtest(
         failure_bars=failure_bars,
     )
     stop_kwargs = _stop_kwargs(df, signals.setup_stop_loss, exit_mode)
+
+    signals, long_exits, short_exits = _mask_warmup(signals, long_exits, short_exits, warmup)
 
     size = _compute_entry_sizes(
         long_entries=signals.long_entries,
@@ -188,6 +191,7 @@ def run_backtest(
         "identity": asdict(identity),
         "strategy": strategy.name,
         "strategy_metadata": signals.metadata,
+        "warmup_bars": warmup,
         "fees": fees,
         "slippage": slippage,
         "cash": cash,
@@ -266,6 +270,65 @@ def run_backtest(
         plot_path=plot_path,
         costs_path=costs_path,
         funding_path=funding_path,
+    )
+
+
+def _warmup_bars(strategy: Strategy, df: pd.DataFrame) -> int:
+    """How many leading bars the strategy declares are not yet converged.
+
+    Refused rather than clamped when the frame is entirely warmup: a run that
+    masks every bar produces an empty ``trades.csv``, a flat equity curve and a
+    ``stats.json`` full of zeros, none of which reads as "there was no data" --
+    it reads as a strategy that declined to trade. The sweep already refuses the
+    same case for the same reason.
+    """
+    warmup = int(strategy.warmup_bars)
+    if warmup >= len(df):
+        raise ValueError(
+            f"{strategy.name} declares {warmup} warmup bars but the frame has "
+            f"{len(df)}; every bar would be masked and the run would report a "
+            f"flat curve rather than an absence of data"
+        )
+    return warmup
+
+
+def _mask_warmup(
+    signals: SignalSet,
+    long_exits: pd.Series,
+    short_exits: pd.Series,
+    warmup: int,
+) -> tuple[SignalSet, pd.Series, pd.Series]:
+    """Silence every entry and exit until the declared warmup has elapsed.
+
+    ``warmup_bars`` is a measured claim that an indicator has not converged yet
+    -- for ``ewm(adjust=False)`` roughly 20x the span, because the recursion
+    decays its seed rather than dropping it. The sweep and the replay runner
+    both act on that claim; the engine did not, so ``ema_cross`` on the
+    canonical 15,118-bar perp frame traded **3,840 bars, 25.4% of the run**, on
+    EMAs it declares are still wrong.
+
+    Both sides are masked, matching ``StrategyRunner.on_event``, which emits
+    nothing at all until ``len(buffer) > warmup_bars``. Only the entries change
+    the simulation -- ``signals_to_size_nb`` does nothing with an exit while the
+    position is flat, and a stop cannot fire on a position that was never opened
+    -- so masking the exits is what makes the two paths describe the same signal
+    set rather than merely reach the same P&L.
+    """
+    mask = np.arange(len(signals.long_entries)) >= warmup
+
+    def masked(series: pd.Series) -> pd.Series:
+        return series & mask
+
+    return (
+        replace(
+            signals,
+            long_entries=masked(signals.long_entries),
+            long_exits=masked(signals.long_exits),
+            short_entries=masked(signals.short_entries),
+            short_exits=masked(signals.short_exits),
+        ),
+        masked(long_exits),
+        masked(short_exits),
     )
 
 
