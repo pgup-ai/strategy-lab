@@ -1,13 +1,19 @@
 from __future__ import annotations
 
+import re
+from dataclasses import is_dataclass
+
 import numpy as np
 import pandas as pd
 import pytest
 
+from strategy_lab.features import flow, trend, volatility
 from strategy_lab.features.base import rolling_percentile, rolling_zscore
+from strategy_lab.features.registry import get_feature, list_features
 from strategy_lab.features.flow import Crowding, Participation, align_funding_to_bars
 from strategy_lab.features.trend import Direction, Persistence, Stability, Strength
 from strategy_lab.features.volatility import Compression, CompressionRelease, Energy
+from tests.conftest import synthetic_ohlcv_with_funding
 
 
 def series(values) -> pd.Series:
@@ -323,3 +329,104 @@ def test_every_flow_feature_leaves_warmup_as_nan_and_stays_inside_zero_to_one(cr
     assert values.iloc[: feature.warmup_bars].isna().all()
     assert values.iloc[feature.warmup_bars :].notna().all()
     assert values.dropna().min() >= 0.0 and values.dropna().max() <= 1.0
+
+
+# Bars probed past warmup on a cold start. Each costs one ``compute`` over a
+# warmup-sized window, so this trades runtime against how many chances the check
+# gets. At 120 an under-declared warmup is caught on 120/120 bars for every
+# feature here, because a rolling window that is one bar short returns NaN rather
+# than a slightly wrong number.
+COLD_START_PROBES = 120
+
+# Two computations of the same bar from different starting points are not
+# bit-identical, and cannot be made so: pandas' rolling variance adds and removes
+# observations from a running accumulator, so its rounding depends on where the
+# series began. Measured over these features the disagreement tops out at 1.5e-11
+# relative -- against a 0..1 feature nothing downstream resolves. It is a real
+# floor, not a slack allowance: Direction at 10x its span misses by 1.4e-7 and is
+# still caught, and the bit-exactness that pins its 20x is asserted separately
+# below, on the EMAs themselves.
+COLD_START_TOLERANCE = 1e-9
+
+
+@pytest.mark.parametrize("name", list_features())
+def test_declared_warmup_reproduces_whole_history_values(name):
+    """What ``warmup_bars`` promises, stated as a test.
+
+    A live process starts cold: it fetches ``warmup_bars`` bars, then computes on
+    each new one. A backtest sees everything. Those two agree only if
+    ``warmup_bars`` is genuinely enough history, so this replays the cold start at
+    every probe point and demands the current bar come out the same.
+    """
+    feature = get_feature(name)
+    warm = feature.warmup_bars
+    df = synthetic_ohlcv_with_funding(n=warm + COLD_START_PROBES)
+    whole_history = feature.compute(df)
+
+    divergences = []
+    for position in range(warm, len(df)):
+        cold = feature.compute(df.iloc[position - warm : position + 1]).iloc[-1]
+        expected = whole_history.iloc[position]
+        if pd.isna(cold) or abs(cold - expected) > COLD_START_TOLERANCE:
+            divergences.append((position, cold, expected))
+
+    assert divergences == [], (
+        f"{name} declares warmup_bars={warm}, but a cold start from exactly that "
+        f"many bars disagrees with the whole-history run at {divergences[:3]} "
+        f"({len(divergences)}/{COLD_START_PROBES} probed bars). Raise warmup_bars."
+    )
+
+
+@pytest.mark.parametrize("span_attribute", ["fast_span", "slow_span"])
+def test_directions_emas_are_bit_exact_after_its_declared_warmup(span_attribute):
+    """For the one recursive feature, agreeing to a tolerance is not the bar.
+
+    ``ewm(adjust=False)`` never forgets its seed; it decays it by
+    ``(1 - 2/(span+1))`` per bar, so "the values agreed" only means no probed bar
+    landed outside the residual band. Measured here at span 96: the cold start is
+    wrong by 3.2e-3 relative at 5x the span, 1.4e-7 at 10x and 2.1e-11 at 15x --
+    all of which the tolerance above would wave through at 15x. Bit-exactness
+    arrives at 18x and is where ``_EWM_WARMUP_MULTIPLE = 20`` comes from.
+    """
+    feature = Direction()
+    warm = feature.warmup_bars
+    span = getattr(feature, span_attribute)
+    df = synthetic_ohlcv_with_funding(n=warm + COLD_START_PROBES)
+    whole_history = df["close"].ewm(span=span, adjust=False).mean()
+
+    inexact = [
+        position
+        for position in range(warm, len(df))
+        if df["close"].iloc[position - warm : position + 1]
+        .ewm(span=span, adjust=False)
+        .mean()
+        .iloc[-1]
+        != whole_history.iloc[position]
+    ]
+    assert inexact == [], (
+        f"the span-{span} EMA is not bit-exact after warmup_bars={warm} on "
+        f"{len(inexact)}/{COLD_START_PROBES} probed bars; every Direction value "
+        "then carries a seed the backtest did not have."
+    )
+
+
+@pytest.mark.parametrize("name", list_features())
+def test_every_feature_declares_a_semver_version(name):
+    assert re.match(r"^\d+\.\d+\.\d+$", get_feature(name).version)
+
+
+def test_every_feature_defined_in_the_package_is_registered():
+    """Manual registration is two places to forget, and forgetting either leaves a
+    feature outside the lookahead probe -- which is the only reason the probe exists.
+
+    Mirrors ``strategies/registry.py`` deliberately, so this catches the rot that
+    pattern invites rather than trading it for an import-time side effect.
+    """
+    registered = {type(get_feature(name)) for name in list_features()}
+    defined = {
+        obj
+        for module in (flow, trend, volatility)
+        for obj in vars(module).values()
+        if is_dataclass(obj) and getattr(obj, "__module__", None) == module.__name__
+    }
+    assert defined == registered, f"unregistered: {sorted(c.__name__ for c in defined - registered)}"

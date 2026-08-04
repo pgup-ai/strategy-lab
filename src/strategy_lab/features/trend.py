@@ -188,22 +188,44 @@ class Stability:
 
 
 def trend_fit(log_price: pd.Series, *, window: int) -> tuple[pd.Series, pd.Series]:
-    """R-squared and residual standard deviation of an OLS fit on time.
+    """R-squared and residual standard deviation of an OLS fit of price on time.
 
-    Derived from the rolling correlation against a time ramp rather than by
-    solving the normal equations per window: for a simple regression R-squared is
-    exactly the squared Pearson correlation, and correlation is invariant to the
-    affine shift that would make each window's ramp start at zero. Two Cython
-    rolling passes instead of a Python loop over every window.
+    The time regressor is a **fixed** ramp centred on its own window, applied as
+    one dot product per bar, rather than a running index handed to
+    ``rolling.corr``. The two agree mathematically -- correlation is invariant to
+    an affine shift of either variable -- and disagree in float64, because a
+    running index reaches 15,000 on the stored BTC history while the window it is
+    compared over spans 96, and what survives that cancellation is noise. Measured
+    against a whole-history run, a cold start under the running index differed by
+    4.6e-10 relative at bar 1,200 and grew with position; the fixed kernel is
+    bit-identical at every length and every position. What error the features
+    still show comes from ``rolling.std`` below, whose online add/remove
+    accumulates differently from a different starting bar -- 7.4e-12 relative,
+    measured, and not growing.
 
-    A window whose price never moved is scored ``R^2 = 0`` with zero residual: a
-    line explains none of a variance that is not there. Left alone the correlation
+    Only R-squared needs the regressor at all: the residual is what the fit
+    leaves behind, ``sd(price) * sqrt(1 - R^2)``.
+
+    A window whose price never moved is scored ``R^2 = 0`` with zero residual --
+    a line explains none of a variance that is not there. Left alone that ratio
     is 0/0 and the feature goes ``NaN`` in the middle of a live series.
     """
-    ramp = pd.Series(np.arange(len(log_price), dtype="float64"), index=log_price.index)
+    values = log_price.to_numpy(dtype="float64")
+    centred_time = np.arange(window, dtype="float64") - (window - 1) / 2.0
+    covariance = np.full(len(values), np.nan)
+    if len(values) >= window:
+        covariance[window - 1 :] = np.correlate(values, centred_time, mode="valid")
+
     price_std = log_price.rolling(window).std()
-    correlation = log_price.rolling(window).corr(ramp).where(price_std != 0, 0.0)
-    r_squared = (correlation**2).clip(0.0, 1.0)
+    # Both sums of squares carry the ddof=1 convention of ``price_std``, so the
+    # factor cancels in the ratio and only the constant time variance is written
+    # out: sum((t - mean t)^2) over 0..window-1.
+    time_variance = window * (window**2 - 1) / 12.0
+    price_variance = (window - 1) * price_std**2
+    explained = pd.Series(covariance**2, index=log_price.index) / (
+        time_variance * price_variance
+    )
+    r_squared = explained.where(price_variance != 0, 0.0).clip(0.0, 1.0)
     return r_squared, price_std * np.sqrt(1.0 - r_squared)
 
 

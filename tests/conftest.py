@@ -25,6 +25,22 @@ def synthetic_ohlcv(n: int = 400, seed: int = 7, freq: str = "15min") -> pd.Data
     )
 
 
+def synthetic_ohlcv_with_funding(n: int = 400, seed: int = 7, freq: str = "15min") -> pd.DataFrame:
+    """:func:`synthetic_ohlcv` plus a per-bar ``funding_rate``, settling every other bar.
+
+    Zero on the bars in between, which is what containment produces against a
+    venue that settles less often than the bar interval -- not a smeared rate.
+
+    Features that do not read funding ignore the column. Crowding cannot be
+    exercised at all without it, and a probe that never touches a feature's only
+    real input proves nothing about that feature.
+    """
+    df = synthetic_ohlcv(n=n, seed=seed, freq=freq)
+    funding = np.zeros(n, dtype="float64")
+    funding[::2] = np.random.default_rng(seed + 1).normal(0.0001, 0.0002, len(funding[::2]))
+    return df.assign(funding_rate=funding)
+
+
 def _postgres_reachable() -> bool:
     import socket
     from urllib.parse import urlparse
