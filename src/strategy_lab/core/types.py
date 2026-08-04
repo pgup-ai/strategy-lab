@@ -91,6 +91,37 @@ class BarEvent:
 
 
 @dataclass(frozen=True, slots=True)
+class MarketSnapshot:
+    """Every bar that closed at one event time.
+
+    A snapshot is the unit a cross-sectional feature consumes: breadth over five
+    coins is meaningless unless all five bars describe the same instant. It holds
+    only instruments that actually have a bar at ``ts_event_ms`` -- crypto trades
+    around the clock and equities do not, so a partial universe is the normal
+    case and ``absent`` must never be read as ``unchanged``.
+    """
+
+    ts_event_ms: int
+    bars: dict[InstrumentId, Bar]
+
+    def __getitem__(self, instrument: InstrumentId) -> Bar:
+        return self.bars[instrument]
+
+    def __contains__(self, instrument: object) -> bool:
+        return instrument in self.bars
+
+    def __len__(self) -> int:
+        return len(self.bars)
+
+    def get(self, instrument: InstrumentId) -> Bar | None:
+        return self.bars.get(instrument)
+
+    @property
+    def instruments(self) -> tuple[InstrumentId, ...]:
+        return tuple(self.bars)
+
+
+@dataclass(frozen=True, slots=True)
 class Signal:
     instrument: InstrumentId
     timeframe: str
