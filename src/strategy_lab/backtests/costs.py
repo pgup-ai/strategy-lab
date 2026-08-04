@@ -95,6 +95,49 @@ def funding_ledger(*, positions: pd.Series, funding: pd.Series) -> pd.DataFrame:
     )
 
 
+def funding_coverage_gaps(
+    *, funding: pd.Series, index: pd.DatetimeIndex
+) -> list[tuple[pd.Timestamp, pd.Timestamp]]:
+    """Stretches of the candle window that no stored settlement accounts for.
+
+    A settlement that was never fetched is charged as zero, and zero is
+    indistinguishable from "the venue paid nothing" -- so an interrupted
+    backfill or a stale collector yields a "net of funding" number that is
+    mostly gross of carry and says nothing about it. Presence of *some* funding
+    is therefore not evidence of coverage.
+
+    The cadence is **measured, never assumed**: settlement intervals are
+    per-contract and a contract may change its own. The median spacing of the
+    settlements inside the window is the yardstick, and an interior gap counts
+    only past 1.5x it -- orders of magnitude outside the venue's 47 ms stamping
+    jitter, but inside a single missed settlement.
+
+    Fewer than two settlements makes the whole window uncovered: one timestamp
+    pins no cadence, so nothing can be said about what is missing around it.
+    """
+    if len(index) == 0:
+        return []
+
+    start, end = index[0], _window_end(index)
+    settled = pd.DatetimeIndex(funding.dropna().index).sort_values()
+    settled = settled[(settled >= start) & (settled < end)]
+    if len(settled) < 2:
+        return [(start, end)]
+
+    spacing = np.diff(settled.asi8)
+    cadence = pd.Timedelta(int(np.median(spacing)), unit="ns")
+
+    gaps = []
+    if settled[0] - start > cadence:
+        gaps.append((start, settled[0]))
+    gaps.extend(
+        (settled[i], settled[i + 1]) for i in np.flatnonzero(spacing > cadence.value * 1.5)
+    )
+    if end - settled[-1] > cadence:
+        gaps.append((settled[-1], end))
+    return gaps
+
+
 def _sorted_index(positions: pd.Series) -> pd.DatetimeIndex:
     index = positions.index
     if not index.is_monotonic_increasing:
@@ -135,4 +178,4 @@ def _window_end(index: pd.DatetimeIndex) -> pd.Timestamp:
     return index[-1] + span
 
 
-__all__ = ["CostModel", "apply_funding", "funding_ledger"]
+__all__ = ["CostModel", "apply_funding", "funding_coverage_gaps", "funding_ledger"]

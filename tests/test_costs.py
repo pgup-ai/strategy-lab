@@ -3,7 +3,12 @@ from __future__ import annotations
 import pandas as pd
 import pytest
 
-from strategy_lab.backtests.costs import CostModel, apply_funding, funding_ledger
+from strategy_lab.backtests.costs import (
+    CostModel,
+    apply_funding,
+    funding_coverage_gaps,
+    funding_ledger,
+)
 
 
 def _positions(values, start="2024-01-01", freq="4h"):
@@ -171,3 +176,66 @@ def test_the_ledger_totals_to_the_applied_series():
     assert ledger["cash_flow"].sum() == pytest.approx(applied.sum())
     assert len(ledger) == 6
 
+
+
+def _bars(n=60, start="2024-01-01", freq="4h"):
+    return pd.date_range(start, periods=n, freq=freq, tz="UTC", name="timestamp")
+
+
+def test_a_complete_history_leaves_no_gap():
+    """60 4h bars is 10 days; 8h settlements across all of them cover the window,
+    including the last bar's own interval."""
+    bars = _bars()
+    funding = _funding([0.0001] * 30, start="2024-01-01", freq="8h")
+    assert funding_coverage_gaps(funding=funding, index=bars) == []
+
+
+def test_the_venue_stamping_settlements_late_is_not_a_gap():
+    bars = _bars()
+    funding = _funding([0.0001] * 30, freq="8h")
+    funding.index = funding.index + pd.Timedelta(47, unit="ms")
+    assert funding_coverage_gaps(funding=funding, index=bars) == []
+
+
+def test_an_interrupted_backfill_names_the_hole_it_left():
+    bars = _bars()
+    funding = _funding([0.0001] * 30, freq="8h")
+    kept = funding.drop(funding.index[10:16])
+    [(start, end)] = funding_coverage_gaps(funding=kept, index=bars)
+    assert (start, end) == (funding.index[9], funding.index[16])
+
+
+def test_a_stale_collector_leaves_the_tail_uncovered():
+    bars = _bars()
+    funding = _funding([0.0001] * 30, freq="8h")
+    [(start, end)] = funding_coverage_gaps(funding=funding.iloc[:20], index=bars)
+    assert start == funding.index[19]
+    assert end == bars[-1] + pd.Timedelta("4h")
+
+
+def test_a_late_start_leaves_the_head_uncovered():
+    bars = _bars()
+    funding = _funding([0.0001] * 30, freq="8h")
+    [(start, end)] = funding_coverage_gaps(funding=funding.iloc[6:], index=bars)
+    assert (start, end) == (bars[0], funding.index[6])
+
+
+def test_a_single_settlement_pins_no_cadence_so_nothing_is_covered():
+    bars = _bars()
+    funding = _funding([0.0001], freq="8h")
+    assert funding_coverage_gaps(funding=funding, index=bars) == [
+        (bars[0], bars[-1] + pd.Timedelta("4h"))
+    ]
+
+
+def test_the_cadence_is_read_from_the_contract_rather_than_assumed():
+    """A two-hour spacing is a hole in an hourly-settling contract and nothing at
+    all in an eight-hourly one. Nothing here knows the interval in advance."""
+    bars = _bars(n=24, freq="1h")
+    hourly = _funding([0.0001] * 24, freq="1h")
+
+    assert funding_coverage_gaps(funding=hourly, index=bars) == []
+    assert funding_coverage_gaps(funding=hourly.drop(hourly.index[10]), index=bars) == [
+        (hourly.index[9], hourly.index[11])
+    ]
+    assert funding_coverage_gaps(funding=_funding([0.0001] * 3, freq="8h"), index=bars) == []

@@ -423,11 +423,13 @@ def _funding_rates(identity: MarketDataIdentity, df):
     A perp backtest that quietly skips funding reports a gross number that reads
     exactly like a net one -- and on this instrument the carry is roughly the
     size of buy-and-hold. Missing funding is therefore an error with an explicit
-    opt-out, not a silent zero.
+    opt-out, not a silent zero. A *partial* history is the same error wearing a
+    disguise, so the stored series has to cover the window as well as exist.
     """
     if identity.market_type != "perp":
         return None
 
+    from strategy_lab.backtests.costs import funding_coverage_gaps
     from strategy_lab.db.funding import load_funding
 
     rates = load_funding(
@@ -446,7 +448,28 @@ def _funding_rates(identity: MarketDataIdentity, df):
             f"strategy-lab fetch-funding --symbol {identity.symbol} --since 2019-09-01\n\n"
             "Pass --no-funding to run gross of funding on purpose."
         )
+
+    gaps = funding_coverage_gaps(funding=rates["funding_rate"], index=df.index)
+    if gaps:
+        raise typer.BadParameter(_uncovered_funding(identity, df, gaps))
     return rates["funding_rate"]
+
+
+def _uncovered_funding(identity: MarketDataIdentity, df, gaps) -> str:
+    shown = ", ".join(f"{start} -> {end}" for start, end in gaps[:3])
+    more = f" (+{len(gaps) - 3} more)" if len(gaps) > 3 else ""
+    return (
+        f"Stored funding for {identity.exchange}/perp/{identity.symbol} does not "
+        f"cover {df.index.min()} -> {df.index.max()}.\n\n"
+        f"Uncovered: {shown}{more}\n\n"
+        "Every settlement missing from those stretches is charged as zero, so the "
+        "run would report a net-of-funding number that is gross of carry across "
+        "them. Backfill the range:\n"
+        f"strategy-lab fetch-funding --symbol {identity.symbol} "
+        f"--since {gaps[0][0]:%Y-%m-%d}\n\n"
+        "If the venue genuinely settled nothing there, narrow the run with --start. "
+        "Pass --no-funding to run gross of funding on purpose."
+    )
 
 
 def _echo_costs(result) -> None:

@@ -93,6 +93,28 @@ def test_a_perp_run_charges_funding_by_default(candles, funding, tmp_path):
     assert (report_dir / "funding.csv").exists()
 
 
+def test_a_partial_funding_history_is_refused_by_name(candles, monkeypatch, tmp_path):
+    """One stored settlement satisfies "some funding exists" while charging zero
+    for every other one, so the run would report a net-of-funding number that is
+    almost entirely gross of carry."""
+    index = pd.date_range(
+        candles.index[0], candles.index[-1], freq="8h", tz="UTC", name="timestamp"
+    )
+    stored = pd.DataFrame({"funding_rate": 0.0001}, index=index).iloc[:20]
+    monkeypatch.setattr(cli, "load_candles", lambda **kwargs: candles)
+    monkeypatch.setattr(
+        "strategy_lab.db.funding.load_funding", lambda **kwargs: stored
+    )
+
+    result = _invoke(tmp_path, *_PERP)
+
+    assert result.exit_code == 2, result.output
+    echoed = " ".join(result.output.split())
+    assert "does not cover" in echoed
+    assert "fetch-funding" in echoed
+    assert str(index[19].date()) in echoed
+
+
 def test_no_funding_opts_out_explicitly(candles, funding, tmp_path):
     result = _invoke(tmp_path, *_PERP, "--no-funding")
 
