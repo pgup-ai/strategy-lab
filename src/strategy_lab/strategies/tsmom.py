@@ -24,6 +24,12 @@ class Tsmom:
     warmup_bars: int = 96
     allow_shorts: bool = True
 
+    def __post_init__(self) -> None:
+        # Always recomputed, so a ``warmup_bars=`` passed by a caller is
+        # overwritten: it is a measured consequence of the lookback, not a free
+        # parameter. Left as a field so ``dataclasses.fields`` still reports it.
+        object.__setattr__(self, "warmup_bars", self.lookback)
+
     def generate_signals(self, df: pd.DataFrame) -> SignalSet:
         validate_ohlcv(df)
 

@@ -47,9 +47,11 @@ def sweep_parameters(
     point is the *shape* of the surface, not the exact PnL of any one cell.
     Costs and funding live in the R2 layer, which the single-run backtest uses.
 
-    Every cell is evaluated over the same bar range -- the template's declared
-    ``warmup_bars``, not a per-cell one -- because a surface whose cells cover
-    different samples compares nothing.
+    Every cell is evaluated over the same bar range -- the *deepest* cell's
+    ``warmup_bars``, not the template's -- because a surface whose cells cover
+    different samples compares nothing, and a cell's spans are swept, so the
+    template's warmup can be far too short for the larger cells. The deepest is
+    the only value that is both common to every cell and sufficient for each.
     """
     template = get_strategy(strategy_name)
     valid = {f.name for f in dataclasses.fields(template)}
@@ -60,21 +62,25 @@ def sweep_parameters(
             f"available: {sorted(valid)}"
         )
 
-    warmup = template.warmup_bars
+    names = list(grid)
+    cells = [
+        (params, dataclasses.replace(template, **params))
+        for params in (
+            dict(zip(names, combination))
+            for combination in itertools.product(*(grid[name] for name in names))
+        )
+    ]
+
+    deepest_params, deepest = max(cells, key=lambda cell: cell[1].warmup_bars)
+    warmup = deepest.warmup_bars
     if warmup >= len(df):
         raise ValueError(
-            f"{strategy_name} declares {warmup} warmup bars but the frame has "
-            f"{len(df)}; every cell would score 0.0 and the surface would read "
-            f"as a flat plateau"
+            f"{strategy_name} cell {deepest_params} needs {warmup} warmup bars but "
+            f"the frame has {len(df)}; every cell would score 0.0 and the surface "
+            f"would read as a flat plateau"
         )
 
-    names = list(grid)
-    points: list[SweepPoint] = []
-    for combination in itertools.product(*(grid[name] for name in names)):
-        params = dict(zip(names, combination))
-        strategy = dataclasses.replace(template, **params)
-        points.append(_evaluate(df, strategy, params, warmup, timeframe))
-    return points
+    return [_evaluate(df, strategy, params, warmup, timeframe) for params, strategy in cells]
 
 
 def _evaluate(

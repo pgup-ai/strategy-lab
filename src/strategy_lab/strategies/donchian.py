@@ -25,6 +25,13 @@ class Donchian:
     allow_shorts: bool = True
     warmup_bars: int = 96
 
+    def __post_init__(self) -> None:
+        # Always recomputed, so a ``warmup_bars=`` passed by a caller is
+        # overwritten: it is a measured consequence of the channel spans, not a
+        # free parameter. Left as a field so ``dataclasses.fields`` still
+        # reports it.
+        object.__setattr__(self, "warmup_bars", max(self.entry_span, self.exit_span))
+
     def generate_signals(self, df: pd.DataFrame) -> SignalSet:
         validate_ohlcv(df)
 

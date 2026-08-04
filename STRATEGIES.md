@@ -144,6 +144,13 @@ lookback. `ema_cross` uses `ewm(adjust=False)`, which recurses from bar 0, so it
 is 20× the slow span — see the note in [CLAUDE.md](CLAUDE.md) and
 `tests/test_strategy_metadata.py`.
 
+**And all four *derive* it in `__post_init__` rather than storing a constant**, because
+the spans are swept: `sweep_parameters` rebuilds every cell with `dataclasses.replace`,
+so a warmup frozen at the default under-warms the larger cells. A `warmup_bars=` passed
+to a constructor is overwritten — it is a consequence of the spans, not a free parameter.
+The sweep in turn evaluates every cell at the *deepest* cell's warmup, which is the only
+value that keeps the surface on one sample while leaving each cell converged.
+
 ## tsmom
 
 The single most-documented trend effect in the literature, and the reference floor.
@@ -151,13 +158,14 @@ The single most-documented trend effect in the literature, and the reference flo
 - **Entry**: long while the `lookback`-bar trailing return is positive, short while it is
   negative. A continuous state, not an event — it re-asserts on every bar.
 - **Exits provided**: opposite state only.
-- **Params**: `lookback=96`, `warmup_bars=96`.
+- **Params**: `lookback=96`, `warmup_bars` = `lookback`.
 
 ## ema_cross
 
 - **Entry**: long while EMA(`fast_span`) > EMA(`slow_span`), short while it is below.
 - **Exits provided**: opposite state only.
-- **Params**: `fast_span=48`, `slow_span=192`, `warmup_bars=3840` (= 20 × `slow_span`).
+- **Params**: `fast_span=48`, `slow_span=192`, `warmup_bars` = 20 × `slow_span` (3840 at
+  the default).
 - **Note**: 3840 is not conservatism. At `warmup_bars=192` the span-192 EMA is wrong by up
   to 2.6e-2 *relative* on 299 of 300 probed bars, and the fast-vs-slow comparison still
   comes out identical on all 300 — so the signal-level cold-start test cannot see it.
@@ -173,7 +181,8 @@ rather than round-tripped.
 - **Exits provided**: reverse break of the shorter `exit_span` channel — a separate
   signal rather than the inverse of the entry state, which is what lets the exit be
   faster than the entry.
-- **Params**: `entry_span=96`, `exit_span=48`, `warmup_bars=96`.
+- **Params**: `entry_span=96`, `exit_span=48`, `warmup_bars` = `max(entry_span,
+  exit_span)` — either channel can be the longer one.
 - **Note**: every channel is `.rolling(n).max().shift(1)`. The `shift(1)` is load-bearing
   but *not* a lookahead guard — bar *t*'s own high is known at bar *t*'s close, so the
   poison probe passes without it. What it prevents is degeneracy: `high >= close` within a
@@ -192,7 +201,9 @@ backtests quietly overfit.
   sqrt(lookback))` — each horizon becomes a unit-scale t-statistic under a random walk, so
   neither a noisier regime nor a longer horizon can dominate the blend by raw magnitude.
 - **Exits provided**: opposite state only.
-- **Params**: `lookbacks=(24, 48, 96, 192)`, `entry_threshold=0.0`, `warmup_bars=192`.
+- **Params**: `lookbacks=(24, 48, 96, 192)`, `entry_threshold=0.0`, `warmup_bars` =
+  `max(max(lookbacks), 96)` — the volatility window is a lookback too, and binds whenever
+  every horizon is shorter than it.
 - **Note**: `rolling(...).std()` is not bit-reproducible across a cold start (pandas adds
   and removes observations one at a time, and the removals leave rounding residue).
   Measured at warmup 192 the score differs from the whole-history value on 195/300 bars —

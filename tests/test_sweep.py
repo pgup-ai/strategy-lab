@@ -4,6 +4,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from strategy_lab.backtests import sweep as sweep_module
 from strategy_lab.backtests.sweep import (
     SweepPoint,
     positions_from_signals,
@@ -46,6 +47,66 @@ def test_sweep_refuses_a_frame_that_is_all_warmup():
             grid={"fast_span": [24, 48]},
             timeframe="15m",
         )
+
+
+def test_the_sweep_warms_up_every_cell_for_the_deepest_grid_entry(monkeypatch):
+    """A cell's own span can exceed the template's warmup, and usually does.
+
+    Every cell must still cover the same bars or the surface compares nothing,
+    so there is one warmup for the whole grid -- but taking it from the template
+    picks a value that is too *small* for the larger cells, which is the unsafe
+    direction. The deepest cell's warmup is the only choice that is both common
+    to every cell and sufficient for each.
+    """
+    df = synthetic_ohlcv(n=900)
+    deepest = 600
+    assert get_strategy("tsmom").warmup_bars < deepest < len(df), (
+        "the deep cell must out-warm the template and still fit the frame"
+    )
+
+    alone = sweep_parameters(
+        df=df, strategy_name="tsmom", grid={"lookback": [12]}, timeframe="15m"
+    )[0]
+
+    warmups: list[int] = []
+    evaluate = sweep_module._evaluate
+
+    def record(frame, strategy, params, warmup, timeframe):
+        warmups.append(warmup)
+        return evaluate(frame, strategy, params, warmup, timeframe)
+
+    monkeypatch.setattr(sweep_module, "_evaluate", record)
+    points = sweep_parameters(
+        df=df, strategy_name="tsmom", grid={"lookback": [12, deepest]}, timeframe="15m"
+    )
+
+    assert warmups == [deepest, deepest], (
+        f"cells were evaluated at warmups {warmups}; every cell must use the "
+        f"deepest cell's {deepest}"
+    )
+    shallow = next(p for p in points if p.params["lookback"] == 12)
+    assert shallow.total_return != alone.total_return, (
+        "the shallow cell scored identically with and without a deeper cell "
+        "beside it, so the deepened warmup never reached the returns"
+    )
+
+
+def test_sweep_names_the_cell_whose_warmup_exceeds_the_frame():
+    """The template fits the frame here; only one grid entry blows the budget.
+
+    Reporting the strategy alone would leave the user re-deriving which of a
+    hundred cells was too deep.
+    """
+    with pytest.raises(ValueError, match="warmup") as raised:
+        sweep_parameters(
+            df=synthetic_ohlcv(n=900),
+            strategy_name="donchian",
+            grid={"entry_span": [24, 4000]},
+            timeframe="15m",
+        )
+    assert "4000" in str(raised.value), (
+        f"error does not name the offending cell: {raised.value}"
+    )
 
 
 def _alternating_frame(n: int = 400) -> pd.DataFrame:

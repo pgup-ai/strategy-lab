@@ -35,6 +35,14 @@ class MultiHorizon:
     warmup_bars: int = 192
     entry_threshold: float = 0.0
 
+    def __post_init__(self) -> None:
+        # Always recomputed, so a ``warmup_bars=`` passed by a caller is
+        # overwritten: it is a measured consequence of the windows, not a free
+        # parameter. Left as a field so ``dataclasses.fields`` still reports it.
+        # ``_VOL_SPAN`` is in the max because the volatility denominator is a
+        # lookback too, and binds whenever every horizon is shorter than it.
+        object.__setattr__(self, "warmup_bars", max(max(self.lookbacks), _VOL_SPAN))
+
     def generate_signals(self, df: pd.DataFrame) -> SignalSet:
         validate_ohlcv(df)
 

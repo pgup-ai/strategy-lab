@@ -23,6 +23,13 @@ class EmaCross:
     allow_shorts: bool = True
     warmup_bars: int = _EWM_WARMUP_MULTIPLE * 192
 
+    def __post_init__(self) -> None:
+        # Always recomputed, so a ``warmup_bars=`` passed by a caller is
+        # overwritten: it is a measured consequence of the slow span, not a free
+        # parameter. Left as a field so ``dataclasses.fields`` still reports it.
+        # The slow span binds -- the fast EMA converges strictly sooner.
+        object.__setattr__(self, "warmup_bars", _EWM_WARMUP_MULTIPLE * self.slow_span)
+
     def generate_signals(self, df: pd.DataFrame) -> SignalSet:
         validate_ohlcv(df)
 

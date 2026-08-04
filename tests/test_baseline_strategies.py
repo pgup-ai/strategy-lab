@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import dataclasses
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -44,6 +46,32 @@ def reversal_frame(up_bars: int, down_bars: int = 300) -> pd.DataFrame:
     for column in ("open", "high", "low", "close"):
         down_leg[column] = down_leg[column] * scale
     return pd.concat([up_leg, down_leg])
+
+
+@pytest.mark.parametrize(
+    ("name", "params", "expected"),
+    [
+        ("tsmom", {"lookback": 384}, 384),
+        ("ema_cross", {"slow_span": 384}, 7680),
+        ("donchian", {"entry_span": 384}, 384),
+        # The shorter channel can be the longer one; warmup follows whichever is.
+        ("donchian", {"exit_span": 384}, 384),
+        ("multi_horizon", {"lookbacks": (48, 96, 192, 768)}, 768),
+        # The volatility window is a lookback too, and binds when every horizon
+        # is shorter than it.
+        ("multi_horizon", {"lookbacks": (12, 24)}, 96),
+    ],
+)
+def test_reconfiguring_a_baseline_rederives_its_warmup(name, params, expected):
+    """Warmup is a consequence of the configured spans, so it cannot be a constant.
+
+    ``sweep_parameters`` rebuilds every cell with ``dataclasses.replace`` over the
+    span fields, so a warmup frozen at the default silently under-warms the larger
+    cells. The R0 gate swept ``donchian`` to ``entry_span=384`` against a declared
+    warmup of 96 and scored those cells on a series that had not converged.
+    """
+    reconfigured = dataclasses.replace(get_strategy(name), **params)
+    assert reconfigured.warmup_bars == expected
 
 
 @pytest.mark.parametrize("name", BASELINES)
