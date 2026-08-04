@@ -263,19 +263,36 @@ R0 baselines (verified against the engine on 5,000 synthetic bars, 2026-08-03):
   contains it (Binance stamps settlements up to 47 ms late; an equality match drops 43%
   of them), against the notional held *into* that bar. Cost stress never scales it —
   funding is a market rate, so tripling it models a different instrument.
-  When funding applies, `stats.json` gains `Funding Paid` and `Net Return [%]`,
-  `equity_curve.csv` becomes the net curve, and `funding.csv` is the per-settlement
-  audit trail. When it does not, `stats.json`, `trades.csv` and `equity_curve.csv` are
-  byte-identical to a pre-costs run — but only those three. `costs.json` is always
-  written, `config.json` always carries `cost_model` / `cost_stress` / `funding_applied` /
-  `funding_settlements`, and the report always renders its Costs section.
+- **A partial funding history is refused too**, not just an empty one: the stored series
+  must span the candle window with no gap past 1.5× the contract's own measured cadence.
+  A missing settlement is charged as zero and is indistinguishable from "the venue paid
+  nothing". This bites on real data — BTC/USDT perp klines start `2019-09-08 16:00` but
+  the venue's first funding settlement is `2019-09-10 08:00`, so the canonical 4h run
+  needs `--start "2019-09-10 08:00:00"`.
+- **A funded run's `stats.json` names the curve behind every path statistic.** Funding
+  settles outside `Portfolio.from_signals`, so vectorbt's drawdown and Sharpe describe a
+  book that never paid carry. Each path statistic (total return, end value, max drawdown
+  and its duration, annualized return and volatility, Sharpe, Sortino, Calmar, Omega) is
+  therefore emitted twice — `X (gross of funding)` and `X (net of funding)` — and never
+  bare; `Net Return [%]` is the net total return under its established name, and
+  `Funding Paid` is the total. Trade statistics are unsplit: funding is carry on the
+  book, not a cost attributable to any trade. `equity_curve.csv` is the net curve and
+  `funding.csv` is the per-settlement audit trail. When funding does *not* apply,
+  `stats.json`, `trades.csv` and `equity_curve.csv` are byte-identical to a pre-costs
+  run — but only those three. `costs.json` is always written, `config.json` always
+  carries `cost_model` / `cost_stress` / `funding_applied` / `funding_settlements`, and
+  the report always renders its Costs section.
 - **Sizing is non-compounding**: entry shares = initial cash × `position_pct` × scale ÷
   close. Sizes are anchored to *initial* cash, never to current equity.
 - **`--size-mode` chooses where that scale comes from.** `fixed` (default) uses whatever
   the strategy supplied, and is bit-for-bit the pre-sizing behaviour. `vol-target` sets it
   to `--vol-target ÷ realized volatility`, clipped to `[0, --max-weight]`, so *risk* rather
-  than notional is what stays constant. Two things to know before reading a `vol-target`
-  run: the estimator is an EWM (span 96) that decays its seed rather than dropping it, so
+  than notional is what stays constant. `--max-weight` is further clipped to
+  `1 ÷ --position-pct` — an entry is sized as `cash × position_pct × weight` and the book
+  has no leverage, so anything above that cannot be filled — with a warning naming both
+  numbers and `max_weight_effective` in `config.json`. At the default 95% deployment the
+  advertised `--max-weight 2.0` is really **1.053**. Two more things to know before reading a
+  `vol-target` run: the estimator is an EWM (span 96) that decays its seed rather than dropping it, so
   weights need roughly **20× span ≈ 1,900 bars** to converge and a shorter frame quietly
   under-trades its early bars; and volatility is annualized from *calendar* bars per
   timeframe, which is exact for 24/7 crypto and overstates the bar count (so understates
@@ -292,7 +309,11 @@ R0 baselines (verified against the engine on 5,000 synthetic bars, 2026-08-03):
   with `config.json` (full parameter snapshot), `stats.json`, `trades.csv`,
   `equity_curve.csv`, `costs.json`, `plot.html`, plus `funding.csv` when funding
   applies. `config.json` is the reproducibility boundary; `costs.json` is the
-  gross → fees → slippage → funding → net breakdown at every stress level.
+  gross → fees → slippage → funding → size effect → net breakdown at every stress level.
+  **Gross is a second simulation priced at zero**, not net with the costs added back:
+  worse fills buy less size in a cash-constrained book, so the two differ. `size_effect`
+  is the P&L the shrunken book never earned — the term that closes the waterfall — and
+  gross is identical across stress levels because scaling a zero rate changes nothing.
 
 ## Known issues (review of 2026-08-02)
 
