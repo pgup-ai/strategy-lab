@@ -268,6 +268,18 @@ R0 baselines (verified against the engine on 5,000 synthetic bars, 2026-08-03):
   audit trail. When it does not, every artifact is byte-identical to a pre-costs run.
 - **Sizing is non-compounding**: entry shares = initial cash × `position_pct` × scale ÷
   close. Sizes are anchored to *initial* cash, never to current equity.
+- **`--size-mode` chooses where that scale comes from.** `fixed` (default) uses whatever
+  the strategy supplied, and is bit-for-bit the pre-sizing behaviour. `vol-target` sets it
+  to `--vol-target ÷ realized volatility`, clipped to `[0, --max-weight]`, so *risk* rather
+  than notional is what stays constant. Two things to know before reading a `vol-target`
+  run: the estimator is an EWM (span 96) that decays its seed rather than dropping it, so
+  weights need roughly **20× span ≈ 1,900 bars** to converge and a shorter frame quietly
+  under-trades its early bars; and volatility is annualized from *calendar* bars per
+  timeframe, which is exact for 24/7 crypto and overstates the bar count (so understates
+  the weight) on an instrument that closes. Combining it with a strategy that already sets
+  `position_size` — only `trend_rider_v1_deepseek_v4_pro` — is **rejected**, not stacked:
+  its ATR scale is itself an inverse-vol weight, so multiplying would size on `1/vol²` and
+  hold neither target.
 - **Data**: Yahoo OHLC is rescaled by adj close, so ETF series are dividend-adjusted
   (total-return-like). Crypto candles are raw exchange OHLCV.
 - **Timeframe strings are identity**: candles are keyed by the literal timeframe string —

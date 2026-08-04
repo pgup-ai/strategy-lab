@@ -4,7 +4,7 @@ import json
 import math
 import re
 from collections.abc import Sequence
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from datetime import UTC, datetime
 from enum import Enum
 from pathlib import Path
@@ -15,9 +15,14 @@ import pandas as pd
 
 from strategy_lab.backtests.costs import CostModel, apply_funding, funding_ledger
 from strategy_lab.backtests.report import render_report_html
+from strategy_lab.backtests.sizing import (
+    DEFAULT_VOL_SPAN,
+    SizeMode,
+    volatility_target_weights,
+)
 from strategy_lab.market_data.base import MarketDataIdentity
 from strategy_lab.strategies.base import SignalSet, Strategy
-from strategy_lab.timeframes import timeframe_to_pandas_freq
+from strategy_lab.timeframes import timeframe_to_bars_per_year, timeframe_to_pandas_freq
 
 
 class ExitMode(str, Enum):
@@ -54,6 +59,10 @@ def run_backtest(
     cost_model: CostModel | None = None,
     funding: pd.Series | None = None,
     cost_stress: Sequence[float] = (1.0,),
+    size_mode: SizeMode | str = SizeMode.FIXED,
+    vol_target: float = 0.30,
+    max_weight: float = 2.0,
+    vol_span: int = DEFAULT_VOL_SPAN,
 ) -> BacktestResult:
     """Simulate ``strategy`` over ``df`` and write one run's artifacts.
 
@@ -70,6 +79,11 @@ def run_backtest(
     ``cost_stress`` lists the fee/slippage multiples to compare. 1.0 is always
     present and is the headline run. Funding is never stressed: it is a market
     rate, so tripling it models a different instrument rather than a worse fill.
+
+    ``size_mode`` selects between fixed-fractional entries and volatility
+    targeting; ``vol_target``, ``max_weight`` and ``vol_span`` configure the
+    latter and are ignored under ``fixed``, which is bit-for-bit the behaviour
+    that predates them.
     """
     try:
         import vectorbt as vbt
@@ -82,6 +96,17 @@ def run_backtest(
     df = df.sort_index()
     signals = strategy.generate_signals(df)
     exit_mode = ExitMode(exit_mode)
+    size_mode = SizeMode(size_mode)
+    signals = _volatility_targeted(
+        signals,
+        df=df,
+        strategy=strategy,
+        timeframe=identity.timeframe,
+        size_mode=size_mode,
+        vol_target=vol_target,
+        max_weight=max_weight,
+        vol_span=vol_span,
+    )
     long_exits, short_exits = _exit_signals(
         df=df,
         signals=signals,
@@ -155,6 +180,14 @@ def run_backtest(
         "exit_mode": exit_mode.value,
         "failure_bars": failure_bars,
         "position_pct": position_pct,
+        "size_mode": size_mode.value,
+        **_sizing_config(
+            size_mode,
+            timeframe=identity.timeframe,
+            vol_target=vol_target,
+            max_weight=max_weight,
+            vol_span=vol_span,
+        ),
         "cost_model": asdict(model),
         "cost_stress": list(multiples),
         "funding_applied": funding_applied,
@@ -212,6 +245,68 @@ def run_backtest(
         costs_path=costs_path,
         funding_path=funding_path,
     )
+
+
+def _volatility_targeted(
+    signals: SignalSet,
+    *,
+    df: pd.DataFrame,
+    strategy: Strategy,
+    timeframe: str,
+    size_mode: SizeMode,
+    vol_target: float,
+    max_weight: float,
+    vol_span: int,
+) -> SignalSet:
+    """``signals`` with ``position_size`` replaced by volatility-target weights.
+
+    A strategy that already ships a ``position_size`` is refused rather than
+    overridden or multiplied. ``trend_rider_v1_deepseek_v4_pro`` is the case
+    that exists: its scale is ``0.06 / (ATR/close)``, itself an inverse-vol
+    weight, so multiplying the two would size on ``1 / vol**2`` and land nowhere
+    near ``vol_target`` -- the run would still be labelled as targeting 30% while
+    holding neither 30% nor anything stable. Overriding instead would silently
+    delete a documented part of the strategy. Neither failure is visible in the
+    artifacts, so the combination is rejected at the boundary.
+    """
+    if size_mode is SizeMode.FIXED:
+        return signals
+    if signals.position_size is not None:
+        raise ValueError(
+            f"{strategy.name} already sizes its own positions, and stacking "
+            f"volatility targeting on top targets neither its scale nor "
+            f"{vol_target:.0%} annualized volatility. Run it with "
+            f"--size-mode fixed, or vol-target a strategy that leaves sizing to "
+            f"the engine."
+        )
+
+    weights = volatility_target_weights(
+        df["close"].pct_change(),
+        target_annual_vol=vol_target,
+        bars_per_year=timeframe_to_bars_per_year(timeframe),
+        span=vol_span,
+        max_weight=max_weight,
+    )
+    return replace(signals, position_size=weights)
+
+
+def _sizing_config(
+    size_mode: SizeMode,
+    *,
+    timeframe: str,
+    vol_target: float,
+    max_weight: float,
+    vol_span: int,
+) -> dict[str, Any]:
+    """The vol-target settings, recorded only on runs that actually used them."""
+    if size_mode is SizeMode.FIXED:
+        return {}
+    return {
+        "vol_target": vol_target,
+        "max_weight": max_weight,
+        "vol_span": vol_span,
+        "bars_per_year": timeframe_to_bars_per_year(timeframe),
+    }
 
 
 def _stress_multiples(cost_stress: Sequence[float]) -> list[float]:

@@ -14,8 +14,24 @@ either layer having to know about the other.
 
 from __future__ import annotations
 
+from enum import Enum
+
 import numpy as np
 import pandas as pd
+
+DEFAULT_VOL_SPAN = 96
+
+
+class SizeMode(str, Enum):
+    """How the engine turns ``position_pct`` into a per-entry size.
+
+    ``FIXED`` is the historical behaviour and leaves the strategy's own scale
+    (if any) untouched. ``VOL_TARGET`` replaces it with
+    :func:`volatility_target_weights`.
+    """
+
+    FIXED = "fixed"
+    VOL_TARGET = "vol-target"
 
 
 def realized_volatility(
@@ -49,7 +65,7 @@ def volatility_target_weights(
     *,
     target_annual_vol: float,
     bars_per_year: float,
-    span: int = 96,
+    span: int = DEFAULT_VOL_SPAN,
     max_weight: float = 2.0,
 ) -> pd.Series:
     """Per-bar size multiplier that holds annualized risk at ``target_annual_vol``.
@@ -75,4 +91,9 @@ def volatility_target_weights(
     return weights.replace([np.inf, -np.inf], np.nan).fillna(0.0).clip(0.0, max_weight)
 
 
-__all__ = ["realized_volatility", "volatility_target_weights"]
+__all__ = [
+    "DEFAULT_VOL_SPAN",
+    "SizeMode",
+    "realized_volatility",
+    "volatility_target_weights",
+]

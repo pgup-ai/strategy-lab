@@ -109,6 +109,32 @@ def test_an_equity_run_needs_no_funding_and_applies_none(candles, tmp_path):
     assert _costs(tmp_path)["funding_applied"] is False
 
 
+def test_size_mode_reaches_the_engine_and_is_recorded(candles, funding, tmp_path):
+    result = _invoke(tmp_path, *_PERP, "--size-mode", "vol-target", "--vol-target", "0.4")
+
+    assert result.exit_code == 0, result.output
+    [report_dir] = list(tmp_path.iterdir())
+    config = json.loads((report_dir / "config.json").read_text())
+    assert config["size_mode"] == "vol-target"
+    assert config["vol_target"] == 0.4
+
+
+def test_vol_targeting_a_self_sizing_strategy_exits_cleanly(candles, funding, tmp_path):
+    """An incompatible pair of flags is user error, and must not surface as a traceback."""
+    result = runner.invoke(
+        cli.app,
+        [
+            "backtest", "--report-root", str(tmp_path), "--timeframe", "4h",
+            "--strategy", "trend_rider_v1_deepseek_v4_pro",
+            "--exit-mode", "opposite_signal_only", "--size-mode", "vol-target", *_PERP,
+        ],
+    )
+
+    assert result.exit_code == 2, result.output
+    assert "--size-mode fixed" in result.output
+    assert result.exception is None or isinstance(result.exception, SystemExit)
+
+
 def test_a_perp_run_with_no_stored_funding_stops_rather_than_reporting_gross(
     candles, monkeypatch, tmp_path
 ):

@@ -7,7 +7,7 @@ from pathlib import Path
 
 import typer
 
-from strategy_lab.backtests import ExitMode, run_backtest
+from strategy_lab.backtests import ExitMode, SizeMode, run_backtest
 from strategy_lab.db import init_db, list_candle_sets, load_candles, upsert_candles
 from strategy_lab.db.candles import normalize_candle_frame
 from strategy_lab.market_data.base import MarketDataIdentity
@@ -319,6 +319,29 @@ def backtest(
         max=1.0,
         help="Fraction of capital deployed per trade.",
     ),
+    size_mode: SizeMode = typer.Option(
+        SizeMode.FIXED,
+        "--size-mode",
+        help=(
+            "fixed deploys --position-pct on every entry. vol-target scales it by "
+            "target / realized volatility, so risk rather than notional is what stays "
+            "constant. The estimator is an EWM (span 96) that decays its seed instead "
+            "of dropping it, so weights need roughly 20x span -- about 1,900 bars -- to "
+            "converge; a shorter frame under-trades its early bars rather than erroring."
+        ),
+    ),
+    vol_target: float = typer.Option(
+        0.30,
+        "--vol-target",
+        min=0.0001,
+        help="Annualized volatility to hold under --size-mode vol-target.",
+    ),
+    max_weight: float = typer.Option(
+        2.0,
+        "--max-weight",
+        min=0.0001,
+        help="Cap on the vol-target size multiplier, so a calm stretch cannot lever up.",
+    ),
     cost_stress: str = typer.Option(
         "1",
         "--cost-stress",
@@ -352,20 +375,28 @@ def backtest(
         if df.empty:
             _raise_missing_candles(identity)
         rates = _funding_rates(identity, df) if funding else None
-        result = run_backtest(
-            df=df,
-            strategy=strategy,
-            identity=identity,
-            fees=fees,
-            slippage=slippage,
-            cash=cash,
-            exit_mode=exit_mode,
-            failure_bars=failure_bars,
-            position_pct=position_pct,
-            report_root=report_root,
-            funding=rates,
-            cost_stress=multiples,
-        )
+        try:
+            result = run_backtest(
+                df=df,
+                strategy=strategy,
+                identity=identity,
+                fees=fees,
+                slippage=slippage,
+                cash=cash,
+                exit_mode=exit_mode,
+                failure_bars=failure_bars,
+                position_pct=position_pct,
+                report_root=report_root,
+                funding=rates,
+                cost_stress=multiples,
+                size_mode=size_mode,
+                vol_target=vol_target,
+                max_weight=max_weight,
+            )
+        except ValueError as exc:
+            # Incompatible flag combinations (sizing collisions, exit modes a
+            # strategy cannot serve) are user input, not a crash.
+            raise typer.BadParameter(str(exc)) from exc
         typer.echo(f"Wrote report for {symbol}: {result.report_dir}")
         _echo_costs(result)
 
