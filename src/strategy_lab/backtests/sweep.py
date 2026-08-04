@@ -130,37 +130,103 @@ def _evaluate(
 def positions_from_signals(signals: SignalSet) -> pd.Series:
     """Net position in {-1, 0, +1}, one bar behind the signal that produced it.
 
-    Two independent books summed, exactly as the engine's ``from_signals`` call
-    treats ``entries``/``exits`` against ``short_entries``/``short_exits``.
-    Deriving the position from entries alone makes every exit ingredient
-    invisible: measured on 83,348 BTC 15m bars, all four donchian ``exit_span``
-    values then scored bit-identically -- a whole grid axis reporting "this
-    parameter does not matter" when what did not matter was the sweep.
+    **One net position, resolved the way the engine resolves it** -- not two
+    independent books summed. The books were the earlier model and they disagree
+    with ``vbt.Portfolio.from_signals`` on exactly one event, reversal: when an
+    opposite entry fires before the same-side exit does, the engine reverses
+    (``upon_opposite_entry`` defaults to ``ReverseReduce``, and with
+    ``accumulate=False`` that lands in ``signals_to_size_nb``'s "reverse the
+    position" branch) while two books cancel to flat -- and then stay wrong,
+    because the stale side keeps its holding until its own exit finally arrives.
+    ``donchian`` with ``exit_span > entry_span`` produces that event on live
+    data: the exit channel is the wider one, so ``close < entry_low`` fires
+    before ``close < exit_low``. Three cells of the published R0 grid are in
+    that configuration.
+
+    The resolution order below is vectorbt's own, read off
+    ``portfolio/nb.py`` under this repo's settings (``accumulate=False``, all
+    three conflict modes ``ignore``, ``upon_opposite_entry=ReverseReduce``):
+
+    1. An entry and an exit on the *same* side cancel each other; so do a long
+       entry and a short entry. ``ConflictMode.Ignore`` drops **both** signals,
+       so neither "entry wins" nor "exit wins" -- the bar does nothing.
+    2. From a long, a short entry outranks a long exit (reverse, not close);
+       from a short, a long entry outranks a short exit. A same-side entry while
+       already in that direction is a no-op, because ``accumulate=False``.
+
+    vectorbt guards step 1 with ``if is_long_entry or is_short_entry``. That
+    guard is not reproduced because it is provably inert -- every branch inside
+    it already requires an entry -- and a mutation test confirmed it: adding it
+    kills no mutant, so it would be untestable code.
+
+    Deriving the position from entries alone would instead make every exit
+    ingredient invisible: measured on 83,348 BTC 15m bars, all four donchian
+    ``exit_span`` values then scored bit-identically -- a whole grid axis
+    reporting "this parameter does not matter" when what did not matter was the
+    sweep.
 
     Shifted one bar because a signal computed from bar *t*'s close can only be
     traded from bar *t + 1*. Without the shift the sweep reports lookahead
     returns and every number on the surface is fiction.
     """
-    position = _book(signals.long_entries, signals.long_exits, 1.0) + _book(
-        signals.short_entries, signals.short_exits, -1.0
+    held = _net_position(
+        signals.long_entries.to_numpy(dtype=bool),
+        signals.long_exits.to_numpy(dtype=bool),
+        signals.short_entries.to_numpy(dtype=bool),
+        signals.short_exits.to_numpy(dtype=bool),
     )
+    position = pd.Series(held, index=signals.long_entries.index, dtype="float64")
     return position.shift(1).fillna(0.0)
 
 
-def _book(entries: pd.Series, exits: pd.Series, held: float) -> pd.Series:
-    """One side's book: open on an entry, flatten on an exit, else hold.
+def _net_position(
+    long_entries: np.ndarray,
+    long_exits: np.ndarray,
+    short_entries: np.ndarray,
+    short_exits: np.ndarray,
+) -> np.ndarray:
+    """The state machine itself: one position, updated bar by bar.
 
-    Kept per side because an exit only speaks for its own side -- a long exit
-    must not flatten an open short. Entries are written after exits so an entry
-    wins a same-bar conflict: an entry states a direction, an exit only says the
-    previous one has expired. No registered strategy can produce that conflict
-    today, so both properties are pinned by unit test rather than by any live
-    surface.
+    Sequential rather than vectorized because the outcome of a bar depends on
+    the position carried into it -- a short entry reverses a long but opens a
+    short from flat, and those are different states, not different signals.
     """
-    book = pd.Series(np.nan, index=entries.index, dtype="float64")
-    book[exits] = 0.0
-    book[entries] = held
-    return book.ffill().fillna(0.0)
+    held = np.zeros(len(long_entries), dtype="float64")
+    position = 0.0
+    for i, (long_entry, long_exit, short_entry, short_exit) in enumerate(
+        zip(
+            long_entries.tolist(),
+            long_exits.tolist(),
+            short_entries.tolist(),
+            short_exits.tolist(),
+            strict=True,
+        )
+    ):
+        if long_entry and long_exit:
+            long_entry = long_exit = False
+        if short_entry and short_exit:
+            short_entry = short_exit = False
+        if long_entry and short_entry:
+            long_entry = short_entry = False
+
+        if position > 0:
+            if short_entry:
+                position = -1.0
+            elif long_exit:
+                position = 0.0
+        elif position < 0:
+            if long_entry:
+                position = 1.0
+            elif short_exit:
+                position = 0.0
+        else:
+            if long_entry:
+                position = 1.0
+            elif short_entry:
+                position = -1.0
+
+        held[i] = position
+    return held
 
 
 def stability_score(points: list[SweepPoint]) -> float:

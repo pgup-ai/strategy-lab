@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import dataclasses
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -243,13 +245,13 @@ def _signals(*, long_entries, long_exits, short_entries, short_exits) -> SignalS
 
 
 def test_an_exit_only_flattens_its_own_side():
-    """A long exit must not close an open short, or the two books contaminate.
+    """A long exit must not close an open short.
 
     Unreachable through any registered strategy -- ``tsmom`` and friends fire
-    ``long_exits`` on exactly the bars they enter short, so an entry immediately
-    overwrites the erroneous flatten, and ``donchian`` re-asserts its short on
-    almost every such bar. Left to a live surface this would be a near-equivalent
-    mutant that no test could kill, so it is pinned here instead.
+    ``long_exits`` on exactly the bars they enter short, so a reversal
+    immediately supersedes the erroneous flatten, and ``donchian`` re-asserts
+    its short on almost every such bar. Left to a live surface this would be a
+    near-equivalent mutant that no test could kill, so it is pinned here.
     """
     position = positions_from_signals(
         _signals(
@@ -260,12 +262,43 @@ def test_an_exit_only_flattens_its_own_side():
         )
     )
     assert list(position) == [0.0, -1.0, -1.0, -1.0], (
-        "a long exit closed an open short; the books are not independent"
+        "a long exit closed an open short; an exit spoke for the other side"
     )
 
 
-def test_an_entry_wins_a_same_bar_conflict_with_its_own_exit():
-    """An entry states a direction; an exit only says the previous one expired."""
+def test_an_opposite_entry_reverses_rather_than_flattening():
+    """The whole reason the sweep models one net position instead of two books.
+
+    ``donchian`` with ``exit_span > entry_span`` produces exactly this bar on
+    live data -- the exit channel is the wider one, so ``close < entry_low``
+    fires before ``close < exit_low`` -- and three cells of the published R0
+    grid are in that configuration. Two summed books cancel here and read flat,
+    then stay wrong until the stale long exit finally arrives; the engine
+    reverses on the bar itself.
+    """
+    position = positions_from_signals(
+        _signals(
+            long_entries=[1, 0, 0, 0],
+            long_exits=[0, 0, 0, 1],  # the long's own exit, four bars too late
+            short_entries=[0, 1, 0, 0],
+            short_exits=[0, 0, 0, 0],
+        )
+    )
+    assert list(position) == [0.0, 1.0, -1.0, -1.0], (
+        "the opposite entry did not reverse the long; the sweep scored flat "
+        "where the engine holds a short"
+    )
+
+
+def test_a_same_bar_entry_and_exit_cancel_each_other():
+    """Neither wins: vectorbt's ``ConflictMode.Ignore`` drops *both* signals.
+
+    This is a pinned reading of the engine rather than a preference. It is
+    ``resolve_signal_conflict_nb``'s fall-through branch, reached because
+    ``upon_long_conflict``/``upon_short_conflict`` both default to ``ignore``,
+    and it is what ``test_the_sweep_position_matches_the_engine`` measures
+    against a live ``Portfolio.from_signals``.
+    """
     position = positions_from_signals(
         _signals(
             long_entries=[1, 0, 0],
@@ -274,18 +307,114 @@ def test_an_entry_wins_a_same_bar_conflict_with_its_own_exit():
             short_exits=[0, 0, 0],
         )
     )
-    assert list(position) == [0.0, 1.0, 1.0], (
-        "the same-bar exit won over the entry, so the long never opened"
+    assert list(position) == [0.0, 0.0, 0.0], (
+        "a bar carrying both a long entry and a long exit moved the position; "
+        "the engine ignores both signals on that bar"
     )
 
 
-def test_a_position_is_never_leveraged_by_the_two_books():
-    """Summing the books must stay in {-1, 0, +1} for every registered baseline."""
+def test_a_position_is_never_leveraged():
+    """The net position must stay in {-1, 0, +1} for every registered baseline."""
     df = synthetic_ohlcv(n=900)
     for name in ("tsmom", "ema_cross", "donchian", "multi_horizon"):
         position = positions_from_signals(get_strategy(name).generate_signals(df))
         assert set(position.unique()).issubset({-1.0, 0.0, 1.0}), (
             f"{name} produced positions {sorted(set(position.unique()))}"
+        )
+
+
+def _engine_position(signals: SignalSet, close: pd.Series) -> pd.Series:
+    """The direction ``vbt.Portfolio.from_signals`` actually holds, bar by bar.
+
+    Constant unit size and cash far beyond any reachable notional, so no fill is
+    ever partial and the comparison is about signal resolution and nothing else.
+    ``assets()`` at bar *t* is the position opened by bar *t*'s fill and
+    therefore held over bar *t + 1*, which is the same one-bar shift
+    ``positions_from_signals`` applies.
+    """
+    import vectorbt as vbt
+
+    pf = vbt.Portfolio.from_signals(
+        close=close,
+        entries=signals.long_entries,
+        exits=signals.long_exits,
+        short_entries=signals.short_entries,
+        short_exits=signals.short_exits,
+        size=1.0,
+        init_cash=1_000_000.0,
+        fees=0.0,
+        slippage=0.0,
+        freq="15min",
+    )
+    return np.sign(pf.assets()).shift(1).fillna(0.0)
+
+
+def test_the_sweep_position_matches_the_engine():
+    """The sweep and the engine must agree on *what is held*, or the surface lies.
+
+    The sweep is deliberately vectorbt-free, which is exactly why this has to be
+    measured rather than reasoned about: nothing else in the module would notice
+    the two drifting apart. All four channels fire independently here, at rates
+    that make reversals, same-side conflicts and direction conflicts all common
+    -- no registered strategy produces that mixture, and the defect this replaced
+    was invisible on the strategies that do.
+
+    The two-summed-books model this replaced disagrees with the engine on
+    **6,410 of these 16,000 bars (40.1%)**.
+    """
+    rng = np.random.default_rng(7)
+    n = 400
+    index = pd.date_range("2024-01-01", periods=n, freq="15min", tz="UTC", name="timestamp")
+    close = pd.Series(100.0 + np.cumsum(rng.normal(0.0, 0.5, n)), index=index)
+
+    reversals = 0
+    for _ in range(40):
+        signals = SignalSet(
+            *(
+                pd.Series(rng.random(n) < rate, index=index, dtype=bool)
+                for rate in rng.uniform(0.05, 0.4, 4)
+            )
+        )
+        ours = positions_from_signals(signals)
+        theirs = _engine_position(signals, close)
+        mismatched = int((ours != theirs).sum())
+        assert mismatched == 0, (
+            f"the sweep's position differs from the engine's on {mismatched} of "
+            f"{n} bars, first at {int(np.flatnonzero((ours != theirs).to_numpy())[0])}"
+        )
+        reversals += int(((ours.shift(1) * ours) < 0).sum())
+
+    assert reversals > 100, (
+        f"only {reversals} reversals across the sample; the case the two models "
+        f"disagree on is barely exercised and the comparison proves little"
+    )
+
+
+def test_the_sweep_matches_the_engine_on_the_grid_cells_that_reverse():
+    """The three published R0 cells where ``exit_span > entry_span``.
+
+    On those the exit channel is wider than the entry channel, so a short entry
+    fires strictly before the long exit that would otherwise have closed the
+    position -- the live configuration that made the two-book model score flat
+    where the engine is short.
+    """
+    df = synthetic_ohlcv(n=900)
+    for entry_span, exit_span in ((20, 40), (20, 80), (40, 80)):
+        strategy = dataclasses.replace(
+            get_strategy("donchian"), entry_span=entry_span, exit_span=exit_span
+        )
+        signals = strategy.generate_signals(df)
+        ours = positions_from_signals(signals)
+        theirs = _engine_position(signals, df["close"])
+
+        reversals = int(((ours.shift(1) * ours) < 0).sum())
+        assert reversals > 0, (
+            f"donchian {entry_span}/{exit_span} never reversed on this frame, so "
+            f"it does not exercise the disagreement it was chosen for"
+        )
+        assert int((ours != theirs).sum()) == 0, (
+            f"donchian {entry_span}/{exit_span}: the sweep's position differs "
+            f"from the engine's on {int((ours != theirs).sum())} of {len(df)} bars"
         )
 
 
