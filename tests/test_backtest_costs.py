@@ -182,16 +182,39 @@ def test_the_base_run_is_in_the_table_even_when_not_asked_for(tmp_path):
     assert sorted(stress) == [1.0, 3.0]
 
 
-def test_gross_minus_the_three_costs_equals_net(tmp_path):
-    """Sizing is non-compounding, so every cost is a flat cash deduction and the
-    report's waterfall is an identity rather than an estimate."""
+def test_the_waterfall_closes_on_a_simulated_gross(tmp_path):
+    """Gross is a costless re-simulation, so the gap to net is the three costs
+    plus the P&L the shrunken book never earned. Naming that remainder is what
+    keeps the waterfall an identity."""
     result = _run(tmp_path, funding=_funding(_frame()))
     row, cash = _stress(result)[1.0], _config(result)["cash"]
-    deducted = row["fees_paid"] + row["slippage_paid"] + row["funding_paid"]
+    deducted = (
+        row["fees_paid"] + row["slippage_paid"] + row["funding_paid"] + row["size_effect"]
+    )
     assert row["gross_return_pct"] - row["net_return_pct"] == pytest.approx(
         deducted / cash * 100
     )
-    assert deducted > 0
+    assert row["fees_paid"] + row["slippage_paid"] + row["funding_paid"] > 0
+
+
+def test_gross_is_simulated_rather_than_added_back(tmp_path):
+    """Adding the costs back onto net cannot recover a costless book: at 95%
+    deployment worse fills buy less, so the cost-bearing run holds a smaller
+    position and earns less than the fee it paid. That gap is `size_effect`,
+    and it is zero only when there is cash to spare."""
+    constrained = _stress(_run(tmp_path / "a", position_pct=0.95))[1.0]
+    roomy = _stress(_run(tmp_path / "b", position_pct=0.4))[1.0]
+    assert abs(constrained["size_effect"]) > 1.0
+    assert roomy["size_effect"] == pytest.approx(0.0, abs=1e-6)
+
+
+def test_stressing_costs_does_not_move_the_gross_figure(tmp_path):
+    """One costless simulation serves every row -- scaling a zero rate changes
+    nothing -- so a moving gross column would mean gross was reconstructed from
+    the cost-bearing book again."""
+    stress = _stress(_run(tmp_path, cost_stress=(1.0, 3.0)))
+    assert stress[3.0]["gross_return_pct"] == stress[1.0]["gross_return_pct"]
+    assert stress[3.0]["net_return_pct"] < stress[1.0]["net_return_pct"]
 
 
 def test_funding_is_charged_on_the_position_held_into_the_bar():

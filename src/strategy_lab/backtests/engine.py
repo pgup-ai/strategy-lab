@@ -25,6 +25,9 @@ from strategy_lab.strategies.base import SignalSet, Strategy
 from strategy_lab.timeframes import timeframe_to_bars_per_year, timeframe_to_pandas_freq
 
 
+_COSTLESS = CostModel(fee=0.0, slippage=0.0)
+
+
 class ExitMode(str, Enum):
     CONTINUATION_FAILURE = "continuation_failure"
     OPPOSITE_SIGNAL_ONLY = "opposite_signal_only"
@@ -144,6 +147,11 @@ def run_backtest(
 
     portfolios = {multiple: _simulate(model.stressed(multiple)) for multiple in multiples}
     pf = portfolios[1.0]
+    # One costless simulation serves every stress row -- scaling a rate that is
+    # already zero changes nothing -- and a run priced at zero already is its
+    # own gross, so the second portfolio is built only when it can differ.
+    costless = pf if model == _COSTLESS else _simulate(_COSTLESS)
+    gross_final = float(costless.value().iloc[-1])
 
     flows = {
         multiple: _funding_flow(portfolio, df, funding)
@@ -156,6 +164,7 @@ def run_backtest(
             flow=flows[multiple],
             costs=model.stressed(multiple),
             cash=cash,
+            gross_final=gross_final,
         )
         for multiple in multiples
     ]
@@ -430,19 +439,23 @@ def _cost_breakdown(
     flow: pd.Series,
     costs: CostModel,
     cash: float,
+    gross_final: float,
 ) -> dict[str, float]:
     """What the run earned before costs, what each cost took, and what is left.
 
-    Sizing is non-compounding -- entries are sized from *initial* cash, never
-    from current equity -- so every cost is a flat cash deduction and gross is
-    exactly net plus the three costs back. That identity is what makes this a
-    reconciliation rather than an estimate.
+    ``gross_final`` comes from a *second simulation* priced at zero, not from
+    adding the costs back onto net. The two differ whenever a cost changed a
+    fill: at 95% deployment there is not enough cash to buy the same size at a
+    worse price, so the cost-bearing book holds less and its P&L is scaled down
+    on top of the fee it paid. ``size_effect`` is exactly that remainder -- a
+    drag on a profitable run, a credit on a losing one -- and naming it keeps
+    the waterfall an identity rather than an approximation that quietly absorbs
+    the difference into the gross figure.
     """
     fees_paid = float(pf.stats()["Total Fees Paid"])
     slippage_paid = _slippage_paid(pf, costs.slippage)
     funding_paid = float(-flow.sum())
     net_final = float(pf.value().iloc[-1]) + float(flow.sum())
-    gross_final = net_final + fees_paid + slippage_paid + funding_paid
     return {
         "multiple": multiple,
         "fee_rate": costs.fee,
@@ -451,6 +464,7 @@ def _cost_breakdown(
         "fees_paid": fees_paid,
         "slippage_paid": slippage_paid,
         "funding_paid": funding_paid,
+        "size_effect": gross_final - net_final - fees_paid - slippage_paid - funding_paid,
         "net_return_pct": (net_final / cash - 1.0) * 100.0,
         "net_final_equity": net_final,
     }

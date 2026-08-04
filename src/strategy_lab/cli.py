@@ -452,6 +452,7 @@ def _echo_costs(result) -> None:
         f"  gross {base['gross_return_pct']:+.2f}%  "
         f"fees {base['fees_paid']:,.2f}  slippage {base['slippage_paid']:,.2f}  "
         f"funding {base['funding_paid']:,.2f}  "
+        f"size effect {base['size_effect']:,.2f}  "
         f"net {base['net_return_pct']:+.2f}%"
     )
     for row in breakdown["stress"]:

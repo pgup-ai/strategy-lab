@@ -99,7 +99,9 @@ def _cost_flow(base: dict, funding_applied: bool) -> str:
 
     Funding gets the emphasised chip because it is the cost that decides whether
     a perp result is tradeable, and the one a reader is most likely to skip past
-    on the way to the headline return.
+    on the way to the headline return. Size effect is the P&L the cost-bearing
+    book never earned because worse fills bought less of it -- the term that
+    makes gross a simulation rather than an addition.
     """
     funding_paid = float(base["funding_paid"])
     funding_label = "Funding Received" if funding_paid < 0 else "Funding Paid"
@@ -118,6 +120,8 @@ def _cost_flow(base: dict, funding_applied: bool) -> str:
         _cost_chip("Slippage", _fmt_money(float(base["slippage_paid"]))),
         '<span class="op">&minus;</span>',
         _cost_chip(funding_label, funding_text, funding_cls, extra=" key"),
+        '<span class="op">&minus;</span>',
+        _cost_chip("Size Effect", _fmt_money(float(base["size_effect"]))),
         '<span class="op">=</span>',
         _cost_chip(
             "Net Return",
@@ -142,6 +146,7 @@ def _stress_rows(stress: list[dict], funding_applied: bool) -> str:
             f"<td>{escape(_fmt_money(float(row['fees_paid'])))}</td>"
             f"<td>{escape(_fmt_money(float(row['slippage_paid'])))}</td>"
             f"<td>{escape(funding)}</td>"
+            f"<td>{escape(_fmt_money(float(row['size_effect'])))}</td>"
             f'<td class="{_pnl_class(float(row["gross_return_pct"]))}">'
             f"{escape(_fmt_stat(row['gross_return_pct'], 'signed_pct'))}</td>"
             f'<td class="{_pnl_class(net)}">'
@@ -197,6 +202,10 @@ def _cost_section(costs: dict | None, stats: dict) -> str:
         if funding_applied
         else "No funding series was supplied, so these returns are gross of "
         "carry. On a perpetual future that is not a tradeable number."
+    ) + (
+        " Gross is a separate simulation priced at zero, so it is the same at "
+        "every stress level; size effect is the P&L the cost-bearing book never "
+        "earned because worse fills bought less of it."
     )
     table = ""
     if len(stress) > 1:
@@ -204,7 +213,7 @@ def _cost_section(costs: dict | None, stats: dict) -> str:
             '<div class="table-wrap cost-table">'
             "<table><thead><tr>"
             "<th>Cost stress</th><th>Fees</th><th>Slippage</th><th>Funding</th>"
-            "<th>Gross Return</th><th>Net Return</th>"
+            "<th>Size effect</th><th>Gross Return</th><th>Net Return</th>"
             "</tr></thead><tbody>"
             f"{_stress_rows(stress, funding_applied)}"
             "</tbody></table></div>"
