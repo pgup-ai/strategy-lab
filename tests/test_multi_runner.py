@@ -95,3 +95,21 @@ def test_an_unknown_instrument_is_rejected_rather_than_silently_dropped():
     # formats InstrumentId.key, a raw KeyError carries the dataclass repr instead.
     with pytest.raises(KeyError, match="binance:perp:ETH/USDT"):
         run(runner, feed, [Subscription(BTC, "4h"), Subscription(ETH, "4h")])
+
+
+def test_both_instruments_produce_signals_in_a_two_strategy_run():
+    """The phase's headline claim: one stream, two instruments, both traded.
+
+    Attribution is structurally guaranteed by delegating to a StrategyRunner per
+    instrument, but nothing else asserts the multi-asset run actually trades more
+    than one -- a dispatch that quietly routed every bar to the first strategy
+    would leave every other test in this file green.
+    """
+    strategy = get_strategy("donchian")
+    runner = MultiAssetRunner(
+        strategies={BTC: strategy, ETH: strategy}, timeframe="4h", clock=SimClock()
+    )
+    signals = run(runner, two_instrument_feed(), [Subscription(BTC, "4h"), Subscription(ETH, "4h")])
+
+    traded = {signal.instrument for signal in signals}
+    assert traded == {BTC, ETH}, f"expected both instruments to trade, got {traded}"
