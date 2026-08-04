@@ -94,11 +94,10 @@ class BarEvent:
 class MarketSnapshot:
     """Every bar that closed at one event time.
 
-    A snapshot is the unit a cross-sectional feature consumes: breadth over five
-    coins is meaningless unless all five bars describe the same instant. It holds
-    only instruments that actually have a bar at ``ts_event_ms`` -- crypto trades
-    around the clock and equities do not, so a partial universe is the normal
-    case and ``absent`` must never be read as ``unchanged``.
+    Breadth over five coins is meaningless unless all five bars describe the same
+    instant. Only instruments that actually have a bar at ``ts_event_ms`` are held
+    -- crypto trades around the clock and equities do not -- so a partial universe
+    is the normal case and ``absent`` must never be read as ``unchanged``.
     """
 
     ts_event_ms: int

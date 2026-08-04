@@ -58,10 +58,9 @@ class ReplayFeed:
     async def stream(self, subs: Sequence[Subscription]) -> AsyncIterator[BarEvent]:
         """Yield every subscription's bars as one globally time-ordered stream.
 
-        Ties -- several instruments closing the same bar -- are broken on the
-        instrument key so the order is identical on every run. Without a total
-        order the replay/live determinism proof does not hold for more than one
-        instrument.
+        Ties -- several instruments closing the same bar -- break on the instrument
+        key: without a total order the replay/live determinism proof does not hold
+        for more than one instrument.
         """
         merged = heapq.merge(
             *(self._events_for(sub) for sub in subs),

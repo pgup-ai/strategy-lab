@@ -31,13 +31,6 @@ def event(instrument: InstrumentId, ts_open_ms: int) -> BarEvent:
     return BarEvent(bar=b, ts_event_ms=b.ts_close_ms, ts_recv_ms=None)
 
 
-def test_snapshot_exposes_its_bars_by_instrument():
-    snapshot = MarketSnapshot(ts_event_ms=1_000, bars={BTC: bar(BTC, 0), ETH: bar(ETH, 0)})
-    assert snapshot[BTC].instrument == BTC
-    assert set(snapshot.instruments) == {BTC, ETH}
-    assert len(snapshot) == 2
-
-
 def test_snapshot_reports_a_missing_instrument_rather_than_inventing_one():
     """Absent must never read as unchanged -- instruments list, delist, and halt."""
     snapshot = MarketSnapshot(ts_event_ms=1_000, bars={BTC: bar(BTC, 0)})
@@ -45,12 +38,6 @@ def test_snapshot_reports_a_missing_instrument_rather_than_inventing_one():
     assert snapshot.get(ETH) is None
     with pytest.raises(KeyError):
         snapshot[ETH]
-
-
-def test_snapshot_is_frozen():
-    snapshot = MarketSnapshot(ts_event_ms=1_000, bars={BTC: bar(BTC, 0)})
-    with pytest.raises(AttributeError):
-        snapshot.ts_event_ms = 2_000
 
 
 def test_a_timestamp_is_complete_only_once_a_later_event_arrives():

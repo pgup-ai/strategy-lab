@@ -5,8 +5,9 @@ import asyncio
 import pytest
 
 from strategy_lab.core.clock import SimClock
-from strategy_lab.core.types import InstrumentId, Side
+from strategy_lab.core.types import InstrumentId
 from strategy_lab.engine.multi_runner import MultiAssetRunner
+from strategy_lab.engine.runner import StrategyRunner
 from strategy_lab.feeds.base import Subscription
 from strategy_lab.feeds.replay import ReplayFeed
 from strategy_lab.strategies.registry import get_strategy
@@ -53,23 +54,8 @@ def test_each_instrument_gets_its_own_buffer():
     )
 
 
-def test_signals_are_attributed_to_the_right_instrument():
-    strategy = get_strategy("donchian")
-    runner = MultiAssetRunner(
-        strategies={BTC: strategy, ETH: strategy}, timeframe="4h", clock=SimClock()
-    )
-    signals = run(runner, two_instrument_feed(), [Subscription(BTC, "4h"), Subscription(ETH, "4h")])
-
-    assert signals, "expected signals from a 400-bar donchian run"
-    assert {s.instrument for s in signals} <= {BTC, ETH}
-    for signal in signals:
-        assert signal.side in set(Side)
-
-
 def test_one_instrument_matches_the_single_asset_runner():
     """A one-instrument MultiAssetRunner must not diverge from StrategyRunner."""
-    from strategy_lab.engine.runner import StrategyRunner
-
     df = synthetic_ohlcv(n=400, freq="4h", seed=1)
     strategy = get_strategy("donchian")
 
@@ -81,6 +67,7 @@ def test_one_instrument_matches_the_single_asset_runner():
     for event in ReplayFeed(frames={(BTC, "4h"): df})._events_for(Subscription(BTC, "4h")):
         single_signals.extend(single.on_event(event))
 
+    assert multi_signals, "two empty lists would match trivially"
     assert [(s.ts_bar_ms, s.side) for s in multi_signals] == [
         (s.ts_bar_ms, s.side) for s in single_signals
     ]
@@ -95,7 +82,7 @@ def test_an_instrument_without_a_strategy_is_buffered_but_never_traded():
     signals = run(runner, two_instrument_feed(), [Subscription(BTC, "4h"), Subscription(ETH, "4h")])
 
     assert len(runner.buffer(ETH)) == 400
-    assert all(s.instrument == BTC for s in signals)
+    assert signals and all(s.instrument == BTC for s in signals)
 
 
 def test_an_unknown_instrument_is_rejected_rather_than_silently_dropped():

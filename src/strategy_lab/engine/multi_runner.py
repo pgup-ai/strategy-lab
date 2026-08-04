@@ -13,21 +13,19 @@ from strategy_lab.strategies.base import Strategy
 class MultiAssetRunner:
     """Drives one strategy per instrument off a single merged, time-ordered stream.
 
-    Dispatch is deferred until a timestamp is *complete* -- that is, until a later
-    event proves nothing more is coming for it. So a strategy evaluating bar *t*
-    can read the whole cross-section at *t* through :meth:`snapshot`, not a stale
-    one from *t-1*. The cost is that signals for *t* are emitted when the first
-    *t+1* event arrives, and that lag is deliberate: it is the only completeness a
-    live feed can establish without looking ahead, so replay behaves identically.
+    Dispatch waits for :class:`MarketClock` to declare a timestamp complete, so a
+    strategy evaluating bar *t* reads the cross-section at *t* through
+    :meth:`snapshot` rather than a stale one from *t-1*. The price is that signals
+    for *t* are emitted only once the first *t+1* event arrives; see ``MarketClock``
+    for why that lag is the only completeness a live feed can establish.
 
     Each instrument gets its own ``BarBuffer`` holding full history, for the same
     reason ``StrategyRunner`` does: ``ewm(adjust=False)`` is recursive from the
     first bar, so a windowed buffer would silently change the indicator.
 
-    Bars that have not closed are dropped rather than dispatched. A snapshot is
-    defined as the bars that *closed* at one event time, and a forming bar shares
-    its timestamp with the closed bar that will supersede it, so admitting one
-    would put a provisional price into a completed cross-section.
+    There is deliberately no ``allow_forming_bars``: a snapshot is defined as the
+    bars that *closed* at one event time, and a provisional price inside a
+    completed cross-section is not a cross-section.
     """
 
     def __init__(
@@ -79,14 +77,8 @@ class MultiAssetRunner:
         return () if completed is None else self._release(completed)
 
     def _release(self, snapshot: MarketSnapshot) -> Sequence[Signal]:
-        """Publish the completed cross-section, then run the bars it holds.
-
-        Publishing first is what lets a strategy read its own bar's cross-section.
-        Traded instruments go through ``StrategyRunner`` rather than a local copy
-        of its extraction logic, so the single-asset and multi-asset paths cannot
-        drift apart -- ``test_one_instrument_matches_the_single_asset_runner``
-        would only catch a drift that had already shipped.
-        """
+        # Publish before dispatching: that ordering is what lets a strategy read
+        # its own bar's cross-section rather than the previous bar's.
         self._snapshot = snapshot
         emitted: list[Signal] = []
         for instrument, bar in snapshot.bars.items():
@@ -99,7 +91,4 @@ class MultiAssetRunner:
 
     def _require(self, instrument: InstrumentId) -> None:
         if instrument not in self._buffers:
-            raise KeyError(
-                f"{instrument.key} has no strategy and was not declared as context; "
-                "dropping it silently is how a universe shrinks without anyone noticing"
-            )
+            raise KeyError(f"{instrument.key} has no strategy and was not declared as context")

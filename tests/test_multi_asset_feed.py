@@ -21,29 +21,17 @@ def drain(feed: ReplayFeed, subs) -> list:
     return asyncio.run(_run())
 
 
-def test_two_instruments_interleave_by_time():
-    frames = {(BTC, "4h"): synthetic_ohlcv(n=4, freq="4h"),
-              (ETH, "4h"): synthetic_ohlcv(n=4, freq="4h")}
-    events = drain(ReplayFeed(frames=frames), [Subscription(BTC, "4h"), Subscription(ETH, "4h")])
-
-    times = [e.ts_event_ms for e in events]
-    assert times == sorted(times), "merged stream must be globally time-ordered"
-    assert len(events) == 8
-
-
 def test_ties_break_deterministically_on_instrument_key():
-    """Same bar time across instruments must order identically on every run."""
+    """Subscribed SOL, BTC, ETH: with no key in the sort, ties keep that arrival
+    order and the interleaving depends on how the caller happened to list the subs.
+    """
     frames = {(BTC, "4h"): synthetic_ohlcv(n=3, freq="4h"),
               (ETH, "4h"): synthetic_ohlcv(n=3, freq="4h"),
               (SOL, "4h"): synthetic_ohlcv(n=3, freq="4h")}
     subs = [Subscription(SOL, "4h"), Subscription(BTC, "4h"), Subscription(ETH, "4h")]
 
-    first = [e.bar.instrument.key for e in drain(ReplayFeed(frames=frames), subs)]
-    second = [e.bar.instrument.key for e in drain(ReplayFeed(frames=frames), subs)]
-    assert first == second
-
-    at_first_time = first[:3]
-    assert at_first_time == sorted(at_first_time), "ties order by instrument key"
+    keys = [e.bar.instrument.key for e in drain(ReplayFeed(frames=frames), subs)]
+    assert keys == [BTC.key, ETH.key, SOL.key] * 3
 
 
 def test_a_single_subscription_is_unchanged():

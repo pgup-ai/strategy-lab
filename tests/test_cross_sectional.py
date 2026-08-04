@@ -33,35 +33,30 @@ def test_breadth_is_the_fraction_advancing():
     assert breadth(snap) == pytest.approx(2 / 3)
 
 
-def test_breadth_over_a_partial_universe_uses_only_present_instruments():
-    """A halted instrument must not count as flat -- it is absent, not unchanged."""
-    snap = snapshot(btc=bar(BTC, "100", "110"), eth=bar(ETH, "100", "90"))
-    assert breadth(snap) == pytest.approx(0.5)
-
-
 def test_breadth_of_an_empty_snapshot_is_undefined_rather_than_zero():
     with pytest.raises(ValueError, match="no instruments"):
         breadth(MarketSnapshot(ts_event_ms=0, bars={}))
 
 
 def test_breadth_of_a_lone_instrument_is_refused_as_not_a_cross_section():
-    """Mixed timeframes make this the common case, and 0.0/1.0 there is just direction.
-
-    A 1d close coincides with a 4h close only at day boundaries, so most snapshots
-    over a mixed-timeframe universe hold one instrument. Dividing by instruments
-    present would return a well-formed number carrying no cross-sectional content.
-    """
+    """Mixed timeframes make this the common case, and 0.0/1.0 there is just direction."""
     snap = snapshot(btc=bar(BTC, "100", "110"))
     with pytest.raises(ValueError, match="min_instruments"):
         breadth(snap)
     assert breadth(snap, min_instruments=1) == pytest.approx(1.0)
+    # Two is the floor, not the first value above it: a `<=` here would refuse the
+    # smallest universe the default is meant to admit.
+    pair = snapshot(btc=bar(BTC, "100", "110"), eth=bar(ETH, "100", "90"))
+    assert breadth(pair) == pytest.approx(0.5)
 
 
 def test_confirms_requires_the_leader_and_a_quorum_of_followers():
+    """0.6 is the negative rather than 0.9 because it also pins the leader out of
+    its own vote: counting it turns 1 of 2 followers into 2 of 3, which passes."""
     snap = snapshot(btc=bar(BTC, "100", "110"), eth=bar(ETH, "100", "105"),
                     sol=bar(SOL, "100", "90"))
     assert confirms(snap, leader=BTC, quorum=0.5) is True
-    assert confirms(snap, leader=BTC, quorum=0.9) is False
+    assert confirms(snap, leader=BTC, quorum=0.6) is False
 
 
 def test_confirms_is_false_when_the_leader_is_absent():
