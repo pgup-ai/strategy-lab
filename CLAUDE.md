@@ -192,6 +192,21 @@ Key design decisions that span multiple files:
   signals; `tests/test_lookahead.py` poisons every bar after *t* and asserts
   row *t* is unchanged, which is the direct causality proof. **A strategy that
   fails either test is not safe to trade.**
+- **One known exception to that, and it is the data the paths carry rather than
+  the code they run: `state_machine_v1` on a perp.** `crowding` reads a
+  `funding_rate` column, which `backtest` and `sweep` attach on a perp
+  (`cli._with_funding_column`) and the event path structurally cannot —
+  `core.types.Bar` has no funding field and `BarBuffer` materializes
+  `open/high/low/close/volume` and nothing else. So a replay of a perp range
+  runs that feature at `NEUTRAL_CROWDING` and emits different signals from a
+  backtest of the same range; **the backtest is the published one**, and the
+  charter's R5 figures are its. Measured on BTC/USDT perp 4h over R5's test half,
+  trained cell: +16.44% / Sharpe +0.801 crowding-neutral against +15.45% /
+  +0.896 measured. The determinism suite does not catch this and is not broken —
+  `synthetic_ohlcv` carries no funding, so it compares crowding-neutral against
+  crowding-neutral, and a suite weakened to hide the gap would be worse than the
+  gap. Closing it means carrying funding through `Bar`, `BarBuffer`, the feed and
+  the storage schema, which is a phase and not a patch.
 - **Every percentile, rank and z-score in `features/` is rolling or expanding —
   never full-sample.** This is the lookahead that has no `shift(-1)` to grep
   for. Measured on a 200-bar ramp poisoned downward from row 121,

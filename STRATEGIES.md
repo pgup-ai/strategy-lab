@@ -4,7 +4,8 @@ Source of truth for what each strategy does, how it is meant to be run, and what
 about its behavior. Update this file whenever strategy logic, parameters, or engine exit
 behavior changes — the README only carries quick-start commands.
 
-Last reviewed: 2026-08-04, MDE R6 (`state_machine_v2` and the continuous-exposure contract).
+Last reviewed: 2026-08-05, after `backtest` and `sweep` began attaching the `funding_rate`
+column their perp runs load (MDE R6 shipped the row above it).
 
 ## At a glance
 
@@ -266,6 +267,17 @@ a rule on, but it is not what the gate passed on.
   `rank_window=480`, `crowding` raw. The ranks are why the thresholds are tercile
   boundaries: R4's conditioning was measured by tercile, and on the stored history the raw
   boundaries move 0.067/0.156 → 0.059/0.139 between halves.
+- **`crowding` needs a `funding_rate` column, and only two of the three paths can supply
+  one.** `backtest` and `sweep` attach it on a perp; `replay` cannot — `core.types.Bar`
+  carries no funding and `BarBuffer` materializes OHLCV only — so **a replay of a perp
+  range runs `crowding` at a neutral 0.5 and emits different signals from a backtest of
+  the same range.** The figures below are the backtest's. Without the column the trained
+  cell returns +16.44% at Sharpe +0.801 over the R5 test half against the published
+  +15.45% / +0.896, so the gap is not cosmetic.
+  `tests/test_replay_determinism.py` passes for this strategy because its synthetic frames
+  carry no funding on either side; that is a limit of the suite, not a contradiction.
+  Every run records which it was, as `crowding_measured` in `config.json`'s
+  `strategy_metadata` — check it before comparing two numbers.
 - **Exits provided**: opposite side only, so run it under `--exit-mode
   opposite_signal_only`. The other modes layer engine exits on top of a machine that
   already owns its exits.
@@ -286,8 +298,12 @@ a rule on, but it is not what the gate passed on.
   Nothing in the R5 figures moves — this is how to read them, not a
   correction. `state_machine_v2` is the same policy without that truncation.
 - **Params**: `rank_window=480`, `machine=StateMachine(enter_strength=2/3,
-  exit_strength=1/3, min_dwell=4, cooldown=4, …)`, `warmup_bars=2192` — derived as
+  exit_strength=1/3, min_dwell=4, cooldown=8, …)`, `warmup_bars=2192` — derived as
   `deepest_feature + 8 x machine.convergence_bars`, so it tracks the machine it holds.
+  The R5-trained cell runs `cooldown=4` and therefore warms **2,160** bars, not 2,192.
+  Cutting its window at the default's number starts it 32 bars early, and it stops
+  reproducing §9.2 — +15.75% / Sharpe +0.907 / 74 trades against the published
+  +15.45% / +0.896 / 73. Take the warmup off the strategy object, never off the family.
 - **`warmup_bars` is not the max over its features.** `direction` declares 1920, and at
   exactly 1920 the cold-start replay in `tests/test_strategy_metadata.py` disagrees with
   the whole-history run on 52–156 of 300 probed bars depending on seed, because the

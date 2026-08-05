@@ -1,8 +1,15 @@
-"""The backtest command's cost wiring, exercised without a database.
+"""The backtest command's funding wiring, exercised without a database.
 
 ``load_candles`` and the funding loader are patched to serve in-memory frames,
 so these tests cover what the command owns -- stress parsing, the perp funding
-guard, and what it echoes -- rather than Postgres.
+guard, the funding column, and what it echoes -- rather than Postgres.
+
+Funding reaches a run through two doors and the command owns both. It is a cash
+flow the engine charges against held notional, and it is an *input*:
+``features.flow.Crowding`` reads a per-bar ``funding_rate`` column and falls
+back to a neutral 0.5 without one. The command used to open only the first door,
+so a perp run of ``state_machine_v1`` silently ran three features instead of
+four.
 """
 
 from __future__ import annotations
@@ -14,12 +21,19 @@ import pytest
 from typer.testing import CliRunner
 
 from strategy_lab import cli
+from strategy_lab.features.flow import FUNDING_COLUMN
 from strategy_lab.market_data.base import MarketDataIdentity
-from tests.conftest import synthetic_ohlcv
+from tests.conftest import synthetic_ohlcv, synthetic_ohlcv_with_funding
 
 runner = CliRunner()
 
 _PERP = ["--exchange", "binance", "--market-type", "perp", "--symbol", "BTC/USDT"]
+_IDENTITY = MarketDataIdentity(
+    exchange="binance", market_type="perp", symbol="BTC/USDT", timeframe="4h"
+)
+# state_machine_v1 warms 2,192 bars, so the funding-column tests need their own
+# frame rather than the 900-bar one the cost tests run on.
+_MACHINE_BARS = 2400
 
 
 @pytest.fixture
@@ -37,6 +51,22 @@ def funding(monkeypatch, candles):
     frame = pd.DataFrame({"funding_rate": 0.0001}, index=index)
     monkeypatch.setattr(cli, "_funding_rates", lambda identity, df: frame["funding_rate"])
     return frame
+
+
+@pytest.fixture
+def machine_candles(monkeypatch):
+    """A perp frame long enough for ``state_machine_v1``, and its settlements.
+
+    ``load_candles`` serves the frame with the funding column **removed**, which
+    is what Postgres holds: ``market_candles`` stores raw OHLCV and nothing
+    derived. A fixture that handed the column over would let the command skip
+    the attachment entirely and leave every assertion below green.
+    """
+    df = synthetic_ohlcv_with_funding(n=_MACHINE_BARS, freq="4h")
+    settlements = df[FUNDING_COLUMN][df[FUNDING_COLUMN] != 0.0]
+    monkeypatch.setattr(cli, "load_candles", lambda **kwargs: df.drop(columns=FUNDING_COLUMN))
+    monkeypatch.setattr(cli, "_funding_rates", lambda identity, df: settlements)
+    return settlements
 
 
 def _invoke(tmp_path, *args):
@@ -57,9 +87,25 @@ def _invoke(tmp_path, *args):
     )
 
 
+def _machine(tmp_path, *args):
+    return runner.invoke(
+        cli.app,
+        [
+            "backtest", "--report-root", str(tmp_path), "--timeframe", "4h",
+            "--strategy", "state_machine_v1", "--exit-mode", "opposite_signal_only",
+            *args,
+        ],
+    )
+
+
 def _costs(tmp_path) -> dict:
     [report_dir] = list(tmp_path.iterdir())
     return json.loads((report_dir / "costs.json").read_text())
+
+
+def _metadata(tmp_path) -> dict:
+    [report_dir] = list(tmp_path.iterdir())
+    return json.loads((report_dir / "config.json").read_text())["strategy_metadata"]
 
 
 def test_cost_stress_renders_every_requested_multiple(candles, funding, tmp_path):
@@ -216,3 +262,97 @@ def test_the_funding_query_covers_the_final_bar_not_only_its_opening_stamp(monke
     rates = cli._funding_rates(identity, df)
 
     assert rates.index[-1] == settled[-1]
+
+
+def test_the_funding_column_is_matched_by_containment_not_equality(monkeypatch):
+    """A reindex would look right here and be wrong on the stored history.
+
+    Binance stamps settlements up to 47 ms past the boundary -- 3,260 of BTC's
+    7,559 stored settlements are off-grid -- so an equality join drops 43% of
+    them and reads the survivors onto the wrong bars. Every settlement below is
+    stamped late, so a column built by reindexing is entirely zero.
+    """
+    index = pd.date_range("2024-01-01", periods=12, freq="4h", tz="UTC", name="timestamp")
+    df = pd.DataFrame(
+        {"open": 100.0, "high": 101.0, "low": 99.0, "close": 100.5, "volume": 1.0}, index=index
+    )
+    settled = index[::2] + pd.Timedelta(47, unit="ms")
+    rates = pd.Series(0.0001, index=settled, name=FUNDING_COLUMN)
+    monkeypatch.setattr(cli, "_funding_rates", lambda identity, frame: rates)
+
+    framed, returned = cli._with_funding_column(_IDENTITY, df, enabled=True)
+
+    assert returned is rates, "the settlement series still has to reach the cost ledger"
+    column = framed[FUNDING_COLUMN]
+    assert column.loc[index[::2]].eq(0.0001).all()
+    assert column.loc[index[1::2]].eq(0.0).all()
+    assert FUNDING_COLUMN not in df.columns, "the caller's frame must not be mutated"
+
+
+@pytest.mark.parametrize(
+    ("market_type", "enabled"), [("spot", True), ("equity", True), ("perp", False)]
+)
+def test_nothing_is_attached_where_there_is_no_funding_to_attach(market_type, enabled):
+    """Spot and equity have no funding at all, and ``--no-funding`` is a request
+    not to use what is stored. Both give the frame back untouched rather than a
+    column of zeros, which ``Crowding`` would read as a measurement."""
+    df = synthetic_ohlcv(n=20, freq="4h")
+    identity = MarketDataIdentity(
+        exchange="binance", market_type=market_type, symbol="BTC/USDT", timeframe="4h"
+    )
+
+    framed, rates = cli._with_funding_column(identity, df, enabled=enabled)
+
+    assert framed is df
+    assert rates is None
+
+
+def test_a_perp_run_measures_crowding_rather_than_assuming_it(machine_candles, tmp_path):
+    """**The regression.** The command loaded funding for the cost ledger and
+    then let the frame go to the strategy without it, so ``crowding`` ran at its
+    neutral 0.5 and the run recorded that in one word nobody reads. Measured on
+    BTC/USDT perp 4h over R5's test half, trained cell: the crowding-neutral run
+    returns +16.44% at Sharpe +0.801, the measured one +15.45% at +0.896 -- the
+    published figure. A run whose headline is a full Sharpe point away from the
+    charter is not a reproduction of it.
+    """
+    result = _machine(tmp_path, *_PERP)
+
+    assert result.exit_code == 0, result.output
+    assert _metadata(tmp_path)["crowding_measured"] is True
+
+
+def test_the_funding_column_moves_the_fills_and_not_only_a_flag(machine_candles, tmp_path):
+    """``crowding_measured`` is a claim about the signals, so check the signals.
+
+    ``trades.csv`` is the artifact that isolates it: funding is charged as a
+    post-hoc ledger against a portfolio simulated without it, so no fill can
+    move because carry was or was not billed. Anything that differs between
+    these two runs came through ``Crowding``.
+    """
+    assert _machine(tmp_path / "measured", *_PERP).exit_code == 0
+    assert _machine(tmp_path / "neutral", *_PERP, "--no-funding").exit_code == 0
+
+    assert _metadata(tmp_path / "measured")["crowding_measured"] is True
+    assert _metadata(tmp_path / "neutral")["crowding_measured"] is False
+
+    def fills(root):
+        [report_dir] = list(root.iterdir())
+        return (report_dir / "trades.csv").read_text()
+
+    assert fills(tmp_path / "measured") != fills(tmp_path / "neutral")
+
+
+def test_a_spot_run_of_the_same_strategy_attaches_nothing(machine_candles, tmp_path):
+    """The attachment is gated on the market, not on the flag alone.
+
+    Spot and equity frames carry no funding at all, which is the case
+    ``Crowding``'s fallback exists for -- so the machine still runs there, on
+    three measured features and a neutral fourth, and says so.
+    """
+    result = _machine(
+        tmp_path, "--exchange", "binance", "--market-type", "spot", "--symbol", "BTC/USDT"
+    )
+
+    assert result.exit_code == 0, result.output
+    assert _metadata(tmp_path)["crowding_measured"] is False
