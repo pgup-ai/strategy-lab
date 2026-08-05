@@ -113,12 +113,18 @@ class ExposureBacktestResult:
     is therefore the decision-bar mask, and it is the series to compare a target
     against, because between decisions the book is deliberately left alone.
 
-    ``position_fraction`` is the signed value of the position over equity, which
-    equals the target only *at* a decision bar. Between decisions the book holds
-    a fixed quantity, so its fraction drifts with the price -- up in a winner,
-    down in a loser. That drift is the contract, not an execution error, and
-    reading this series as "what the target asked for" inverts what the band is
-    for.
+    ``position_fraction`` is the signed value of the position over the **gross**
+    equity curve, not over ``equity`` -- fills are decided against the simulated
+    book, and funding settles outside it, so dividing by the funded curve would
+    describe a book the simulator never sized. Recomputing it as
+    ``position * close / equity`` therefore gives a different number on any run
+    that carries funding.
+
+    It equals the target only *at* a decision bar. Between decisions the book
+    holds a fixed quantity, so its fraction drifts with the price -- up in a
+    winner, down in a loser. That drift is the contract, not an execution error,
+    and reading this series as "what the target asked for" inverts what the band
+    is for.
     """
 
     target: pd.Series
