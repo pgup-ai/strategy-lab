@@ -26,6 +26,9 @@ catches that the others do not:
    is wrong while the direction is right -- which is most of what a target
    *is*, and all of what a boolean comparison cannot see.
 
+The strategies proved are every entry in ``strategies/exposure_registry.py``
+plus two local tapers kept for shapes the registry does not currently contain.
+
 There is no production exposure runner yet, so the streaming driver here is
 local. It is not a mirror of the thing it tests: bars arrive through the real
 ``ReplayFeed``, accumulate in the real ``BarBuffer``, and the strategy is called
@@ -48,6 +51,10 @@ from strategy_lab.engine.context import BarBuffer
 from strategy_lab.feeds.base import Subscription
 from strategy_lab.feeds.replay import ReplayFeed, _row_to_bar
 from strategy_lab.strategies.exposure import TargetExposure
+from strategy_lab.strategies.exposure_registry import (
+    get_exposure_strategy,
+    list_exposure_strategies,
+)
 from strategy_lab.timeframes import timeframe_to_millis
 from tests.conftest import synthetic_ohlcv
 
@@ -122,7 +129,20 @@ class _RollingTaper:
         )
 
 
-HONEST = [_EwmTaper(), _RollingTaper()]
+# Registration is what enrols a strategy here, exactly as it does in the two
+# lookahead probes -- so a strategy added to the exposure registry is proved
+# against both drive paths without any test wiring.
+#
+# The two local tapers stay beside the registered ones rather than being
+# replaced by them. They are chosen for their *shape*: ``_EwmTaper`` is
+# recursive from bar zero, which is what makes comparison 2 bite, and
+# ``_RollingTaper`` is exactly windowed, which is the half of the family that
+# cannot fail it. A registry with one entry cannot promise to cover both.
+HONEST = [
+    *(get_exposure_strategy(name) for name in list_exposure_strategies()),
+    _EwmTaper(),
+    _RollingTaper(),
+]
 
 
 def frame_for(strategy, span: int = STREAM_SPAN, seed: int = 7) -> pd.DataFrame:
