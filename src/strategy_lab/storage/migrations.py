@@ -304,11 +304,30 @@ FUNDING_MIGRATIONS: tuple[str, ...] = (
 )
 
 
+# Any bigint works; this one is arbitrary and only has to stay stable, since two
+# migration runs serialize only by agreeing on it.
+MIGRATION_LOCK_KEY = 8_314_070_251_063_129
+
+
 def run_migrations(database_url: str | None = None) -> int:
-    """Apply idempotent schema upgrades. Returns the number of statements executed."""
+    """Apply idempotent schema upgrades. Returns the number of statements executed.
+
+    Every statement here is guarded or ``IF NOT EXISTS``, which makes a *repeat*
+    run a no-op but does not make two *concurrent* first runs safe: each of them
+    checks for the object before either creates it, so both decide to create.
+    Measured on two connections with an index absent, the second raises
+    ``UniqueViolation`` -- and it does so for the bare ``CREATE INDEX IF NOT
+    EXISTS`` exactly as it does for the ``pg_class`` guard beside it, because
+    ``IF NOT EXISTS`` is checked before the lock is taken rather than under it.
+
+    ``pg_advisory_xact_lock`` turns that into a wait. It is transaction-scoped,
+    so it is released by the commit or rollback below and never leaks a lock on
+    a failed migration.
+    """
     statements = MIGRATIONS + SIGNAL_MIGRATIONS + FUNDING_MIGRATIONS
     engine = get_engine(database_url)
     with engine.begin() as conn:
+        conn.execute(text("SELECT pg_advisory_xact_lock(:key)"), {"key": MIGRATION_LOCK_KEY})
         for statement in statements:
             conn.execute(text(statement))
     return len(statements)

@@ -3,10 +3,12 @@ from __future__ import annotations
 import pytest
 from sqlalchemy import inspect, text
 from sqlalchemy.engine import make_url
+from sqlalchemy.exc import OperationalError
 
 from strategy_lab.config import settings
 from strategy_lab.db.candles import get_engine, list_candle_sets, load_candles
 from strategy_lab.storage.migrations import (
+    MIGRATION_LOCK_KEY,
     MIGRATIONS,
     PRICE_COLUMNS,
     _guarded_index_migration,
@@ -170,6 +172,40 @@ def test_rerunning_migrations_does_not_block_a_writer_of_signals():
         # would outlive the test. The lock is what an INSERT would hold anyway.
         writer.execute(text("LOCK TABLE signals IN ROW EXCLUSIVE MODE"))
         run_migrations(impatient)
+
+
+def test_migrations_serialize_against_each_other():
+    """Idempotent on re-run is a different claim from safe when run twice at once.
+
+    Every statement checks for its object before creating it, and none of those
+    checks is taken under a lock that would make it binding, so two runs
+    starting with the object absent both decide to create. Measured directly on
+    a scratch index, with the second connection held until the first had built
+    it: ``UniqueViolation`` -- and the bare ``CREATE INDEX IF NOT EXISTS`` fails
+    identically, so this is inherent to check-then-create rather than something
+    the ``pg_class`` guard introduced.
+
+    Asserted as "the lock is taken", not as a reproduced collision, because
+    **there is no reproduction to write through** ``run_migrations``: every
+    object its guards look for is also declared in ``storage/schema.py`` and so
+    created by ``init_db``'s ``create_all``, leaving the guards false on any
+    database this code produces. Measured on a throwaway database -- two
+    concurrent first runs raise nothing with the lock removed. The exposure is
+    a future migration whose object is not in ``create_all``, which is what the
+    lock is here for; a test claiming to race one today would be a test that
+    cannot fail.
+    """
+    run_migrations()
+    impatient = (
+        make_url(settings.database_url)
+        .update_query_dict({"options": "-c lock_timeout=2s"})
+        .render_as_string(hide_password=False)
+    )
+
+    with get_engine().begin() as holder:
+        holder.execute(text("SELECT pg_advisory_xact_lock(:key)"), {"key": MIGRATION_LOCK_KEY})
+        with pytest.raises(OperationalError, match="lock timeout"):
+            run_migrations(impatient)
 
 
 def test_the_index_guard_still_builds_an_index_that_is_missing():

@@ -159,7 +159,7 @@ def test_a_wrapped_signals_fields_are_readable_without_unwrapping_it():
     assert wrapped.signal is signal
 
     with pytest.raises(AttributeError):
-        wrapped.no_such_field
+        getattr(wrapped, "no_such_field")
 
 
 def test_forwarding_a_missing_signal_stops_rather_than_looping():
