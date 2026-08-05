@@ -4,7 +4,7 @@ Source of truth for what each strategy does, how it is meant to be run, and what
 about its behavior. Update this file whenever strategy logic, parameters, or engine exit
 behavior changes — the README only carries quick-start commands.
 
-Last reviewed: 2026-08-03 at commit `498eed5`.
+Last reviewed: 2026-08-04, MDE R6 (`state_machine_v2` and the continuous-exposure contract).
 
 ## At a glance
 
