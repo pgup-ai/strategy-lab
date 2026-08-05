@@ -9,7 +9,7 @@ from strategy_lab.core.clock import Clock
 from strategy_lab.core.types import Bar, BarEvent, InstrumentId, Side, Signal
 from strategy_lab.engine.context import BarBuffer
 from strategy_lab.feeds.replay import _row_to_bar
-from strategy_lab.strategies.base import SignalSet, Strategy
+from strategy_lab.strategies.base import SignalSet, Strategy, require_warmup_bars
 from strategy_lab.timeframes import timeframe_to_millis
 
 _ENTRY_SIDES = {Side.ENTER_LONG, Side.ENTER_SHORT}
@@ -53,6 +53,12 @@ class StrategyRunner:
         clock: Clock,
         allow_forming_bars: bool = False,
     ) -> None:
+        # At construction rather than on the first bar, so a live process
+        # refuses to start rather than refusing partway through a session. The
+        # backtest raises on the same claim; without this the vectorized path
+        # would raise while replay traded from bar one, and the two paths
+        # agreeing is what tests/test_replay_determinism.py exists to defend.
+        require_warmup_bars(strategy.name, strategy.warmup_bars)
         self.strategy = strategy
         self.instrument = instrument
         self.timeframe = timeframe
