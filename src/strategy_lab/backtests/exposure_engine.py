@@ -41,9 +41,10 @@ notional here, to a fixed fraction under ``targetpercent``, and either way it
 trims winners and adds to losers: a mean-reversion overlay bolted onto a strategy
 whose whole thesis is riding a trend. ``rebalance_threshold=0.0`` is exactly that
 overlay, since it submits on every bar -- a usable setting, and the honest name
-for what it does, but not a neutral default. Nor is it a cost story: costless and funding-free, the
-same target ends at 20,742.99 at the 0.05 default against 20,261.47 at band 0.0,
-so the overlay moves the result before a single fee is charged.
+for what it does, but not a neutral default. Nor is it a cost story: costless
+and funding-free, the same target ends at 20,742.99 at the 0.05 default against
+20,261.47 at band 0.0, so the overlay moves the result before a single fee is
+charged.
 
 Measured on the stored 15,128-bar BTC/USDT 4h perp history, funding applied, at
 the default cash and cost model, with the ``_EwmTaper`` from
@@ -198,8 +199,7 @@ def run_exposure_backtest(
         close=df["close"],
         # A currency value against *initial* cash, never current equity: the
         # repo's non-compounding sizing rule, which ``targetpercent`` silently
-        # broke here. It also keeps a boolean-path run and a continuous one
-        # comparable, since only one of them would otherwise compound.
+        # broke here.
         size=submitted * position_pct * cash,
         size_type="targetvalue",
         init_cash=cash,
@@ -209,8 +209,9 @@ def run_exposure_backtest(
     )
 
     orders = pf.orders.records_readable
+    assets = pf.assets()
     gross_equity = pf.value()
-    notional = held_notional(pf.assets(), df["open"])
+    notional = held_notional(assets, df["open"])
     flow = (
         apply_funding(positions=notional, funding=funding)
         if funding is not None and not funding.empty
@@ -220,8 +221,8 @@ def run_exposure_backtest(
     return ExposureBacktestResult(
         target=target,
         rebalance_target=submitted,
-        position=pf.assets(),
-        position_fraction=pf.assets() * df["close"] / gross_equity,
+        position=assets,
+        position_fraction=assets * df["close"] / gross_equity,
         orders=orders,
         order_count=int(len(orders)),
         equity=gross_equity + flow.cumsum(),
@@ -248,7 +249,9 @@ def run_exposure_backtest(
     )
 
 
-def _validate_alignment(exposure: TargetExposure, df: pd.DataFrame, strategy) -> None:
+def _validate_alignment(
+    exposure: TargetExposure, df: pd.DataFrame, strategy: ExposureStrategy
+) -> None:
     """Refuse a target that is not one value per candle, on the candles' own index.
 
     ``from_orders`` takes ``size`` positionally against ``close``, so a target
@@ -299,7 +302,9 @@ def _banded(target: pd.Series, *, threshold: float) -> pd.Series:
     return pd.Series(submitted, index=target.index, dtype="float64")
 
 
-def _flat_through_warmup(target: pd.Series, *, warmup_bars: int, strategy) -> pd.Series:
+def _flat_through_warmup(
+    target: pd.Series, *, warmup_bars: int, strategy: ExposureStrategy
+) -> pd.Series:
     """Hold nothing until the declared warmup has elapsed.
 
     The same claim ``engine._mask_warmup`` enforces for the boolean path, and

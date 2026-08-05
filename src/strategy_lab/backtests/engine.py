@@ -543,12 +543,7 @@ def _split_by_curve(
 
 
 def _funding_notional(pf, df: pd.DataFrame) -> pd.Series:
-    """This portfolio's signed notional held into each bar -- see ``held_notional``.
-
-    The convention lives in ``backtests/costs.py`` because the continuous-exposure
-    path charges funding on the same basis, and a second copy of a causality rule
-    is a second thing to get wrong.
-    """
+    """This portfolio's signed notional held into each bar -- see ``held_notional``."""
     return held_notional(pf.assets(), df["open"])
 
 
