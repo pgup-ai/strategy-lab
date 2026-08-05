@@ -38,6 +38,7 @@ from strategy_lab.strategies.base import require_positive_span, validate_ohlcv
 from strategy_lab.strategies.exposure import TargetExposure
 from strategy_lab.strategies.state_machine_core import (
     DEFAULT_FEATURES,
+    build_feature_frame,
     derive_warmup_bars,
     signed_target,
 )
@@ -92,6 +93,16 @@ class StateMachineV2:
                 "position_sizing": "state target risk, read by the engine on every bar",
             },
         )
+
+    def feature_frame(self, df: pd.DataFrame) -> tuple[pd.DataFrame, bool]:
+        """The four columns the machine reads, and whether crowding is real.
+
+        Byte-for-byte v1's accessor, because it is v1's pipeline. It exists so a
+        reader can see *why* a target moved rather than only that it did; it
+        computes nothing ``compute_target`` does not already compute and feeds
+        into no decision, so the R6 comparison is untouched by it.
+        """
+        return build_feature_frame(df, features=self.features, rank_window=self.rank_window)
 
 
 __all__ = ["StateMachineV2"]

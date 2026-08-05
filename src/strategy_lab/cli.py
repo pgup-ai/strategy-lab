@@ -455,102 +455,33 @@ def _parse_cost_stress(raw: str) -> tuple[float, ...]:
 
 
 def _with_funding_column(identity: MarketDataIdentity, df, *, enabled: bool, required: bool = True):
-    """The frame a perp strategy should actually see, plus the settlement series.
+    """``funding_frame.with_funding_column``, loading through this module's wrapper.
 
-    Funding is two different things to two different consumers, and ``backtest``
-    served only the first. It is a *cash flow*, which the engine charges against
-    the notional held into each settlement -- that is the returned series. It is
-    also an *input*: ``features.flow.Crowding`` is the state machine's fourth
-    feature and reads a per-bar ``funding_rate`` column, falling back to a
-    neutral 0.5 when the frame has none. Loading funding for the cost ledger and
-    then handing the strategy a frame without it ran a *different strategy* than
-    the research measured, recording ``crowding_measured: false`` in a corner of
-    ``config.json`` while the headline moved. Measured on BTC/USDT perp 4h over
-    R5's test half, trained cell: +16.44% / Sharpe +0.801 / 6.08% max drawdown
-    without the column, +15.45% / +0.896 / 4.67% with it -- the second is
-    charter §9.2's published row.
-
-    Alignment goes through ``align_funding_to_bars``, never a reindex: Binance
-    stamps settlements up to 47 ms past the bar boundary, so an equality join
-    drops 43% of the stored history and the survivors land on the wrong bars.
+    The rule itself -- perp only, ``align_funding_to_bars`` rather than a reindex
+    -- lives in ``backtests/funding_frame.py`` so the research browser attaches
+    funding by the same one. What is passed in here is only the loader, so a
+    missing history still exits as user error rather than as a traceback.
     """
-    if not (enabled and identity.market_type == "perp"):
-        return df, None
+    from strategy_lab.backtests.funding_frame import with_funding_column
 
-    from strategy_lab.features.flow import FUNDING_COLUMN, align_funding_to_bars
-
-    rates = _funding_rates(identity, df, required=required)
-    if rates is None:
-        return df, None
-    return df.assign(**{FUNDING_COLUMN: align_funding_to_bars(df.index, rates)}), rates
+    return with_funding_column(
+        identity, df, enabled=enabled, required=required, load_rates=_funding_rates
+    )
 
 
 def _funding_rates(identity: MarketDataIdentity, df, *, required: bool = True):
-    """Stored funding for a perp, bounded to the candle window.
+    """Stored funding for a perp, with an unusable history reported as user error.
 
-    A perp backtest that quietly skips funding reports a gross number that reads
-    exactly like a net one -- and on this instrument the carry is roughly the
-    size of buy-and-hold. Missing funding is therefore an error with an explicit
-    opt-out, not a silent zero. A *partial* history is the same error wearing a
-    disguise, so the stored series has to cover the window as well as exist.
+    An unfetched or partial funding history is something the operator can fix
+    with the command the message names, so it exits 2 rather than surfacing the
+    library's ``ValueError`` as a traceback.
     """
-    if identity.market_type != "perp":
-        return None
+    from strategy_lab.backtests.funding_frame import FundingUnavailable, funding_rates
 
-    from strategy_lab.backtests.costs import funding_coverage_gaps, window_end
-    from strategy_lab.db.funding import load_funding
-
-    # The right bound is the last bar's exclusive right edge, not its opening
-    # timestamp: a bar covers an interval, and Binance stamps settlements up to
-    # 47 ms past the boundary, so bounding at the open drops a settlement that
-    # falls inside the final bar -- either failing the coverage check on a
-    # complete history or charging that settlement as zero.
-    rates = load_funding(
-        exchange=identity.exchange,
-        market_type=identity.market_type,
-        symbol=identity.symbol,
-        start=str(df.index.min()),
-        end=str(window_end(df.index)),
-    )
-    if rates.empty:
-        if not required:
-            return None
-        raise typer.BadParameter(
-            f"No stored funding for {identity.exchange}/perp/{identity.symbol} over "
-            f"{df.index.min()} -> {df.index.max()}.\n\n"
-            "A perp backtest without funding is gross of carry and not a tradeable "
-            "number. Fetch it first:\n"
-            f"strategy-lab fetch-funding --symbol {identity.symbol} --since 2019-09-01\n\n"
-            "Pass --no-funding to proceed without it: on a backtest that means gross of "
-            "carry, and on a sweep -- which never charges carry -- it means any "
-            "funding-derived feature falls back to neutral."
-        )
-
-    gaps = funding_coverage_gaps(funding=rates["funding_rate"], index=df.index)
-    if gaps:
-        if not required:
-            return None
-        raise typer.BadParameter(_uncovered_funding(identity, df, gaps))
-    return rates["funding_rate"]
-
-
-def _uncovered_funding(identity: MarketDataIdentity, df, gaps) -> str:
-    shown = ", ".join(f"{start} -> {end}" for start, end in gaps[:3])
-    more = f" (+{len(gaps) - 3} more)" if len(gaps) > 3 else ""
-    return (
-        f"Stored funding for {identity.exchange}/perp/{identity.symbol} does not "
-        f"cover {df.index.min()} -> {df.index.max()}.\n\n"
-        f"Uncovered: {shown}{more}\n\n"
-        "Every settlement missing from those stretches is charged as zero, so the "
-        "run would report a net-of-funding number that is gross of carry across "
-        "them. Backfill the range:\n"
-        f"strategy-lab fetch-funding --symbol {identity.symbol} "
-        f"--since {gaps[0][0]:%Y-%m-%d}\n\n"
-        "If the venue genuinely settled nothing there, narrow the run with --start. "
-        "Pass --no-funding to proceed without it: on a backtest that means gross of "
-            "carry, and on a sweep -- which never charges carry -- it means any "
-            "funding-derived feature falls back to neutral."
-    )
+    try:
+        return funding_rates(identity, df, required=required)
+    except FundingUnavailable as exc:
+        raise typer.BadParameter(str(exc)) from exc
 
 
 def _echo_costs(result) -> None:
