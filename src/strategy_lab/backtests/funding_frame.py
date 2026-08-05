@@ -123,12 +123,29 @@ def with_funding_column(
 
 
 def _uncovered_funding(identity: MarketDataIdentity, df: pd.DataFrame, gaps) -> str:
+    """Names the stretches that fail *and* the window that would not.
+
+    "Narrow the run with --start" is only advice if the reader can work out what
+    to narrow it to, and from the gap list alone they cannot -- BTC's leading gap
+    is permanent, so the whole frame is refused and the fix is a start date the
+    message never mentions. The covered span is one query and turns prose into
+    two dates that can be typed.
+    """
+    from strategy_lab.db.funding import funding_span
+
     shown = ", ".join(f"{start} -> {end}" for start, end in gaps[:3])
     more = f" (+{len(gaps) - 3} more)" if len(gaps) > 3 else ""
+    span = funding_span(
+        exchange=identity.exchange, market_type=identity.market_type, symbol=identity.symbol
+    )
+    covered = (
+        f"Stored funding covers {span[0]} -> {span[1]}.\n\n" if span is not None else ""
+    )
     return (
         f"Stored funding for {identity.exchange}/perp/{identity.symbol} does not "
         f"cover {df.index.min()} -> {df.index.max()}.\n\n"
         f"Uncovered: {shown}{more}\n\n"
+        f"{covered}"
         "Every settlement missing from those stretches is charged as zero, so the "
         "run would report a net-of-funding number that is gross of carry across "
         "them. Backfill the range:\n"
