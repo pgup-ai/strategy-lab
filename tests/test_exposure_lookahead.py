@@ -94,7 +94,6 @@ def poison_probe_target(
 def test_registered_exposure_strategies_do_not_look_ahead(name):
     strategy = get_exposure_strategy(name)
     df = exposure_probe_frame(strategy.warmup_bars)
-    # "No offenders" is only meaningful if bars were actually probed.
     probed = probe_positions(strategy.warmup_bars, len(df))
     assert len(probed) >= 50, (
         f"{name}: only {len(probed)} probe points past warmup_bars="

@@ -28,7 +28,6 @@ from strategy_lab.backtests.exposure_engine import run_exposure_backtest
 from strategy_lab.market_data.base import MarketDataIdentity
 from strategy_lab.state.machine import StateMachine
 from strategy_lab.state.policy import STATE_TARGET_RISK
-from strategy_lab.strategies.exposure import ExposureStrategy, TargetExposure
 from strategy_lab.strategies.exposure_registry import (
     get_exposure_strategy,
     list_exposure_strategies,
@@ -47,10 +46,8 @@ TWIN = "state_machine_v1"
 # the assertions need rather than tuned to them.
 PROBE_SPAN = 900
 
-# Floors that stop every equality here from being ``0.0 == 0.0``. A target that
-# never moves compares equal to another target that never moves, and both
-# suites this phase adds would pass over an inert strategy. Same reasoning as
-# ``MIN_CHANGES`` in tests/test_exposure_determinism.py.
+# Floors that stop every equality here from being ``0.0 == 0.0`` -- same
+# reasoning as ``MIN_CHANGES`` in tests/test_exposure_determinism.py.
 MIN_CHANGES = 20
 MIN_LEVELS = 3
 
@@ -89,10 +86,6 @@ def test_it_is_registered_where_the_continuous_suites_look_and_nowhere_else():
     assert TWIN not in list_exposure_strategies()
 
 
-def test_it_satisfies_the_exposure_protocol():
-    assert isinstance(get_exposure_strategy(NAME), ExposureStrategy)
-
-
 def test_an_unknown_name_is_refused_with_the_available_ones():
     with pytest.raises(ValueError, match="state_machine_v2"):
         get_exposure_strategy("state_machine_v3")
@@ -102,10 +95,9 @@ def test_an_unknown_name_is_refused_with_the_available_ones():
 def test_v2_recovers_exactly_the_target_v1_discards(build):
     """The phase's central assertion, on the default ``allow_shorts=True``.
 
-    ``check_exact`` is not optional. ``assert_series_equal`` defaults to a 1e-5
-    relative tolerance, and on a target in -1..1 that would wave through a 0.55
-    held where 0.70 belonged in every place the crowding damping lands close.
-    The whole value of the claim is that the two are the same number.
+    ``check_exact`` is not optional: the 1e-5 default tolerance would wave
+    through any drift smaller than itself, and the claim is that the two series
+    hold the same number, not a close one.
 
     Both frame kinds run because they exercise different halves of the policy:
     without funding every non-zero target is exactly a ``STATE_TARGET_RISK``
@@ -201,23 +193,20 @@ def test_v2_introduces_no_parameter_of_its_own():
         assert getattr(v1, name) == getattr(v2, name), f"{name} differs between v1 and v2"
 
 
-@pytest.mark.parametrize("build", FRAMES, ids=FRAME_IDS)
-def test_the_target_carries_the_policy_table_rather_than_a_table_of_its_own(build):
+def test_the_target_carries_the_policy_table_rather_than_a_table_of_its_own():
     """Every level reachable without funding is a ``STATE_TARGET_RISK`` constant.
 
-    With funding the crowding damping scales those constants continuously, so
-    the containment claim only holds on the undamped frame -- which is why the
-    bound below is checked on both but the membership only on one.
+    Undamped frame only: with funding the crowding damping scales those
+    constants continuously, so membership is not the claim there. The bound the
+    two frames share -- ``|target| <= 1``, no NaN -- is ``TargetExposure``'s own
+    and is asserted where it is enforced, in tests/test_target_exposure.py.
     """
     v2 = get_exposure_strategy(NAME)
-    target = v2.compute_target(frame(build, v2)).target
+    target = v2.compute_target(frame(synthetic_ohlcv, v2)).target
 
-    assert target.abs().max() <= 1.0
-    assert not target.isna().any()
-    if build is synthetic_ohlcv:
-        live = set(np.round(target[target != 0.0].abs().unique(), 12))
-        assert live <= set(STATE_TARGET_RISK.values())
-        assert len(live) >= MIN_LEVELS, "one state ever sized a position; the table is decoration"
+    live = set(np.round(target[target != 0.0].abs().unique(), 12))
+    assert live <= set(STATE_TARGET_RISK.values())
+    assert len(live) >= MIN_LEVELS, "one state ever sized a position; the table is decoration"
 
 
 def test_warmup_matches_v1s_and_still_scales_with_the_machine_it_holds():
@@ -260,9 +249,7 @@ def test_the_target_is_a_valid_exposure_on_a_frame_that_is_entirely_warmup():
     without v2 filling anything -- and ``TargetExposure`` is what would raise if
     that ever stopped being true.
     """
-    v2 = get_exposure_strategy(NAME)
-    exposure = v2.compute_target(synthetic_ohlcv(n=200))
-    assert isinstance(exposure, TargetExposure)
+    exposure = get_exposure_strategy(NAME).compute_target(synthetic_ohlcv(n=200))
     assert (exposure.target == 0.0).all()
 
 

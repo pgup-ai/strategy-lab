@@ -129,10 +129,6 @@ class _RollingTaper:
         )
 
 
-# Registration is what enrols a strategy here, exactly as it does in the two
-# lookahead probes -- so a strategy added to the exposure registry is proved
-# against both drive paths without any test wiring.
-#
 # The two local tapers stay beside the registered ones rather than being
 # replaced by them. They are chosen for their *shape*: ``_EwmTaper`` is
 # recursive from bar zero, which is what makes comparison 2 bite, and
@@ -210,7 +206,6 @@ def assert_same_target(streamed: pd.Series, expected: pd.Series, *, label: str) 
 
 @pytest.mark.parametrize("strategy", HONEST, ids=lambda s: s.name)
 def test_streaming_reproduces_the_whole_history_target_on_every_bar(strategy):
-    """Not just entries -- every bar's target, to float equality."""
     df = frame_for(strategy)
     assert_same_target(
         streamed_targets(strategy, df),
@@ -241,8 +236,7 @@ def test_a_primed_runner_reproduces_the_target_it_started_late_for(strategy):
     )
 
 
-# The three cheats. Each one passes the comparisons it is not aimed at, which is
-# the whole point: they measure what each comparison would miss alone.
+# The three cheats, one per comparison.
 
 
 @dataclass(frozen=True)

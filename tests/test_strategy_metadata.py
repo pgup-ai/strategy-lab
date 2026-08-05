@@ -116,10 +116,7 @@ def test_declared_warmup_reproduces_the_whole_history_target(name):
     The exposure registry is separate precisely so the boolean suites do not
     iterate it, which means this check does not reach it either unless it is
     written twice. It is: an unverified ``warmup_bars`` is how R5 shipped a
-    machine that could disagree with itself permanently, and a *continuous*
-    target is more exposed to that than a boolean signal, not less -- a
-    boolean that is wrong changes whether you are in the trade, a target that
-    is wrong changes your size on every bar of it.
+    machine that could disagree with itself permanently.
 
     Bit-exact, and on a frame carrying **no funding**, both deliberately.
     Measured on ``state_machine_v2`` at these 300 probe points: 0 divergences
