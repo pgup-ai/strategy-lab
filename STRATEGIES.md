@@ -4,7 +4,7 @@ Source of truth for what each strategy does, how it is meant to be run, and what
 about its behavior. Update this file whenever strategy logic, parameters, or engine exit
 behavior changes — the README only carries quick-start commands.
 
-Last reviewed: 2026-08-03 at commit `498eed5`.
+Last reviewed: 2026-08-04, MDE R6 (`state_machine_v2` and the continuous-exposure contract).
 
 ## At a glance
 
@@ -19,10 +19,12 @@ Last reviewed: 2026-08-03 at commit `498eed5`.
 | `donchian` | long + short | any (MDE R0 baseline) | close breaks the 96-bar channel | none | strategy (48-bar reverse channel) | flat | R0 baseline |
 | `multi_horizon` | long + short | any (MDE R0 baseline) | sign of a 24/48/96/192 vol-normalized blend | none | engine | flat | R0 baseline |
 | `state_machine_v1` | long + short | crypto perp 4h (MDE R5) | side of the state machine's target risk | the state machine itself | strategy (target side change) | per-state target, entry only | R5 gate passed out of sample |
+| `state_machine_v2` | long + short | crypto perp 4h (MDE R6) | the state machine's target risk itself, as a level | the state machine itself | strategy (the target reaching 0.0) | per-state target, **every bar** | R6 — the continuous contract, measured against v1 |
 
 \* Status is inferred from report history — correct these labels as research priorities change.
 
-The bottom four are the [Market Dynamics Engine](docs/research/2026-08-03-market-dynamics-engine.md)
+`tsmom`, `ema_cross`, `donchian` and `multi_horizon` are the
+[Market Dynamics Engine](docs/research/2026-08-03-market-dynamics-engine.md)
 R0 baselines: the floor every later state-estimation model has to clear out-of-sample.
 They are deliberately unfiltered and unoptimized — a baseline that has been tuned is not
 a baseline.
@@ -270,7 +272,19 @@ a rule on, but it is not what the gate passed on.
 - **Sizing**: `position_size` carries the state's target risk (COMPRESSION/RESET 0,
   BREAKOUT 0.35, CONFIRMED 0.70, RIDING 1.00, EXHAUSTION 0.55), damped by extreme
   `crowding` on the paying side only. **The engine applies it on the entry bar and never
-  again**, so a state change mid-position cannot resize — the taper is R6's job.
+  again**, so a state change mid-position cannot resize.
+- **It has never sized an entry for the `RIDING` row, and R6 measured that.** Of its
+  size-setting entry bars on the R5 test half, **not one is in `RIDING`** in either
+  configuration — trained 56 BREAKOUT + 15 EXHAUSTION, default 92 BREAKOUT + 20 CONFIRMED
+  + 40 EXHAUSTION — so the largest position it has ever opened is **52.3% of capital
+  (trained) and 66.5% (default)** against the **95%** its own RIDING row asks for, on a
+  machine that spent 209 / 516 bars in RIDING. Entries land on the CONFIRMED and
+  EXHAUSTION rows readily enough, as those counts show; RIDING is the one they cannot
+  reach, because it is only ever entered with a position already open — the lifecycle
+  passes BREAKOUT and CONFIRMED first, both already carrying a non-zero target, and an
+  entry needs a change of side. The engine then freezes the position at its entry size.
+  Nothing in the R5 figures moves — this is how to read them, not a
+  correction. `state_machine_v2` is the same policy without that truncation.
 - **Params**: `rank_window=480`, `machine=StateMachine(enter_strength=2/3,
   exit_strength=1/3, min_dwell=4, cooldown=4, …)`, `warmup_bars=2192` — derived as
   `deepest_feature + 8 x machine.convergence_bars`, so it tracks the machine it holds.
@@ -302,6 +316,87 @@ a rule on, but it is not what the gate passed on.
   [the charter §9.2](docs/research/2026-08-03-market-dynamics-engine.md#92-r5-split-sample-gate--btcusdt-perp-4h);
   `tests/test_state_machine_gate.py` re-runs the out-of-sample comparison against the
   stored candles.
+
+---
+
+## state_machine_v2
+
+The MDE R6 strategy, and **v1 with the collapse to booleans removed — nothing else.**
+Same `StateMachine`, same policy, same `STATE_TARGET_RISK`, same four features, same
+derived `warmup_bars`, and **no parameter of its own**. v1 already computes the full
+signed continuous target on every bar (`state.policy.target_risk_series`) and then throws
+most of it away — `np.sign` for the booleans, `abs` for an entry-only size — so the taper
+was never *missing* from v1, only unexpressible. v2 hands the same series over whole,
+which makes v1-vs-v2 a measurement of the engine's truncation and of nothing else. Both
+adapters share `strategies/state_machine_core.py` so the pipeline cannot drift between
+them.
+
+- **Contract**: `TargetExposure` (`strategies/exposure.py`), not `SignalSet`.
+  `compute_target(df)` returns one signed level per bar in −1..1; warmup rows are `0.0`
+  and `NaN` is refused, because `from_orders` reads NaN as "no order", which means *hold
+  what you held*.
+- **Registered in `strategies/exposure_registry.py`**, not `strategies/registry.py` — the
+  six parametrized boolean tests all call `generate_signals`, which this does not have.
+  See [CLAUDE.md](CLAUDE.md).
+- **Exit ownership: entirely the strategy's, and an exit is the target reaching 0.0** —
+  `COMPRESSION`, `RESET`, or any bar the policy stands aside on, at which point the engine
+  flattens the book. **It does not appear in the exit-mode matrix below**, and not because
+  the row was omitted: there is no `ExitMode` on this path at all and
+  `run_exposure_backtest` takes no such parameter, so an exit mode cannot be passed rather
+  than being wrong to pass. What takes its place is **`rebalance_threshold` (default
+  0.05)** — a target reaches the book only once it has moved that far from the last target
+  *submitted*, and between decisions the book holds a fixed quantity whose fraction of
+  equity drifts with price. Band `0.0` submits on every bar, which trims winners and adds
+  to losers; it is a usable setting and an honest name for that behaviour, but not a
+  neutral default.
+- **Sizing**: the state's target risk, read on **every** bar rather than only at entry,
+  as a currency value against *initial* cash (`target × position_pct × cash`) — the same
+  non-compounding rule the boolean engine follows. `targetpercent` would be a fraction of
+  *current* equity and would compound.
+- **Inputs**: identical to v1, including the `crowding` damping. On a frame with no
+  `funding_rate` column `crowding` falls back to a neutral 0.5 and the metadata records
+  `crowding_measured: false`, exactly as v1 does.
+- **Execution path**: `run_exposure_backtest`
+  ([backtests/exposure_engine.py](src/strategy_lab/backtests/exposure_engine.py)) on
+  `vbt.Portfolio.from_orders(size_type="targetvalue")`. It is **not wired into the
+  `backtest` CLI** and writes **no report directory** — `result.config` is the
+  reproducibility record. There is no production exposure runner yet either, so `replay`
+  does not drive it; `tests/test_exposure_determinism.py` proves the streaming path
+  against a local driver built from the real `ReplayFeed` and `BarBuffer`, comparing
+  whole-history against streamed, a runner primed from mid-history, and **target-level**
+  equality on every bar rather than side-level.
+- **Run** (Python; `df` is the perp candle frame, with a `funding_rate` column if
+  `crowding` is to be measured, and `funding` the settlement series charged as carry):
+
+  ```python
+  from strategy_lab.backtests.exposure_engine import run_exposure_backtest
+  from strategy_lab.strategies.exposure_registry import get_exposure_strategy
+
+  result = run_exposure_backtest(
+      df=df,
+      strategy=get_exposure_strategy("state_machine_v2"),
+      identity=identity,
+      cost_model=cost_model,
+      funding=funding,
+  )
+  ```
+
+- **R6 result: the contract works, the taper does not earn.** Over R5's identical
+  6,048-bar test half, 10bp/side, net of funding, at the 0.05 band: trained **+25.89% /
+  Sharpe +0.842 / 10.85% max drawdown / 74 round trips / 276 fills** against v1's
+  +15.45% / +0.896 / 4.67% / 73 / 120; untuned default **+36.70% / +0.913 / 12.55% /
+  154 / 416** against v1's +15.52% / +0.746 / 7.11% / 153 / 211. Its fills equal its
+  decision bars exactly (276/276, 416/416), and it **survives 3× costs in both
+  configurations** (+9.24% and +3.38%) where v1's default does not (−6.54%). But **the
+  taper is worth approximately zero**: v2 held *less* than v1 on 75 / 77 bars for
+  **+15.30 / −63.05** gross, and *more* on 523 / 807 bars for **+1,445.31 / +2,783.64**.
+  What it buys is exposure — 1.7–1.8× v1's average — and the return scales with it, which
+  is leverage rather than skill; Sharpe, the only column not contaminated by that, is flat
+  and disagrees in sign across configurations (−0.054 trained, +0.167 default). The cause
+  is v1's frozen entry size, not anything v2 added. **v2 is not risk-matched to v1**, so
+  read every column except Sharpe with that in mind. Full tables, the per-state
+  decomposition and the caveats are in
+  [the charter §9.3](docs/research/2026-08-03-market-dynamics-engine.md#93-r6-continuous-exposure-comparison--btcusdt-perp-4h).
 
 ---
 
@@ -337,6 +432,12 @@ applies — anything layered on top fires *before* the machine decides the trend
 | `trend_failure` | ✗ raises (no trend-failure series) |
 | `setup_invalidation_stop` | ✗ raises (no setup stop) |
 | `trend_structure` | long-only (raises if short entries exist — pass `--no-allow-shorts`); ⚠ replaces the machine's own exits with an SMA40 break |
+
+**`state_machine_v2` has no row in any of these tables, and the row is not missing.** The
+continuous-exposure path takes no `ExitMode` — the target reaching 0.0 is the exit, and
+`run_exposure_backtest` has no such parameter to pass. What sits in that slot is
+`rebalance_threshold` (default 0.05), which decides which target *changes* reach the book;
+see its section above.
 
 ## Engine behavior worth remembering
 
@@ -386,8 +487,11 @@ applies — anything layered on top fires *before* the machine decides the trend
   open and the per-bar weight series is consumed on exactly one bar per position: the one
   that opens it. A position held from a calm regime into a violent one carries its
   calm-regime notional the whole way, and realized risk is therefore *not* held constant.
-  Continuous rebalancing needs order-level control `from_signals` cannot express; it is
-  **R6**, where the engine moves to `from_orders` or a custom simulator (charter Q4).
+  Continuous rebalancing needs order-level control `from_signals` cannot express. **R6
+  landed it as a second path rather than by changing this one** —
+  `run_exposure_backtest` on `from_orders(size_type="targetvalue")`, for strategies on the
+  `TargetExposure` contract — so `--size-mode` and everything else in this section is
+  unaffected, and vectorbt is not retired (charter Q4).
   `tests/test_sizing.py::test_only_the_entry_bar_weight_lands_and_a_later_one_never_resizes`
   pins the real behaviour. The withdrawn `vol-target` spelling is **rejected, not aliased**.
 - Two more things to know before reading a

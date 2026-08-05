@@ -5,6 +5,10 @@ import re
 import pandas as pd
 import pytest
 
+from strategy_lab.strategies.exposure_registry import (
+    get_exposure_strategy,
+    list_exposure_strategies,
+)
 from strategy_lab.strategies.registry import get_strategy, list_strategies
 from tests.conftest import synthetic_ohlcv
 
@@ -95,6 +99,57 @@ def test_declared_warmup_reproduces_whole_history_signals(name):
     assert divergences == [], (
         f"{name} declares warmup_bars={warm}, but a cold start from exactly that "
         f"many bars disagrees with the whole-history run at {divergences[:5]} "
+        f"({len(divergences)}/{COLD_START_PROBES} probed bars). Raise warmup_bars."
+    )
+
+
+@pytest.mark.parametrize("name", list_exposure_strategies())
+def test_every_exposure_strategy_declares_a_semver_version(name):
+    strategy = get_exposure_strategy(name)
+    assert SEMVER.match(strategy.version), f"{name} version {strategy.version!r} is not semver"
+
+
+@pytest.mark.parametrize("name", list_exposure_strategies())
+def test_declared_warmup_reproduces_the_whole_history_target(name):
+    """The same promise as above, for the contract that has no ``SignalSet``.
+
+    The exposure registry is separate precisely so the boolean suites do not
+    iterate it, which means this check does not reach it either unless it is
+    written twice. It is: an unverified ``warmup_bars`` is how R5 shipped a
+    machine that could disagree with itself permanently.
+
+    Bit-exact, and on a frame carrying **no funding**, both deliberately.
+    Measured on ``state_machine_v2`` at these 300 probe points: 0 divergences
+    without funding, and 8 with it, the largest being 1.1e-16. That residue is
+    not a warmup problem and no amount of warmup removes it -- it is the
+    accumulation order of the rolling means under ``crowding``'s damping, which
+    ``state/policy.py`` already documents as ~1e-12 irreducible noise. Relaxing
+    to a tolerance to admit a funding frame would relax the one thing this test
+    is for.
+    """
+    strategy = get_exposure_strategy(name)
+    warm = strategy.warmup_bars
+    df = synthetic_ohlcv(n=warm + COLD_START_PROBES)
+    whole_history = strategy.compute_target(df).target
+
+    probes = range(warm, len(df))
+    assert len(probes) == COLD_START_PROBES, "frame must extend past warmup or this proves nothing"
+    live = int((whole_history.iloc[warm:] != 0.0).sum())
+    assert live >= 10, (
+        f"{name} holds a position on only {live} of the {COLD_START_PROBES} probed bars, "
+        f"so the comparison below is mostly 0.0 against 0.0"
+    )
+
+    divergences = [
+        position
+        for position in probes
+        if strategy.compute_target(df.iloc[position - warm : position + 1]).target.iloc[-1]
+        != whole_history.iloc[position]
+    ]
+
+    assert divergences == [], (
+        f"{name} declares warmup_bars={warm}, but a cold start from exactly that "
+        f"many bars disagrees with the whole-history target at {divergences[:5]} "
         f"({len(divergences)}/{COLD_START_PROBES} probed bars). Raise warmup_bars."
     )
 

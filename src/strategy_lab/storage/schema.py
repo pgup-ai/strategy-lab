@@ -59,6 +59,10 @@ signals_table = Table(
     Column("bar_is_closed", Boolean, nullable=False),
     Column("side", Text, nullable=False),
     Column("strength", Numeric(10, 6)),
+    # Arrives by ALTER rather than in the CREATE, so it sits last in the real
+    # table; declared here beside `strength` because both are levels and nothing
+    # in a named INSERT or SELECT depends on the order.
+    Column("target_exposure", Numeric(10, 6)),
     Column("entry_price", Numeric(38, 18)),
     Column("stop_loss", Numeric(38, 18)),
     Column("take_profit", Numeric(38, 18)),

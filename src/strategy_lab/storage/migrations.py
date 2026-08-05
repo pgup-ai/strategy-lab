@@ -93,6 +93,36 @@ END $$
 """.strip()
 
 
+def _guarded_index_migration(name: str, table: str, columns: str) -> str:
+    """Create one index, but only when it isn't already there.
+
+    ``CREATE INDEX IF NOT EXISTS`` takes a SHARE lock on the table before it
+    checks whether there is anything to build, and SHARE conflicts with the ROW
+    EXCLUSIVE an ordinary INSERT holds. Measured against a session holding ROW
+    EXCLUSIVE on ``signals``, these were the only two statements in the whole
+    migration set that blocked -- so an unguarded re-run stalls a live replay
+    writing signals for the rest of ``migrate``, while a *reader* passes
+    unharmed and makes the problem invisible.
+
+    Presence is the whole check, unlike the trigger guard above, which compares
+    the function and event mask too. An index of the same name over different
+    columns is a schema change rather than drift, and repairing one silently
+    would rebuild it under the lock this exists to avoid.
+    """
+    return f"""
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_class
+    WHERE relname = '{name}'
+      AND relnamespace = current_schema()::regnamespace
+  ) THEN
+    CREATE INDEX {name} ON {table} ({columns});
+  END IF;
+END $$
+""".strip()
+
+
 # Signals are a permanent audit trail: one table for both historical replays and
 # live sessions, separated only by `mode` and `run_id`, so a replay can be diffed
 # against a live session by joining on (symbol, timeframe, ts_bar_ms, side).
@@ -154,8 +184,53 @@ SIGNAL_MIGRATIONS: tuple[str, ...] = (
         (run_id, strategy_id, strategy_version, exchange, symbol, timeframe, ts_bar_ms, side)
     )
     """,
-    "CREATE INDEX IF NOT EXISTS ix_signals_lookup ON signals (symbol, timeframe, ts_bar_ms)",
-    "CREATE INDEX IF NOT EXISTS ix_signals_run ON signals (run_id, ts_bar_ms)",
+    # A drifting target cannot be a `side`: that column is a CHECK on four
+    # discrete events, and a level moving 1.00 -> 0.55 -> 0.20 is not an event.
+    # It gets its own column, nullable, so the boolean path keeps writing the
+    # row it writes today with NULL here -- no backfill, and no need to decide
+    # what level a strategy that never held one "really meant".
+    #
+    # ADD COLUMN rather than a line in the CREATE above: that CREATE is IF NOT
+    # EXISTS and does nothing whatever against a database that already has the
+    # table, so a column declared only there would exist on a fresh checkout and
+    # nowhere else. Nullable with no default is metadata-only from Postgres 11
+    # on -- the catalog gains a row and the heap is not rewritten -- and the
+    # append-only triggers are untouched, since no row is updated or deleted.
+    #
+    # NUMERIC(10,6) matches `strength`. NUMERIC rather than float8 for the
+    # reason `db/candles.py` documents: a float bound to this column arrives as
+    # a float8 parameter and Postgres applies its implicit float8 -> numeric
+    # cast, which formats via "%.15g". Scale 6 does not hide that. Measured
+    # through the real insert path against Postgres 16.13, the float64 just
+    # below 0.5499995 stores as 0.550000 bound as a float and 0.549999 bound as
+    # a Decimal, because the cast lands it exactly on the 6dp half-way boundary
+    # that NUMERIC then rounds away from zero.
+    #
+    # Guarded for the reason `_guarded_trigger_migration` is, and `IF NOT
+    # EXISTS` is not that guard: ALTER TABLE takes its ACCESS EXCLUSIVE lock
+    # before it looks at whether there is anything to do, and Postgres holds
+    # that lock until the migration transaction commits, so a no-op still
+    # blocks every reader and writer of `signals` for the rest of `migrate`.
+    # Measured against a session holding only ACCESS SHARE: the bare statement
+    # waits out a 2s lock_timeout and fails, the guarded one returns without
+    # waiting. The guard tests presence alone -- exactly what `IF NOT EXISTS`
+    # tested, and no more, since this statement never repaired a column of the
+    # wrong shape either.
+    """
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM information_schema.columns
+    WHERE table_schema = current_schema()
+      AND table_name = 'signals'
+      AND column_name = 'target_exposure'
+  ) THEN
+    ALTER TABLE signals ADD COLUMN target_exposure NUMERIC(10,6);
+  END IF;
+END $$
+""".strip(),
+    _guarded_index_migration("ix_signals_lookup", "signals", "symbol, timeframe, ts_bar_ms"),
+    _guarded_index_migration("ix_signals_run", "signals", "run_id, ts_bar_ms"),
     """
     CREATE OR REPLACE FUNCTION signals_reject_mutation() RETURNS trigger AS $$
     BEGIN
@@ -182,9 +257,20 @@ SIGNAL_MIGRATIONS: tuple[str, ...] = (
 # one. `funding_time_ms` is stored as the venue reported it, and the spacing is a
 # property of the data rather than a rule the schema imposes.
 #
-# `CREATE TABLE/INDEX IF NOT EXISTS` are genuine no-ops on re-run: they take no
-# lock on an already-existing object and never rewrite one, which is what
-# `test_rerunning_migrations_does_not_rewrite_the_table` is defending.
+# `CREATE TABLE/INDEX IF NOT EXISTS` never rewrite an existing object, which is
+# what `test_rerunning_migrations_does_not_rewrite_the_table` defends. They are
+# not lock-free, though: `CREATE INDEX IF NOT EXISTS` takes a SHARE lock before
+# it looks for the index, and SHARE conflicts with the ROW EXCLUSIVE an INSERT
+# holds. The two `signals` indexes are guarded above for that reason -- measured
+# statement by statement against a session holding ROW EXCLUSIVE on `signals`,
+# they were the only two of the 22 that blocked.
+#
+# The four indexes below are deliberately left bare. They are on `funding_rates`
+# and `open_interest`, which are batch-fetched between runs and have no live
+# writer to block; the `signals` pair was worth the guard because a replay
+# writes signals continuously and `migrate` is exactly what someone runs while
+# one is going. Guarding these too would spend the same complexity on a session
+# that does not exist -- revisit it when something writes funding live.
 FUNDING_MIGRATIONS: tuple[str, ...] = (
     """
     CREATE TABLE IF NOT EXISTS funding_rates (
@@ -218,11 +304,30 @@ FUNDING_MIGRATIONS: tuple[str, ...] = (
 )
 
 
+# Any bigint works; this one is arbitrary and only has to stay stable, since two
+# migration runs serialize only by agreeing on it.
+MIGRATION_LOCK_KEY = 8_314_070_251_063_129
+
+
 def run_migrations(database_url: str | None = None) -> int:
-    """Apply idempotent schema upgrades. Returns the number of statements executed."""
+    """Apply idempotent schema upgrades. Returns the number of statements executed.
+
+    Every statement here is guarded or ``IF NOT EXISTS``, which makes a *repeat*
+    run a no-op but does not make two *concurrent* first runs safe: each of them
+    checks for the object before either creates it, so both decide to create.
+    Measured on two connections with an index absent, the second raises
+    ``UniqueViolation`` -- and it does so for the bare ``CREATE INDEX IF NOT
+    EXISTS`` exactly as it does for the ``pg_class`` guard beside it, because
+    ``IF NOT EXISTS`` is checked before the lock is taken rather than under it.
+
+    ``pg_advisory_xact_lock`` turns that into a wait. It is transaction-scoped,
+    so it is released by the commit or rollback below and never leaks a lock on
+    a failed migration.
+    """
     statements = MIGRATIONS + SIGNAL_MIGRATIONS + FUNDING_MIGRATIONS
     engine = get_engine(database_url)
     with engine.begin() as conn:
+        conn.execute(text("SELECT pg_advisory_xact_lock(:key)"), {"key": MIGRATION_LOCK_KEY})
         for statement in statements:
             conn.execute(text(statement))
     return len(statements)

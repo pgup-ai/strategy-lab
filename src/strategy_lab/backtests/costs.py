@@ -42,6 +42,45 @@ class CostModel:
         return replace(self, fee=self.fee * multiple, slippage=self.slippage * multiple)
 
 
+def held_notional(assets: pd.Series, opens: pd.Series) -> pd.Series:
+    """Signed notional held *into* each bar, valued at that bar's open.
+
+    Fills land at the bar's close, so ``assets`` at bar *t* is the position held
+    over bar *t+1* -- the shift is what makes the charge causal rather than
+    settling funding against a position taken after the settlement happened.
+    True of both execution paths: ``from_signals`` and ``from_orders`` alike
+    fill at the close of the bar they act on.
+
+    The open is the mark at the instant a settlement on a bar boundary occurs,
+    which is every settlement when bars divide the funding interval (4h bars, 8h
+    funding). Bars coarser than the interval carry several settlements and mark
+    them all at the bar's open; that approximation moves a charge by a fraction
+    of a percent of itself and is not worth a mark-price series that is NULL for
+    60% of stored history.
+    """
+    return (assets.shift(1) * opens).fillna(0.0)
+
+
+def slippage_paid(orders: pd.DataFrame, slippage: float) -> float:
+    """Currency lost to slippage, recovered from the fill prices it moved.
+
+    vectorbt folds slippage into the fill rather than reporting it, so it is
+    invisible next to ``Total Fees Paid`` unless it is backed out: a buy filled
+    at ``reference * (1 + slippage)`` and a sell at ``reference * (1 -
+    slippage)``, always against the trader.
+
+    ``orders`` is vectorbt's ``records_readable`` frame, so this stays a
+    function of the fills rather than of which portfolio constructor produced
+    them.
+    """
+    if slippage == 0.0 or orders.empty:
+        return 0.0
+
+    direction = np.where(orders["Side"].to_numpy() == "Buy", 1.0, -1.0)
+    reference = orders["Price"].to_numpy(dtype="float64") / (1.0 + direction * slippage)
+    return float((orders["Size"].to_numpy(dtype="float64") * reference * slippage).sum())
+
+
 def apply_funding(*, positions: pd.Series, funding: pd.Series) -> pd.Series:
     """Funding cash flows for ``positions``, aligned to the position index.
 
@@ -196,5 +235,7 @@ __all__ = [
     "apply_funding",
     "funding_coverage_gaps",
     "funding_ledger",
+    "held_notional",
+    "slippage_paid",
     "window_end",
 ]

@@ -475,6 +475,9 @@ disk stays fully static.
 - `state_machine_v1` — the MDE R5 strategy: a six-state market lifecycle
   (compression → breakout → confirmed → riding → exhaustion → reset) with hysteresis,
   minimum dwell and a post-reset cooldown, sizing each entry from the state it opened in
+- `state_machine_v2` — the MDE R6 strategy: the same machine, policy and features on the
+  continuous-exposure contract, holding one signed target level per bar instead of
+  entry/exit booleans. Not on the `backtest` CLI — see below
 
 ```bash
 strategy-lab backtest --exchange binance --market-type perp --symbols BTC/USDT \
@@ -489,6 +492,23 @@ free carry. It clears the R0 baseline out of sample on risk-adjusted terms — S
 against `donchian` 40/10's +0.072 over the same held-out 6,048 bars — while returning far
 less than buy-and-hold. Read
 [STRATEGIES.md](STRATEGIES.md#state_machine_v1) before quoting any of that.
+
+**There are two strategy contracts.** `SignalSet` says enter, exit and how big to *start*;
+`TargetExposure` (`strategies/exposure.py`) says what to *hold* on every bar, and
+`backtests/exposure_engine.py` executes it through
+`Portfolio.from_orders(size_type="targetvalue")` — a level rather than an event, so a
+position can be resized without being closed, which `from_signals` cannot do (it reads a
+size only on the bar that opens a position). Both stay: the four original strategies and
+`state_machine_v1` keep `SignalSet` and their published results, while `state_machine_v2`
+runs the continuous one and is registered in a third manual registry
+(`strategies/exposure_registry.py`), because every boolean test suite calls
+`generate_signals`. R6 measured what the second contract bought over R5's held-out half:
+**the taper it was built for is worth approximately zero** (+15.30 / −63.05 gross over
+75/77 bars), what v2 actually buys is 1.7–1.8× v1's average exposure with return scaling
+accordingly and Sharpe flat, and the reason is on v1's side — not one of its entries is
+sized for `RIDING`, the row its own policy sizes highest. See
+[STRATEGIES.md](STRATEGIES.md#state_machine_v2) and
+[the charter §9.3](docs/research/2026-08-03-market-dynamics-engine.md#93-r6-continuous-exposure-comparison--btcusdt-perp-4h).
 
 See [STRATEGIES.md](STRATEGIES.md) for the source of truth: per-strategy logic,
 parameters, canonical run commands, the exit-mode compatibility matrix, and known issues.
