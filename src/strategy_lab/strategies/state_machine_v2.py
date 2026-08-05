@@ -1,12 +1,11 @@
 """The R5 state machine again, with the collapse to booleans removed.
 
 ``state_machine_v1`` **already computes** the full signed continuous target on
-every bar -- ``state.policy.target_risk_series``, the same call this makes --
-and then discards most of it: it keeps ``np.sign(target)`` for the entry
-booleans and ``target.abs()`` as a ``position_size`` that
-``vbt.Portfolio.from_signals`` reads only on the bar that opens a position. The
-charter's per-state taper is therefore not *missing* from v1. It is computed and
-thrown away, because the boolean contract has nowhere to put it.
+every bar -- ``strategies.state_machine_core.signed_target``, the same call this
+makes -- and then discards most of it, because the boolean contract has nowhere
+to put a level; ``strategies.exposure`` carries the measurement that forces the
+discard. The charter's per-state taper is therefore not *missing* from v1: it is
+computed and thrown away.
 
 So this is v1 with that truncation removed, and nothing else. Same machine, same
 policy, same ``state.policy.STATE_TARGET_RISK`` (0.00 / 0.35 / 0.70 / 1.00 /

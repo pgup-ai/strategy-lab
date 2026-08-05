@@ -36,9 +36,11 @@ class TargetExposure:
     """The signed fraction of risk capital to hold on each bar, in -1..1.
 
     ``+1`` is the whole risk budget long, ``-1`` the whole of it short, ``0``
-    flat. It is a fraction of the *budget*, not of equity: the engine turns it
-    into a percentage of the book by multiplying through ``position_pct``, so a
-    target of 1.0 at ``position_pct=0.95`` asks for 95% of equity.
+    flat. It is a fraction of the *budget*, not of equity: the engine sizes an
+    order as ``target x position_pct x cash`` against *initial* cash, so a
+    target of 1.0 at ``position_pct=0.95`` asks for 95% of that rather than of
+    the book as it stands. ``backtests/exposure_engine.py`` owns that rule and
+    says why it is not a fraction of current equity.
 
     **Warmup is a leading run of 0.0, and NaN is refused.** This inverts the
     convention in ``features/base.py``, on purpose. A feature's warmup rows are

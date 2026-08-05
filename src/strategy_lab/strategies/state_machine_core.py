@@ -39,7 +39,6 @@ import pandas as pd
 from strategy_lab.state.machine import StateMachine
 from strategy_lab.state.policy import target_risk_series
 
-# The four columns the machine reads, in the order the adapters declare them.
 DEFAULT_FEATURES = ("direction", "strength", "stability", "crowding")
 
 # Features whose value is read as a trailing rank rather than as a level.
@@ -109,10 +108,8 @@ def signed_target(
 ) -> tuple[pd.Series, bool]:
     """The policy's signed target risk for every bar, and the crowding flag.
 
-    This is the whole of what a state-machine strategy decides. v1 keeps
-    ``np.sign`` of it for booleans and ``abs`` of it as an entry-only size; v2
-    returns it unchanged. Both read the same series, which is what makes the
-    difference between them exactly the collapse and nothing else.
+    This is the whole of what a state-machine strategy decides; both adapters
+    read this one series, which is the point of the module docstring above.
     """
     frame, crowding_measured = build_feature_frame(
         df, features=features, rank_window=rank_window
