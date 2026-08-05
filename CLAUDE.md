@@ -116,11 +116,44 @@ Key design decisions that span multiple files:
   in R2 against the installed vectorbt, `size = [1,1,1,1,5,5,5,5]` with an entry
   every bar yields one order of size 1.0 and a position that never resizes. So
   `state_machine_v1`'s per-state target risk picks the size *at entry* — a later
-  state can close the position but cannot scale it, and the charter's
-  exhaustion → distribution taper is deferred to R6 where the continuous-exposure
-  contract lands. Writing a taper against this engine ships a state machine whose
-  defining behaviour is silently ignored, which is exactly what "volatility
-  targeting" turned out to be before it was renamed `vol-scaled-entry`.
+  state can close the position but cannot scale it. R6 measured what that costs:
+  **not one of `state_machine_v1`'s test-half entries is in `RIDING`**, so the
+  largest position it ever opened is 52.3% of capital (trained) and 66.5%
+  (default) against the **95%** its own `RIDING` row asks for, on a machine that
+  spent 209 / 516 bars there. The lifecycle is strictly forward, so the entry bar
+  is always the *smallest* non-zero row of the per-state table and the position
+  freezes there — the charter's per-state table has never executed above its
+  `BREAKOUT` row. A taper belongs on the continuous contract below, not here:
+  writing one against this engine ships a state machine whose defining behaviour
+  is silently ignored, which is exactly what "volatility targeting" turned out to
+  be before it was renamed `vol-scaled-entry`.
+- **Two strategy contracts coexist, and what picks between them is whether a
+  strategy needs to resize a position it already holds.** `SignalSet` says
+  *enter*, *exit* and *how big to start*. `TargetExposure`
+  (`strategies/exposure.py`) carries a **level**: `target[t]` in −1..1 is the
+  whole of what the book should hold over bar *t*, whatever it held over *t−1*,
+  executed by `run_exposure_backtest` (`backtests/exposure_engine.py`) through
+  `Portfolio.from_orders(size_type="targetvalue")` — measured, a 10-bar taper
+  issues 6 orders there against `from_signals`' 1. Neither contract is migrating
+  to the other: the four original strategies keep `SignalSet` and their
+  byte-identical results of record, `state_machine_v1` keeps it so R5's published
+  numbers do not move, and `state_machine_v2` is the same machine, policy,
+  `STATE_TARGET_RISK` and features on the continuous one — having both is what
+  made R6's comparison the collapse and nothing else. Three properties of the
+  continuous path a reader has to carry. (1) **Warmup is a leading run of 0.0 and
+  NaN is refused**, the exact inverse of the feature convention above, because
+  `from_orders` reads NaN as "no order", i.e. *hold whatever you held* — the one
+  reading a warmup row must never carry. (2) **Size is a currency value against
+  initial cash** (`target × position_pct × cash`); `targetpercent` is a fraction
+  of *current* equity and would silently compound, breaking the non-compounding
+  rule below on the one path that was supposed to be comparable to the other.
+  (3) **A target reaches the book only once it has moved `rebalance_threshold`
+  (default 0.05) from the last target *submitted***, so between decisions the
+  book holds a fixed quantity and its fraction of equity drifts with price, by
+  design. Band 0.0 rebalances every bar, trimming winners and adding to losers —
+  a mean-reversion overlay on a trend thesis — and it moves the result *before* a
+  fee is charged (20,742.99 against 20,261.47, costless and funding-free), so it
+  is a model choice and not a cost optimisation.
 - **Candle identity is `(exchange, market_type, symbol, timeframe)`** with the timeframe
   as a literal string — `1w` and `1wk` are distinct datasets. All indicators are computed
   at backtest time from raw candles. In the event engine that identity is `CandleId`
@@ -277,7 +310,8 @@ Once registered, a strategy is automatically exercised by
 `strategies.registry.list_strategies()`, so no additional test wiring is
 needed. A new strategy that fails either is not a test problem: it means the
 strategy reads future data, or the two execution paths genuinely disagree for
-it.
+it. A strategy on the continuous-exposure contract registers somewhere else —
+see below.
 
 ## Adding a state feature
 
@@ -291,3 +325,32 @@ probe compares NaN to NaN and passes without testing anything) and in the
 warmup rows are `NaN`, never 0.0. A feature that cannot be computed from a given
 frame should **raise** rather than return a neutral value, as `Crowding` does
 without funding.
+
+## Adding a continuous-exposure strategy
+
+There are **three** manual registries, not two: `strategies/registry.py`,
+`features/registry.py`, and `strategies/exposure_registry.py`. A strategy that
+returns a `TargetExposure` goes in the third — new module under
+`src/strategy_lab/strategies/`, then both `list_exposure_strategies()` and
+`get_exposure_strategy()`.
+
+**It is a third registry rather than a third entry in the first one because the
+boolean suites cannot run an exposure strategy and would not say so.** Six
+parametrized tests across `tests/test_lookahead.py`,
+`tests/test_replay_determinism.py` and `tests/test_strategy_metadata.py` iterate
+`list_strategies()`, and every one of them calls `generate_signals`, which an
+exposure strategy does not have. Measured by mutation: an **empty**
+`exposure_registry` silently **skips 4 parametrized tests and exits 0** — the
+suite goes green by not running, which is the failure this repo mutation-tests
+to prevent. Registering here is what enrols a strategy in
+`tests/test_exposure_lookahead.py` (the poison probe, funding poisoned along with
+the prices because `crowding` reads it, plus a check that the target actually
+*moves* over the probe window — a target that is 0.0 everywhere compares equal to
+itself as happily as NaN does), in `tests/test_exposure_determinism.py`
+(whole-history vs streaming, a runner primed from mid-history, and target-level
+equality on every bar rather than side-level), and in the cold-start warmup check
+in `tests/test_strategy_metadata.py`.
+
+Warmup rows are `0.0`, never `NaN` — the inverse of the feature convention, for
+the reason in the design bullet above. There is no `ExitMode` on this path: a
+target of 0.0 *is* the exit, so there is no exit-mode matrix to fill in.
