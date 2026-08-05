@@ -10,6 +10,7 @@ readme = "README.md"
 requires-python = ">=3.11,<3.13"
 dependencies = [
   "ccxt>=4.0",
+  "fastapi>=0.115",
   "numpy>=1.26",
   "pandas>=2.2",
   "plotly>=5.20",
@@ -18,12 +19,14 @@ dependencies = [
   "requests>=2.31",
   "SQLAlchemy>=2.0",
   "typer>=0.12",
+  "uvicorn>=0.30",
   "vectorbt>=0.26",
   "yfinance>=0.2",
 ]
 
 [project.optional-dependencies]
 dev = [
+  "httpx>=0.27",
   "pytest>=8.0",
   "ruff>=0.5",
 ]

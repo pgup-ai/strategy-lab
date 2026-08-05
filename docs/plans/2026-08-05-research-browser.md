@@ -104,19 +104,51 @@ that was already in the file.
 
 ---
 
-## The dependency decision, stated rather than assumed
+## The dependency decision: FastAPI + Pydantic, adopted
 
-The design doc's §11 already chose **FastAPI + Pydantic** for the Phase 3 API,
-"so OpenAPI/JSON-schema is [free]". None of `fastapi`, `uvicorn` or `pydantic`
-is currently installed.
+**Decided 2026-08-05.** The reason is **inbound validation**, and it is worth
+stating precisely, because the first draft of this plan gave the weaker one.
 
-**Recommendation: adopt it now.** This browser's API *is* Phase 3's API, and
-building it on `http.server` means writing it twice. The typed response models
-are also what stop the provenance fields below being quietly dropped.
+`server.py` hand-rolls query parsing today: a `required()` closure raising
+`ValueError` on empty strings, and `after = int(values[0]) if values else None`
+with no bounds check — five parameters. This browser's surface is roughly
+double: exchange, market_type, symbol, timeframe, strategy, exit_mode, cost
+model, `position_pct`, date range, contract. **Every hand-parsed parameter is a
+place where a wrong or missing value silently becomes a default, and that is
+exactly M20** — a funding column silently absent changed a published figure, and
+it took a second-asset replication to notice. An API that silently defaults
+`exit_mode` reproduces that failure precisely: a plausible number computed under
+settings nobody chose. FastAPI makes it a 422 naming the field.
 
-**The alternative, if the dependency is unwelcome:** extend `server.py`'s
-`http.server` with two more JSON endpoints. Cheaper today, thrown away at Phase
-3, and no schema. Decide before Task 1 — everything after it assumes FastAPI.
+**What was wrong in the first draft.** It claimed typed *response* models are
+what stop provenance fields being dropped. They are not needed for that: this
+repo already enforces required fields with frozen dataclasses and validating
+`__post_init__` (`TargetExposure`, `SignalSet`, `Bar`, `Signal`). Pydantic adds
+nothing outbound that the house idiom does not already do. **The value is
+entirely inbound.**
+
+**The argument deliberately not relied on.** "This is Phase 3's API anyway" is
+weak, and it is weak for a reason this plan's own author supplied: the C2 centre
+is R10, gated behind R9, on numbers ETH showed to be thin — one scalar by 0.083,
+with the untuned machine failing out of sample. If R9 kills them, Phase 3 never
+happens. Adopt this because *the browser* needs it, not because a successor
+might.
+
+**The tiebreaker.** `http.server` is already marked *"Replace. Synchronous,
+fetches from the exchange inside a GET handler"* in the design doc's own
+inventory. Adding four endpoints to a component the repo has condemned is debt
+this codebase is usually good at refusing.
+
+**Measured footprint**, resolved clean against vectorbt / numba / pandas:
+
+```
+runtime (9)  fastapi 0.141.1   starlette 1.4.1   pydantic 2.13.4
+             pydantic_core 2.46.4   uvicorn 0.52.1   anyio 4.14.2
+             h11 0.16.0   annotated-types 0.8.0   typing-inspection 0.4.2
+dev (2)      httpx 0.28.1   httpcore 1.0.9        # fastapi.testclient.TestClient
+```
+
+Runtime goes in `dependencies`, the two test-only ones in `optional-dependencies.dev`.
 
 ---
 
