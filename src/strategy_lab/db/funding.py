@@ -207,6 +207,43 @@ def load_funding(
     )
 
 
+def funding_span(
+    *,
+    exchange: str,
+    market_type: str,
+    symbol: str,
+    database_url: str | None = None,
+) -> tuple[pd.Timestamp, pd.Timestamp] | None:
+    """First and last stored settlement for one contract, or ``None`` if none.
+
+    Three callers want the edges and none of them want the series: the browser's
+    refresh needs a floor to catch funding up from, the coverage refusal needs a
+    window it can tell a reader would work, and the marker-parity test needs a
+    right bound that a later candle fetch cannot move. Loading 7,565 BTC rows to
+    read two of them is the kind of query that only looks free.
+
+    Funding is keyed without a timeframe, so this is one span per contract
+    however many candle timeframes are stored beside it.
+    """
+    with get_engine(database_url).connect() as conn:
+        first, last = conn.execute(
+            select(
+                func.min(funding_table.c.funding_time_ms),
+                func.max(funding_table.c.funding_time_ms),
+            ).where(
+                funding_table.c.exchange == exchange,
+                funding_table.c.market_type == market_type,
+                funding_table.c.symbol == symbol,
+            )
+        ).one()
+    if first is None:
+        return None
+    return (
+        pd.Timestamp(int(first), unit="ms", tz="UTC"),
+        pd.Timestamp(int(last), unit="ms", tz="UTC"),
+    )
+
+
 def load_open_interest(
     *,
     exchange: str,
@@ -290,6 +327,7 @@ __all__ = [
     "MAX_BOUND_PARAMETERS",
     "MAX_FUNDING_ROWS_PER_INSERT",
     "MAX_OPEN_INTEREST_ROWS_PER_INSERT",
+    "funding_span",
     "funding_table",
     "load_funding",
     "load_open_interest",

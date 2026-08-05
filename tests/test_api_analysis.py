@@ -25,6 +25,7 @@ from strategy_lab.api.analysis import (
     resolve_strategy,
 )
 from strategy_lab.backtests import ExitMode, run_backtest
+from strategy_lab.db.funding import funding_span
 from strategy_lab.features.flow import FUNDING_COLUMN
 from strategy_lab.market_data.base import MarketDataIdentity
 from tests.conftest import synthetic_ohlcv, synthetic_ohlcv_with_funding
@@ -35,6 +36,31 @@ _PERP = MarketDataIdentity(
 # state_machine_v1 warms 2,192 bars, so anything exercising it needs a frame
 # several times that before a single signal exists to compare.
 _MACHINE_BARS = 3000
+# Past BTC's permanent 40h leading funding gap, which would otherwise refuse the
+# frame before a single marker was compared.
+_FUNDED_START = "2022-01-01"
+
+
+def _funded_end() -> str:
+    """The window's right edge, taken from stored funding rather than the last bar.
+
+    Any candle refresh fetches bars up to the present and leaves stored funding
+    where it was, so an unbounded window grows past the last settlement until
+    ``funding_coverage_gaps`` refuses the frame -- turning a marker-parity claim
+    red while naming a strategy, when what moved was the data underneath it.
+    Bounding at the last stored settlement makes the window self-determined:
+    bars a later fetch adds beyond it are outside what this file tests, and the
+    trailing gap stays the sub-cadence one the guard is built to tolerate.
+    """
+    span = funding_span(
+        exchange=_PERP.exchange, market_type=_PERP.market_type, symbol=_PERP.symbol
+    )
+    if span is None:
+        pytest.fail(
+            f"no stored funding for {_PERP.exchange}/perp/{_PERP.symbol}; run "
+            f"strategy-lab fetch-funding --symbol {_PERP.symbol}"
+        )
+    return str(span[1])
 
 
 @pytest.fixture
@@ -106,9 +132,13 @@ def test_the_payload_marks_the_bars_the_backtest_actually_trades(
     of a fill price -- and the quantity by up to 14%, because there is less cash
     to deploy. A comparison on bars alone would pass against a payload priced at
     whatever cost model it liked.
+
+    Both ends of the window come from stored data rather than from the clock --
+    see :func:`_funded_end` for why the right one has to.
     """
     strategy = resolve_strategy(strategy_name).strategy
-    prepared = prepare_frame(_PERP, strategy=strategy, start="2022-01-01")
+    end = _funded_end()
+    prepared = prepare_frame(_PERP, strategy=strategy, start=_FUNDED_START, end=end)
     result = run_backtest(
         df=prepared.df,
         strategy=strategy,
@@ -120,7 +150,11 @@ def test_the_payload_marks_the_bars_the_backtest_actually_trades(
     trades = pd.read_csv(result.trades_path)
 
     payload = build_analysis(
-        _PERP, strategy_name=strategy_name, exit_mode=exit_mode, start="2022-01-01"
+        _PERP,
+        strategy_name=strategy_name,
+        exit_mode=exit_mode,
+        start=_FUNDED_START,
+        end=end,
     )
 
     assert not trades.empty, "a frame with no trades would pass this vacuously"
