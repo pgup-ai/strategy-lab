@@ -15,6 +15,7 @@ from strategy_lab.market_data.base import MarketDataIdentity
 from strategy_lab.market_data.binance_futures import OPEN_INTEREST_HISTORY_DAYS
 from strategy_lab.market_data.binance_futures import SOURCE as BINANCE_FUTURES_SOURCE
 from strategy_lab.strategies import get_strategy, list_strategies
+from strategy_lab.strategies.base import require_warmup_bars
 from strategy_lab.universe.etfs import ETF_UNIVERSE
 
 
@@ -755,6 +756,13 @@ def _diagnosable_features(names, df):
     diagnosable, skipped = [], {}
     for name in names:
         feature = get_feature(name)
+        # Outside the ``try`` on purpose: the ``except`` below files a ValueError
+        # under ``skipped``, so a guard raising inside it would report a broken
+        # declaration as "this frame cannot carry that feature" -- the silent
+        # outcome, reached through the clause that exists to make skips honest.
+        # What it refuses: ``head(-5 + 2)`` is 197 rows of a 200-row frame, and a
+        # probe that reads nearly the whole frame is no longer a probe.
+        require_warmup_bars(name, feature.warmup_bars)
         try:
             feature.compute(df.head(feature.warmup_bars + 2))
         except ValueError as exc:

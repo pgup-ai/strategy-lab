@@ -54,6 +54,7 @@ class Participation:
         return mask_warmup(
             rolling_percentile(df["volume"], window=self.window),
             warmup_bars=self.warmup_bars,
+            name=self.name,
         )
 
 
@@ -100,7 +101,9 @@ class Crowding:
         zscore = rolling_zscore(accrued, window=self.zscore_window)
         # tanh rather than a clip: carry z-scores have long tails and the
         # interesting comparisons are between a 2-sigma and a 5-sigma extreme.
-        return mask_warmup((np.tanh(zscore) + 1.0) / 2.0, warmup_bars=self.warmup_bars)
+        return mask_warmup(
+            (np.tanh(zscore) + 1.0) / 2.0, warmup_bars=self.warmup_bars, name=self.name
+        )
 
 
 def align_funding_to_bars(index: pd.DatetimeIndex, funding: pd.Series) -> pd.Series:

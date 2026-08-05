@@ -58,6 +58,7 @@ class Energy:
             rolling_percentile(realized_volatility(df, window=self.vol_window),
                                window=self.percentile_window),
             warmup_bars=self.warmup_bars,
+            name=self.name,
         )
 
 
@@ -115,7 +116,9 @@ class CompressionRelease:
 
     def compute(self, df: pd.DataFrame) -> pd.Series:
         return mask_warmup(
-            -self._compression().compute(df).diff(), warmup_bars=self.warmup_bars
+            -self._compression().compute(df).diff(),
+            warmup_bars=self.warmup_bars,
+            name=self.name,
         )
 
 
