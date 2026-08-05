@@ -2,9 +2,10 @@
 
 ``run_backtest`` drives ``vbt.Portfolio.from_signals``, which fills once per
 state change and consumes a size only on the bar that opens a position. This
-module drives ``from_orders`` with ``size_type="targetpercent"`` instead, which
-reads the size on *every* bar and issues whatever order moves the book to it.
-Measured against the installed vectorbt (1.0.0) on a flat 10-bar frame:
+module drives ``from_orders`` with ``size_type="targetvalue"`` instead, which
+reads a size on *every* bar rather than only at an entry, and issues whatever
+order moves the book to it. Measured against the installed vectorbt (1.0.0) on a
+flat 10-bar frame:
 
     target  : [0.0, 0.3, 0.7, 1.0, 1.0, 1.0, 0.55, 0.55, 0.2, 0.0]
     position: [0.0, 30., 70., 100., 100., 100., 55., 55., 20., 0.0]
@@ -13,31 +14,58 @@ Measured against the installed vectorbt (1.0.0) on a flat 10-bar frame:
 The two paths are siblings, not successors: the four original strategies keep
 ``from_signals`` and their results of record, and nothing here changes them.
 
-**Two consequences of ``targetpercent`` a reader has to carry.**
+**The target is a fraction of the risk budget, and the budget is initial cash.**
+The order size is ``target x position_pct x cash``, which is CLAUDE.md's rule for
+the boolean path -- entries sized from *initial* cash, never from current equity
+-- restated for this one. ``targetpercent`` is the obvious alternative and the
+wrong one: it is a fraction of *current* equity, so a profitable run silently
+grows its notional, and a continuous strategy compared against a boolean one
+would be measuring a change of sizing model alongside whatever it meant to
+measure. One consequence of the anchor is worth carrying: a target of 1.0 asks
+for ``position_pct x cash`` however far equity has fallen, so a deep enough
+drawdown leaves the book unable to afford it and it fills what cash covers.
+Measured on the history below, that bound bit on 1 decision bar in 4,531.
 
-*It is a fraction of current equity, so it compounds*, where ``run_backtest``
-sizes every entry from *initial* cash. A profitable continuous run therefore
-grows its notional and a boolean one does not, which is a difference between the
-two paths that has nothing to do with the taper. Any comparison of a continuous
-strategy against a boolean one is measuring both effects at once and should say
-so.
+**The rebalance band is a model choice, not a cost optimisation.** A target
+reaches the engine through ``rebalance_threshold``: a value is submitted only
+once it has moved at least that far from the last value *submitted*, and every
+other bar is ``NaN``, which ``from_orders`` reads as "no order, hold what you
+held". Between decisions the book therefore holds a fixed *quantity*, and its
+fraction of equity **rises with a winner and falls with a loser** -- measured
+below, a median drift of 2.5 percentage points of equity away from the target,
+and a maximum of 26.0. That is why ``position_fraction`` is what the book drifted
+to rather than what the target asked for.
 
-*A target that never changes still trades.* Equity moves, so holding a constant
-fraction of it means trading to stay there. Price is the obvious mover --
-measured, a constant 0.5 target on a six-bar ramp from 100 to 200 issues six
-orders, selling into strength -- but **costs move it too**: the same 10-bar
-taper that issues 6 orders costlessly issues 9 at a 10 bps fee, the three extras
-being dust rebalances after each fee shrank the equity the fraction is taken of.
+Rebalancing an unchanged target on every bar does the opposite -- to a fixed
+notional here, to a fixed fraction under ``targetpercent``, and either way it
+trims winners and adds to losers: a mean-reversion overlay bolted onto a strategy
+whose whole thesis is riding a trend. ``rebalance_threshold=0.0`` is exactly that
+overlay, since it submits on every bar -- a usable setting, and the honest name
+for what it does, but not a neutral default. Nor is it a cost story: costless and funding-free, the
+same target ends at 20,742.99 at the 0.05 default against 20,261.47 at band 0.0,
+so the overlay moves the result before a single fee is charged.
 
-That is not a rounding effect at scale. Measured on the stored 15,128-bar
-BTC/USDT 4h perp history with a target snapped to seven levels: **4,996 target
-changes, 14,404 orders** -- 96% of live bars trade -- and at 5 bps fee plus 5 bps
-slippage the fills cost 18,850 against 10,000 of initial capital, taking a
-costless 21,932 final equity down to 557. Tracking itself is exact (the position
-matches the target to 5.6e-16 costlessly, 1.5e-3 at 10 bps), so this is the
-price of *holding a fraction rather than a quantity*, not an execution defect.
-An order count here is therefore not a count of a strategy's decisions, and
-turnover on this path is not comparable to a boolean path's trade count.
+Measured on the stored 15,128-bar BTC/USDT 4h perp history, funding applied, at
+the default cash and cost model, with the ``_EwmTaper`` from
+``tests/test_exposure_determinism.py`` as the target -- an ``ewm(span=30)``
+momentum snapped to the charter's seven levels:
+
+    band    decisions   orders   final equity
+    0.05        4,531    4,531       6,648.55   <- the default: one order each
+    0.00        4,531   12,442       5,991.58
+
+An order count is still not a count of a strategy's decisions: it is a count of
+decisions *at the band the run used*, and at band 0.0 those same 4,531 decisions
+produce 12,442 fills, the other 7,911 being drift rebalances nothing asked for.
+Turnover here is comparable to a boolean path's trade count only through that
+number. Tracking itself is exact -- costlessly the position matches the submitted
+target at every decision bar to 3.8e-16.
+
+The band does not touch a strategy's *own* turnover, and should not. The taper
+above is a determinism fixture rather than a strategy and decides every 3.3 bars;
+the 6,297.43 of fees and 6,297.43 of slippage that costs, against 10,000 of
+initial capital, is why it ends below where it started while a costless run of
+the same decisions ends at 20,742.99.
 
 Funding, fees and slippage all come from ``backtests/costs.py`` -- the same
 containment matching and the same held-notional convention the boolean path
@@ -54,6 +82,7 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass
 from typing import Any
 
+import numpy as np
 import pandas as pd
 
 from strategy_lab.backtests.costs import (
@@ -77,12 +106,22 @@ class ExposureBacktestResult:
     ``equity - funding_flow.cumsum()`` and no reader has to guess which curve a
     number describes.
 
-    ``position_fraction`` is the signed value of the position over equity, i.e.
-    what the target asked for, measured on the book that resulted. Comparing the
-    two is the phase's gate.
+    ``target`` is what the strategy asked for on every bar;
+    ``rebalance_target`` is what the band actually submitted -- the same value on
+    a decision bar, ``NaN`` on a bar the band held. ``rebalance_target.notna()``
+    is therefore the decision-bar mask, and it is the series to compare a target
+    against, because between decisions the book is deliberately left alone.
+
+    ``position_fraction`` is the signed value of the position over equity, which
+    equals the target only *at* a decision bar. Between decisions the book holds
+    a fixed quantity, so its fraction drifts with the price -- up in a winner,
+    down in a loser. That drift is the contract, not an execution error, and
+    reading this series as "what the target asked for" inverts what the band is
+    for.
     """
 
     target: pd.Series
+    rebalance_target: pd.Series
     position: pd.Series
     position_fraction: pd.Series
     orders: pd.DataFrame
@@ -102,6 +141,7 @@ def run_exposure_backtest(
     identity: MarketDataIdentity,
     cash: float = 10_000.0,
     position_pct: float = 0.95,
+    rebalance_threshold: float = 0.05,
     cost_model: CostModel | None = None,
     funding: pd.Series | None = None,
 ) -> ExposureBacktestResult:
@@ -110,7 +150,13 @@ def run_exposure_backtest(
     Mirrors ``run_backtest``'s signature where the two paths share a concept, so
     a caller moving between them is not surprised: ``cash`` and ``position_pct``
     mean what they mean there, and ``position_pct`` scales the target, so a
-    target of 1.0 at the 0.95 default asks for 95% of equity.
+    target of 1.0 at the 0.95 default asks for 95% of *initial cash*.
+
+    ``rebalance_threshold`` is in the target's own units -- 0.05 is five percent
+    of the risk budget -- so it is unchanged by ``cash`` and ``position_pct``.
+    ``0.0`` submits every bar, which is the mean-reversion overlay the module
+    docstring describes rather than a neutral setting; a negative one is
+    refused.
 
     The scalar ``fees``/``slippage`` pair is deliberately absent -- it exists on
     ``run_backtest`` only for callers that predate ``CostModel``, and this path
@@ -131,6 +177,12 @@ def run_exposure_backtest(
 
     if df.empty:
         raise ValueError(f"No candles loaded for {identity}")
+    if rebalance_threshold < 0:
+        raise ValueError(
+            f"rebalance_threshold must be >= 0, not {rebalance_threshold}. A negative "
+            f"band is satisfied by every bar, which is what 0.0 already means, so it "
+            f"would read as 'wider than none' while doing the opposite."
+        )
 
     df = df.sort_index()
     exposure = strategy.compute_target(df)
@@ -139,11 +191,17 @@ def run_exposure_backtest(
         exposure.target, warmup_bars=strategy.warmup_bars, strategy=strategy
     )
 
+    submitted = _banded(target, threshold=rebalance_threshold)
+
     model = cost_model if cost_model is not None else CostModel()
     pf = vbt.Portfolio.from_orders(
         close=df["close"],
-        size=target * position_pct,
-        size_type="targetpercent",
+        # A currency value against *initial* cash, never current equity: the
+        # repo's non-compounding sizing rule, which ``targetpercent`` silently
+        # broke here. It also keeps a boolean-path run and a continuous one
+        # comparable, since only one of them would otherwise compound.
+        size=submitted * position_pct * cash,
+        size_type="targetvalue",
         init_cash=cash,
         fees=model.fee,
         slippage=model.slippage,
@@ -161,6 +219,7 @@ def run_exposure_backtest(
 
     return ExposureBacktestResult(
         target=target,
+        rebalance_target=submitted,
         position=pf.assets(),
         position_fraction=pf.assets() * df["close"] / gross_equity,
         orders=orders,
@@ -179,6 +238,7 @@ def run_exposure_backtest(
             "warmup_bars": int(strategy.warmup_bars),
             "cash": cash,
             "position_pct": position_pct,
+            "rebalance_threshold": rebalance_threshold,
             "cost_model": asdict(model),
             "funding_applied": bool(funding is not None and not funding.empty),
             "data_start": str(df.index.min()),
@@ -204,6 +264,39 @@ def _validate_alignment(exposure: TargetExposure, df: pd.DataFrame, strategy) ->
             f"executed positionally against close, so a misaligned target would "
             f"trade the right sizes on the wrong bars"
         )
+
+
+def _banded(target: pd.Series, *, threshold: float) -> pd.Series:
+    """The target on bars that move it far enough to act on, ``NaN`` elsewhere.
+
+    ``NaN`` is ``from_orders``' "no order", i.e. hold whatever was held, which is
+    the reading a target series must never carry (see ``strategies/exposure.py``)
+    and exactly the one an order series wants: between decisions the book keeps
+    its quantity and its fraction of equity drifts.
+
+    **The comparison is against the last target submitted, never against the
+    realized position fraction.** The realized fraction depends on fills, fills
+    depend on this band, and a band that read them back would be defined in terms
+    of its own output -- not something a vectorized path can precompute, and a
+    feedback loop rather than a rule. It also matters that the reference is the
+    last *submitted* target rather than the previous bar's: a taper that gives up
+    2% of the budget per bar never moves a whole 5% band in one bar, so a
+    bar-to-bar reference would hold the opening position through the entire
+    taper. Against the last submission the moves accumulate and it decides on
+    every third bar -- late by up to one band, which is what a band costs.
+
+    Sequential by construction for that reason -- each decision is measured
+    against the previous surviving one, so there is no cumulative form to
+    vectorize.
+    """
+    values = target.to_numpy(dtype="float64")
+    submitted = np.full(len(values), np.nan, dtype="float64")
+    held = 0.0  # the book starts flat, so the first target is measured against 0
+    for position, value in enumerate(values):
+        if abs(value - held) >= threshold:
+            submitted[position] = value
+            held = value
+    return pd.Series(submitted, index=target.index, dtype="float64")
 
 
 def _flat_through_warmup(target: pd.Series, *, warmup_bars: int, strategy) -> pd.Series:

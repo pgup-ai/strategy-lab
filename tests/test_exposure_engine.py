@@ -1,10 +1,15 @@
 """Execution, costs and funding for the continuous-exposure path.
 
 The frames here are flat or a clean ramp rather than ``synthetic_ohlcv``'s random
-walk, on purpose: ``size_type="targetpercent"`` is a fraction of *equity*, so a
-moving price makes the book rebalance on bars where the target did not change.
-That is real behaviour and one test below measures it, but every other assertion
-here is about what the *target* asked for, and a random walk would mix the two.
+walk, on purpose. A flat frame holds equity still, so the book's fraction of it
+is the target and nothing else; a ramp is the smallest frame on which the two
+come apart, because between decisions the book keeps its *quantity* and its
+fraction drifts with the price. Both behaviours are asserted below, and a random
+walk would mix them into one number that neither test could name.
+
+The engine tracks a target **at its decision bars** and drifts between them, so
+assertions about tracking are scoped to ``rebalance_target.notna()``. An
+assertion over every bar would be asserting that the band does not work.
 """
 
 from __future__ import annotations
@@ -97,6 +102,20 @@ def run(strategy, df=None, **kwargs):
     )
 
 
+def assert_tracks_at_decisions(result, df, *, position_pct: float) -> None:
+    """The book holds what the target asked for, on the bars it was asked.
+
+    In *currency* against initial cash rather than as a fraction of equity: that
+    is what ``targetvalue`` at the repo's non-compounding anchor means, and it is
+    the claim that stays true on a frame where equity moves.
+    """
+    decisions = result.rebalance_target.notna()
+    assert decisions.any(), "no decision bars, so this asserts nothing"
+    held_value = (result.position * df["close"])[decisions]
+    asked = (result.target * position_pct * CASH)[decisions]
+    assert held_value.to_numpy() == pytest.approx(asked.to_numpy(), abs=1e-9)
+
+
 def test_a_drifting_target_produces_an_order_per_change():
     """The whole point: from_signals would give one order for this."""
     result = run(_Scripted())
@@ -126,14 +145,31 @@ def test_the_same_taper_through_the_boolean_path_produces_one_order():
     assert len(pf.orders.records_readable) == 1
 
 
-def test_the_position_tracks_the_target():
-    """A taper that is not executed is a state machine whose behaviour is ignored."""
-    result = run(_Scripted(), position_pct=1.0)
-    assert result.position_fraction.to_numpy() == pytest.approx(list(TAPER), abs=0.01)
+def test_the_position_tracks_the_target_at_every_decision_bar():
+    """A taper that is not executed is a state machine whose behaviour is ignored.
+
+    On a ramp, so that "tracks the target" has to mean *at the bars it decided
+    on*: TAPER holds its level on four of ten bars, and on a moving price those
+    four are exactly where the book is allowed to drift away. The same assertion
+    over every bar would fail here, and would be asserting that the band does not
+    work.
+    """
+    df = ramp_frame(len(TAPER))
+    result = run(_Scripted(), df=df, position_pct=1.0)
+
+    assert_tracks_at_decisions(result, df, position_pct=1.0)
+    # Every level the taper asked for reached the book, in order, once each.
+    assert result.rebalance_target.dropna().tolist() == [0.3, 0.7, 1.0, 0.55, 0.2, 0.0]
+    assert result.order_count == 6
 
 
 def test_position_pct_scales_the_target_rather_than_replacing_it():
-    """Target 1.0 means the whole risk budget; the budget itself is position_pct."""
+    """Target 1.0 means the whole risk budget; the budget itself is position_pct.
+
+    Flat frame, so equity never moves and the drift the band exists for is zero
+    -- which is what makes an every-bar fraction meaningful here and nowhere
+    else.
+    """
     result = run(_Scripted(), position_pct=0.5)
     assert result.position_fraction.to_numpy() == pytest.approx(
         [level * 0.5 for level in TAPER], abs=0.01
@@ -142,11 +178,12 @@ def test_position_pct_scales_the_target_rather_than_replacing_it():
 
 def test_a_target_crossing_zero_reverses_rather_than_flattening():
     levels = (0.0, 1.0, 0.5, 0.0, -0.5, -1.0, -0.4, 0.0)
-    result = run(_Scripted(levels=levels), df=flat_frame(len(levels)), position_pct=1.0)
+    df = flat_frame(len(levels))
+    result = run(_Scripted(levels=levels), df=df, position_pct=1.0)
 
     assert result.position.max() > 0
     assert result.position.min() < 0
-    assert result.position_fraction.to_numpy() == pytest.approx(list(levels), abs=0.01)
+    assert_tracks_at_decisions(result, df, position_pct=1.0)
     assert result.order_count == 7
 
 
@@ -215,20 +252,97 @@ def test_slippage_is_backed_out_of_the_fills_it_moved():
     assert result.slippage_paid == pytest.approx(result.fees_paid, rel=0.01)
 
 
-def test_a_constant_target_still_rebalances_as_the_price_moves():
-    """A fraction of equity is not a quantity: holding it steady means trading.
+def test_the_book_drifts_between_decisions_instead_of_tracking_every_bar():
+    """The drift is the band's purpose, so it is asserted by direction.
 
-    This is the drift turnover ``targetpercent`` carries, and it belongs to the
-    contract rather than to any strategy's taper. A comparison of a continuous
-    strategy against a boolean one that does not name it will attribute this
-    cost to the taper.
+    A test that merely *tolerated* drift would also pass an engine that never
+    traded at all, so this pins both halves: across the held run the position is
+    one fixed quantity whose share of a rising book **strictly rises**, and the
+    decision at the end of it still moves the book to what was asked.
+
+    A quantity that rises in value is what "trend riding" means mechanically. An
+    engine that rebalanced here would be selling that winner down on every bar,
+    which is why the drift is the contract rather than an error in it.
+    """
+    df = ramp_frame(10)
+    result = run(_Scripted(levels=(0.5,) * 8 + (0.2,) * 2), df=df, position_pct=1.0)
+
+    held = slice(1, 8)  # after the opening decision, before the taper's
+    assert result.rebalance_target.notna().to_numpy().tolist() == [
+        True, False, False, False, False, False, False, False, True, False
+    ]
+    assert result.position.iloc[held].nunique() == 1
+    fraction = result.position_fraction.iloc[held]
+    assert (fraction.diff().dropna() > 0).all()
+    assert fraction.iloc[-1] > fraction.iloc[0]
+
+    # ... and the band is not "never trade": the decision at bar 8 lands.
+    assert result.position.iloc[8] < result.position.iloc[7]
+    assert_tracks_at_decisions(result, df, position_pct=1.0)
+
+
+def test_the_target_is_sized_from_initial_cash_not_from_the_equity_it_grew_to():
+    """CLAUDE.md's non-compounding rule, restated for the continuous path.
+
+    ``targetpercent`` would size from current equity, so a run that had made
+    money would hold a larger notional for the same target -- and a continuous
+    strategy compared against a boolean one would be measuring that sizing change
+    as well as whatever it meant to measure.
+    """
+    df = ramp_frame(10)
+    result = run(_Scripted(levels=(0.5,) * 8 + (0.8,) * 2), df=df, position_pct=1.0)
+
+    grown = float(result.equity.iloc[8])
+    assert grown > CASH * 1.2, "the ramp must have made money for this to distinguish"
+    assert float(result.position.iloc[8] * df["close"].iloc[8]) == pytest.approx(0.8 * CASH)
+
+
+def test_band_zero_trades_every_bar_and_fades_the_trend_it_is_riding():
+    """What ``rebalance_threshold=0.0`` actually is, named rather than assumed.
+
+    Rebalancing an unchanged target to a fixed size means selling as the price
+    rises and buying as it falls -- a mean-reversion overlay, on a book whose
+    strategy is trying to ride a trend. It is a usable setting and a deliberate
+    one; it is not the neutral choice its number makes it look.
     """
     df = ramp_frame(6)
-    result = run(_Constant(level=0.5), df=df, position_pct=1.0)
+    result = run(_Constant(level=0.5), df=df, position_pct=1.0, rebalance_threshold=0.0)
 
     assert result.order_count == 6
-    assert result.position_fraction.to_numpy() == pytest.approx([0.5] * 6)
+    assert (result.position * df["close"]).to_numpy() == pytest.approx([0.5 * CASH] * 6)
     assert result.position.is_monotonic_decreasing
+    # The same target under the default band is one decision and no drift trades.
+    assert run(_Constant(level=0.5), df=df, position_pct=1.0).order_count == 1
+
+
+def test_a_slow_taper_crosses_the_band_by_accumulating_against_the_last_decision():
+    """The band's reference is the last target *submitted*, not the last one seen.
+
+    This taper gives up 2% of the budget per bar, so **no single bar** moves it
+    as far as the 5% band -- a band measured bar to bar would hold the whole
+    position from the first decision to the last bar and never execute the taper
+    at all. Measured against the last decision the moves accumulate, so it
+    executes late rather than not at all, and "late by up to one band" is the
+    whole of what a band costs.
+    """
+    levels = tuple(np.round(1.0 - 0.02 * np.arange(21), 2))
+    df = flat_frame(len(levels))
+    result = run(_Scripted(levels=levels), df=df, position_pct=1.0)
+
+    assert result.target.diff().abs().max() < 0.05, "no single bar may cross the band"
+    decisions = result.rebalance_target.dropna()
+    assert 1 < len(decisions) < len(levels)
+    assert (decisions.diff().dropna().abs() >= 0.05).all()
+
+    final = float(result.position.iloc[-1] * df["close"].iloc[-1])
+    assert final == pytest.approx(levels[-1] * CASH, abs=0.05 * CASH)
+    assert final < 0.95 * CASH
+
+
+def test_a_negative_rebalance_threshold_is_refused():
+    """It would read as "wider than no band" while being satisfied by every bar."""
+    with pytest.raises(ValueError, match="rebalance_threshold"):
+        run(_Constant(level=1.0), rebalance_threshold=-0.01)
 
 
 def test_the_engine_holds_a_strategy_to_its_declared_warmup():
@@ -282,6 +396,7 @@ def test_the_config_records_what_the_run_was():
     assert config["strategy_metadata"] == {"states": "riding"}
     assert config["funding_applied"] is True
     assert config["position_pct"] == 0.5
+    assert config["rebalance_threshold"] == 0.05
     assert config["cost_model"] == {"fee": 0.0, "slippage": 0.0}
     assert config["candle_count"] == 40
 

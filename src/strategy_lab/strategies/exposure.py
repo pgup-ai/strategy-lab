@@ -13,8 +13,9 @@ can express.
 So this contract carries a **level**, not an event: ``target[t]`` is the whole
 of what the book should hold over bar *t*, whatever it held over *t-1*.
 ``backtests/exposure_engine.py`` executes it through
-``Portfolio.from_orders(size_type="targetpercent")``, which turns each change in
-that level into an order.
+``Portfolio.from_orders(size_type="targetvalue")``, which turns each change in
+that level into an order -- each change past its rebalance band, since between
+decisions that engine deliberately leaves the book alone.
 
 The two contracts coexist deliberately. The four original strategies keep
 ``SignalSet`` and their byte-identical results of record; a strategy that needs
