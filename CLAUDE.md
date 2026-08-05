@@ -122,6 +122,26 @@ Key design decisions that span multiple files:
   funding column, and a figure read off a chart without that context will
   eventually contradict the charter with no way to see why.
 
+- **A perp refresh advances candles and funding together, because the coverage
+  guard refuses the pair when they drift.** `refresh_candles` fetches bars up to
+  the present; funding settles on the venue's own schedule, so refreshing only
+  candles grows the window past the last stored settlement and
+  `funding_coverage_gaps` then refuses the whole frame — the browser breaking
+  the dataset it is showing, by being used. The guard is right and must not be
+  loosened: R2 measured carry on this instrument at roughly the size of
+  buy-and-hold, so a run charging zero across uncovered bars reports a gross
+  number that reads like a net one. Three consequences. The top-up reaches back
+  to **the earlier of the candle lookback and the last stored settlement** —
+  five 15m bars is 75 minutes against an 8h interval, so a lookback-sized
+  request steps straight over the gap it exists to close. A **small trailing gap
+  is structural, not a fault**: the last bar's right edge sits up to one cadence
+  past the final settlement, and the guard tolerates exactly that. And a
+  **leading** gap can be permanent — BTC/USDT perp candles start 40h before the
+  venue's first settlement, so `state_machine_v1` refuses that full frame
+  forever, which is a fact about the venue rather than something to fetch. Any
+  db-marked test on a real perp frame must therefore bound its own right edge
+  with `db.funding.funding_span`, or an unrelated refresh reddens it.
+
 - **The state machine's conditioning is non-monotone, so a threshold rule is the
   wrong *shape*, not merely a suboptimal setting.** R4 measured `direction`'s IC
   against the `[t+1, t+31]` return by `strength` tercile: low +0.002 (halves
