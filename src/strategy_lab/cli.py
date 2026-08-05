@@ -389,7 +389,10 @@ def backtest(
     funding: bool = typer.Option(
         True,
         "--funding/--no-funding",
-        help="Charge stored perp funding at its settlement times.",
+        help=(
+            "Charge stored perp funding at its settlement times, and attach it to the "
+            "frame as the funding_rate column strategies read. Perps only."
+        ),
     ),
     report_root: Path = typer.Option(Path("reports"), help="Report output folder."),
 ) -> None:
@@ -413,7 +416,7 @@ def backtest(
         )
         if df.empty:
             _raise_missing_candles(identity)
-        rates = _funding_rates(identity, df) if funding else None
+        df, rates = _with_funding_column(identity, df, enabled=funding)
         try:
             result = run_backtest(
                 df=df,
@@ -451,7 +454,38 @@ def _parse_cost_stress(raw: str) -> tuple[float, ...]:
     return multiples
 
 
-def _funding_rates(identity: MarketDataIdentity, df):
+def _with_funding_column(identity: MarketDataIdentity, df, *, enabled: bool, required: bool = True):
+    """The frame a perp strategy should actually see, plus the settlement series.
+
+    Funding is two different things to two different consumers, and ``backtest``
+    served only the first. It is a *cash flow*, which the engine charges against
+    the notional held into each settlement -- that is the returned series. It is
+    also an *input*: ``features.flow.Crowding`` is the state machine's fourth
+    feature and reads a per-bar ``funding_rate`` column, falling back to a
+    neutral 0.5 when the frame has none. Loading funding for the cost ledger and
+    then handing the strategy a frame without it ran a *different strategy* than
+    the research measured, recording ``crowding_measured: false`` in a corner of
+    ``config.json`` while the headline moved. Measured on BTC/USDT perp 4h over
+    R5's test half, trained cell: +16.44% / Sharpe +0.801 / 6.08% max drawdown
+    without the column, +15.45% / +0.896 / 4.67% with it -- the second is
+    charter §9.2's published row.
+
+    Alignment goes through ``align_funding_to_bars``, never a reindex: Binance
+    stamps settlements up to 47 ms past the bar boundary, so an equality join
+    drops 43% of the stored history and the survivors land on the wrong bars.
+    """
+    if not (enabled and identity.market_type == "perp"):
+        return df, None
+
+    from strategy_lab.features.flow import FUNDING_COLUMN, align_funding_to_bars
+
+    rates = _funding_rates(identity, df, required=required)
+    if rates is None:
+        return df, None
+    return df.assign(**{FUNDING_COLUMN: align_funding_to_bars(df.index, rates)}), rates
+
+
+def _funding_rates(identity: MarketDataIdentity, df, *, required: bool = True):
     """Stored funding for a perp, bounded to the candle window.
 
     A perp backtest that quietly skips funding reports a gross number that reads
@@ -479,17 +513,23 @@ def _funding_rates(identity: MarketDataIdentity, df):
         end=str(window_end(df.index)),
     )
     if rates.empty:
+        if not required:
+            return None
         raise typer.BadParameter(
             f"No stored funding for {identity.exchange}/perp/{identity.symbol} over "
             f"{df.index.min()} -> {df.index.max()}.\n\n"
             "A perp backtest without funding is gross of carry and not a tradeable "
             "number. Fetch it first:\n"
             f"strategy-lab fetch-funding --symbol {identity.symbol} --since 2019-09-01\n\n"
-            "Pass --no-funding to run gross of funding on purpose."
+            "Pass --no-funding to proceed without it: on a backtest that means gross of "
+            "carry, and on a sweep -- which never charges carry -- it means any "
+            "funding-derived feature falls back to neutral."
         )
 
     gaps = funding_coverage_gaps(funding=rates["funding_rate"], index=df.index)
     if gaps:
+        if not required:
+            return None
         raise typer.BadParameter(_uncovered_funding(identity, df, gaps))
     return rates["funding_rate"]
 
@@ -507,7 +547,9 @@ def _uncovered_funding(identity: MarketDataIdentity, df, gaps) -> str:
         f"strategy-lab fetch-funding --symbol {identity.symbol} "
         f"--since {gaps[0][0]:%Y-%m-%d}\n\n"
         "If the venue genuinely settled nothing there, narrow the run with --start. "
-        "Pass --no-funding to run gross of funding on purpose."
+        "Pass --no-funding to proceed without it: on a backtest that means gross of "
+            "carry, and on a sweep -- which never charges carry -- it means any "
+            "funding-derived feature falls back to neutral."
     )
 
 
@@ -540,6 +582,14 @@ def sweep_command(
     timeframe: str = typer.Option("15m", help="Candle timeframe."),
     start: str | None = typer.Option(None, help="Optional sweep start time."),
     end: str | None = typer.Option(None, help="Optional sweep end time."),
+    funding: bool = typer.Option(
+        True,
+        "--funding/--no-funding",
+        help=(
+            "Attach stored perp funding as the funding_rate column strategies read. "
+            "Perps only. An input, not a cost -- the surface stays gross of costs."
+        ),
+    ),
     report_root: Path = typer.Option(Path("reports"), help="Report output folder."),
 ) -> None:
     """Score a strategy across a parameter grid and render the stability surface.
@@ -548,6 +598,11 @@ def sweep_command(
     neighbouring parameters behave similarly. The stability score and the
     heatmap both exist to make a lone spike look like the overfit it is rather
     than like a result.
+
+    Funding is attached to the frame on a perp because ``crowding`` reads it, and
+    a cell scored without it is scoring a different strategy. It is *not* charged
+    here -- this surface is gross of costs by design, and R2's cost model is what
+    the single-run ``backtest`` applies.
     """
     from dataclasses import asdict
     from datetime import UTC, datetime
@@ -570,6 +625,21 @@ def sweep_command(
     )
     if df.empty:
         _raise_missing_candles(identity)
+    # Only a strategy that reads ``crowding`` actually needs the column, and this
+    # surface never charges funding, so an unfunded perp must not be fatal here the
+    # way it is for a backtest: sweeping ``donchian`` over a perp worked before this
+    # attachment existed and has to keep working. The strategy declares its own
+    # inputs, so ask it rather than hardcoding a list.
+    needs_funding = "crowding" in getattr(get_strategy(strategy_name), "features", ())
+    df, rates = _with_funding_column(identity, df, enabled=funding, required=needs_funding)
+    attached = rates is not None
+    if funding and market_type == "perp" and not needs_funding and not attached:
+        typer.secho(
+            f"No usable stored funding, so {strategy_name} is scored without it. "
+            "Harmless here -- it reads no funding-derived feature, and a sweep never "
+            "charges carry.",
+            fg=typer.colors.YELLOW,
+        )
 
     try:
         points = sweep_parameters(
@@ -586,6 +656,9 @@ def sweep_command(
         "data_start": str(df.index.min()),
         "data_end": str(df.index.max()),
         "candle_count": int(len(df)),
+        # What happened, not what was asked for: a perp sweep of a strategy that
+        # reads no funding feature runs without the column rather than failing.
+        "funding_attached": attached,
         "generated_at": datetime.now(UTC).isoformat(),
     }
 
@@ -686,11 +759,7 @@ def features_command(
     if df.empty:
         _raise_missing_candles(identity)
 
-    if funding and market_type == "perp":
-        from strategy_lab.features.flow import FUNDING_COLUMN, align_funding_to_bars
-
-        rates = _funding_rates(identity, df)
-        df = df.assign(**{FUNDING_COLUMN: align_funding_to_bars(df.index, rates)})
+    df, _ = _with_funding_column(identity, df, enabled=funding)
 
     diagnosable, skipped = _diagnosable_features(list_features(), df)
     if not diagnosable:
@@ -808,6 +877,20 @@ def replay_command(
     differs. That is also why this is slow next to ``backtest`` -- the strategy is
     re-evaluated on every bar rather than once over the range -- and
     ``tests/test_replay_determinism.py`` is what says the two agree anyway.
+
+    **One known divergence, and it is on perps.** This path carries OHLCV and
+    nothing else: ``core.types.Bar`` has no funding field and ``BarBuffer``
+    materializes exactly ``open/high/low/close/volume``, so no frame reaching a
+    strategy here can hold the ``funding_rate`` column that
+    ``features.flow.Crowding`` reads. ``state_machine_v1`` therefore runs with
+    ``crowding`` pinned to a neutral 0.5 -- see ``strategies.state_machine_core``
+    -- while ``backtest`` on the same perp range attaches the column and measures
+    it. **The two paths emit different signals for that strategy, and the
+    backtest is the correct one.** The determinism suite does not catch this and
+    is not broken: it runs on synthetic frames that carry no funding either, so
+    it compares crowding-neutral against crowding-neutral. Closing the gap means
+    carrying funding through ``Bar``, ``BarBuffer``, the feed and the storage
+    schema, which is a phase of its own.
     """
     from strategy_lab.core.clock import SimClock
     from strategy_lab.core.types import InstrumentId, Mode

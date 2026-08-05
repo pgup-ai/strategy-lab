@@ -47,6 +47,19 @@ RANKED_FEATURES = ("strength", "stability")
 # Neutral reading for a frame that carries no funding at all. 0.5 is the middle
 # of Crowding's own axis, so it damps nothing -- which is the honest behaviour
 # when there is nothing to damp with, provided the metadata says so.
+#
+# **This cannot be turned into a refusal, and it has been checked.** The obvious
+# hardening -- "a perp frame with no funding is a mistake, so raise" -- is not
+# expressible here: ``generate_signals`` receives a bare OHLCV DataFrame with no
+# ``market_type`` on it, so this code cannot tell a spot frame that legitimately
+# has no funding from a perp frame whose column was forgotten, and the fallback
+# exists precisely so the machine runs on spot and equity. The check would have
+# to live in ``run_backtest``, which does know ``identity.market_type`` -- but it
+# does not know whether the *strategy* reads crowding, so refusing there would
+# break every legitimate perp run of ``donchian``, the R0 baseline. What guards
+# the real failure instead is the CLI attaching the column
+# (``cli._with_funding_column``) and ``tests/test_backtest_cli.py`` asserting
+# that a perp run of ``state_machine_v1`` ends with ``crowding_measured: true``.
 NEUTRAL_CROWDING = 0.5
 
 # Multiples of the machine's own ``convergence_bars`` to add past the deepest

@@ -41,7 +41,7 @@ def funded(monkeypatch, candles):
     """The perp path: stored funding, aligned to bars by the real helper."""
     funding = synthetic_ohlcv_with_funding(n=_BARS, freq="4h")["funding_rate"]
     settlements = funding[funding != 0.0]
-    monkeypatch.setattr(cli, "_funding_rates", lambda identity, df: settlements)
+    monkeypatch.setattr(cli, "_funding_rates", lambda identity, df, **_: settlements)
     return settlements
 
 
