@@ -299,8 +299,18 @@ __SHELL_CSS__
 
   var view = {
     bars: [], index: {}, fills: {}, why: null, payload: null,
-    pinned: null, dataset: null
+    pinned: null, dataset: null, refreshed: null
   };
+
+  function refreshText(result) {
+    var parts = [result.candles_upserted + ' candles'];
+    // null is "not a perp, nothing sought" and says nothing worth showing; 0 on
+    // a perp is the drift itself and has to be said out loud.
+    if (result.funding_upserted !== null && result.funding_upserted !== undefined) {
+      parts.push(result.funding_upserted + ' settlements');
+    }
+    return 'refreshed ' + parts.join(' · ');
+  }
 
   function setStatus(text) {
     statusEl.textContent = text;
@@ -700,7 +710,9 @@ __SHELL_CSS__
         setError('');
         draw(payload);
         setStatus(Math.round(performance.now() - started) + ' ms · ' +
-          payload.bars.length.toLocaleString() + ' bars');
+          payload.bars.length.toLocaleString() + ' bars' +
+          (view.refreshed ? ' · ' + view.refreshed : ''));
+        view.refreshed = null;
       })
       .catch(function (error) {
         if (token === pending) setError(error.message);
@@ -727,7 +739,14 @@ __SHELL_CSS__
     var last = view.bars[view.bars.length - 1];
     if (last) params.set('after', String(last.time));
     getJSON('/api/refresh?' + params.toString(), { method: 'POST' })
-      .then(load)
+      // The counts exist so drift is visible at the moment it opens, not two
+      // clicks later as a 409. A perp that moved candles and no settlements is
+      // exactly the state the coverage guard will refuse next, and thrown away
+      // here it looked identical to a clean refresh.
+      .then(function (result) {
+        view.refreshed = refreshText(result);
+        return load();
+      })
       .catch(function (error) { setError(error.message); })
       .then(function () { button.disabled = false; });
   });

@@ -119,11 +119,11 @@ def _refresh_funding(identity: MarketDataIdentity, lookback_start: datetime) -> 
     a venue error would report the drift closed while leaving it open, and both
     callers already turn an exception here into a 502.
 
-    An unsupported venue is refused rather than skipped. Candles route by venue
-    through ccxt and this client does not, so a perp on anything but Binance
-    would have Binance settlements stored under its name -- the same mis-filing
-    the CLI's perp commands refuse, and a silent skip would leave the caller
-    believing the two are in step.
+    An unsupported venue returns ``None`` -- sought nothing, wrote nothing --
+    rather than raising. Candles route by venue through ccxt and this client
+    does not, so fetching for a non-Binance perp would file Binance settlements
+    under that venue's name; not fetching prevents that without taking the
+    candle refresh down with it, which is what raising here did.
     """
     if identity.market_type != "perp":
         return None
@@ -135,12 +135,15 @@ def _refresh_funding(identity: MarketDataIdentity, lookback_start: datetime) -> 
     )
 
     if identity.exchange not in SUPPORTED_PERP_EXCHANGES:
-        raise ValueError(
-            f"cannot keep funding in step with candles for {identity.exchange!r}: "
-            f"funding is fetched from Binance USD-M futures only, so topping it up "
-            f"here would file Binance settlements under that venue's name. "
-            f"Supported: {', '.join(SUPPORTED_PERP_EXCHANGES)}."
-        )
+        # Nothing was sought, which is the same answer a spot pair gets, so the
+        # count is None rather than an error. Refusing here regressed a refresh
+        # that used to work: perp candles reach storage for any ccxt venue
+        # through `fetch-crypto --market-type perp`, and only `fetch-funding`
+        # and `fetch-perp` are Binance-only. A stored OKX perp displayed fine
+        # and then 502'd on every refresh click -- in `serve`'s live-update
+        # button as much as the browser's. Mis-filing is still prevented, by not
+        # fetching rather than by refusing the candles beside it.
+        return None
 
     span = funding_span(
         exchange=identity.exchange,

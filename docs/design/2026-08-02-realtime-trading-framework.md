@@ -11,6 +11,13 @@ Proposed 2026-08-02 · Base commit: `55a7c0f`
 > - **§1's inventory** predates R1's perp backfill and R4–R6; the stored-data
 >   counts, the strategy count, and "`SignalSet` / `Strategy` protocol" as *the*
 >   contract are all stale — there are two contracts now.
+> - **§3's dependency rule** — "`api` may not import `strategies` or `engine`" —
+>   is not what got built, and could not be. The browser's whole design is to
+>   recompute through the strategy layer so it cannot disagree with a backtest,
+>   which means importing both, including five private engine helpers rather
+>   than repeating the `from_signals` call they wrap. The rule was written for
+>   an API that reads stored results; this one computes them. Deliberate, and
+>   recorded here rather than left to look like drift.
 > - **§2's replay-cost figures contradict this document's own correction.** The
 >   body still reads "5.9 ms versus 6 minutes is a 60,000×"; the quoted
 >   correction above it measured **0.39 s** over the whole history and **~43

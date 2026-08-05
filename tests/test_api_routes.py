@@ -426,3 +426,27 @@ def test_no_handler_blocks_the_event_loop():
     assert blocking, "no routes found; the check would pass vacuously"
     offenders = [fn.__name__ for fn in blocking if inspect.iscoroutinefunction(fn)]
     assert offenders == [], f"async handlers run on the event loop: {offenders}"
+
+
+def test_a_date_only_end_covers_the_whole_day_it_names(client):
+    """``<input type="date">`` sends ``YYYY-MM-DD`` and storage filters ``<=``.
+
+    Midnight is the first instant of the named day, so a 4h frame kept one bar
+    of it and dropped the other five, while ``start`` included the whole of its
+    first day. A user picked a day and the chart ended the evening before, which
+    reads as stale data rather than as a boundary.
+    """
+    from strategy_lab.api.models import AnalysisQuery
+
+    named = AnalysisQuery(
+        exchange="binance", market_type="perp", symbol="BTC/USDT",
+        timeframe="4h", strategy="donchian", end="2023-10-31",
+    )
+    assert named.end == "2023-10-31 23:59:59"
+
+    # An explicit instant is left alone: only a bare date is a day.
+    exact = AnalysisQuery(
+        exchange="binance", market_type="perp", symbol="BTC/USDT",
+        timeframe="4h", strategy="donchian", end="2023-10-31 00:00:00",
+    )
+    assert exact.end == "2023-10-31 00:00:00"

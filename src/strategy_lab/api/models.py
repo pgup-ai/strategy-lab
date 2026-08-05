@@ -116,6 +116,29 @@ class AnalysisQuery(IdentityQuery):
             raise ValueError(f"{value!r} is not a timestamp") from exc
         return value
 
+    @field_validator("end")
+    @classmethod
+    def _end_of_the_named_day(cls, value: str | None) -> str | None:
+        """A bare date as ``end`` means all of that day, not its first instant.
+
+        ``load_candles`` filters ``timestamp <= end`` and ``"2023-10-31"`` parses
+        as midnight, so on a 4h frame that returned one bar of the named day and
+        dropped the other five -- while ``start`` included the whole of its first
+        day, since that side compares ``>=``. The page's ``<input type="date">``
+        sends exactly this shape, so a user picked a day and the chart ended the
+        evening before, which reads as stale data rather than as a boundary.
+
+        Extended here rather than in the page so any client gets the same
+        meaning, and only for a value carrying no time of day -- an explicit
+        ``2023-10-31 00:00`` still means that instant.
+        """
+        if value is None:
+            return None
+        parsed = pd.Timestamp(value)
+        if parsed == parsed.normalize() and len(value.strip()) <= 10:
+            return str(parsed + pd.Timedelta(days=1) - pd.Timedelta(seconds=1))
+        return value
+
     @field_validator("strategy")
     @classmethod
     def _registered(cls, value: str) -> str:

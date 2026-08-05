@@ -221,11 +221,20 @@ def test_a_venue_failure_on_the_funding_top_up_is_not_swallowed(monkeypatch):
         refresh_candles(_PERP, None)
 
 
-def test_a_perp_on_another_venue_is_refused_rather_than_filed_under_binance(refresh):
+def test_a_perp_on_another_venue_files_no_funding_and_still_refreshes(refresh):
     """Candles route by venue through ccxt and the funding client does not, so a
-    top-up here would store Binance settlements under the other venue's name."""
-    with pytest.raises(ValueError, match="bybit"):
-        refresh(identity=replace(_PERP, exchange="bybit"))
+    top-up here would store Binance settlements under the other venue's name.
+
+    Not fetching is what prevents that. Raising also prevented it and took the
+    candle refresh down with it: perp candles reach storage for any ccxt venue
+    through ``fetch-crypto --market-type perp``, so a legitimately stored bybit
+    perp displayed fine and then 502'd on every refresh click -- in ``serve``'s
+    live-update button as much as the browser's.
+    """
+    payload, _ = refresh(identity=replace(_PERP, exchange="bybit"))
+
+    assert payload["candles_upserted"] >= 0
+    assert payload["funding_upserted"] is None, "settlements were sought on a venue with no client"
 
 
 def test_the_lookback_is_the_timeframe_rather_than_a_fixed_span(refresh):
