@@ -273,14 +273,17 @@ a rule on, but it is not what the gate passed on.
   BREAKOUT 0.35, CONFIRMED 0.70, RIDING 1.00, EXHAUSTION 0.55), damped by extreme
   `crowding` on the paying side only. **The engine applies it on the entry bar and never
   again**, so a state change mid-position cannot resize.
-- **It has never sized above the `BREAKOUT` row, and R6 measured that.** Of its
+- **It has never sized an entry for the `RIDING` row, and R6 measured that.** Of its
   size-setting entry bars on the R5 test half, **not one is in `RIDING`** in either
   configuration — trained 56 BREAKOUT + 15 EXHAUSTION, default 92 BREAKOUT + 20 CONFIRMED
   + 40 EXHAUSTION — so the largest position it has ever opened is **52.3% of capital
   (trained) and 66.5% (default)** against the **95%** its own RIDING row asks for, on a
-  machine that spent 209 / 516 bars in RIDING. The lifecycle is strictly forward, so the
-  bar where the target first goes non-zero is always the *smallest* non-zero row of the
-  table above. Nothing in the R5 figures moves — this is how to read them, not a
+  machine that spent 209 / 516 bars in RIDING. Entries land on the CONFIRMED and
+  EXHAUSTION rows readily enough, as those counts show; RIDING is the one they cannot
+  reach, because it is only ever entered with a position already open — the lifecycle
+  passes BREAKOUT and CONFIRMED first, both already carrying a non-zero target, and an
+  entry needs a change of side. The engine then freezes the position at its entry size.
+  Nothing in the R5 figures moves — this is how to read them, not a
   correction. `state_machine_v2` is the same policy without that truncation.
 - **Params**: `rank_window=480`, `machine=StateMachine(enter_strength=2/3,
   exit_strength=1/3, min_dwell=4, cooldown=4, …)`, `warmup_bars=2192` — derived as

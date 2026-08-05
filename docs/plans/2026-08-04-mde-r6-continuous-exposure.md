@@ -4,7 +4,7 @@
 
 **Goal:** Give the engine a second strategy contract that emits a continuously drifting target exposure, so a state machine can taper a position instead of only opening and closing it.
 
-**Architecture:** A `TargetExposure` contract alongside the existing `SignalSet`, executed through `vbt.Portfolio.from_orders(size_type="targetpercent")` rather than `from_signals`. The two contracts coexist: the four original strategies keep the boolean path and their byte-identical results, `state_machine_v1` gains a taper on the new one.
+**Architecture:** A `TargetExposure` contract alongside the existing `SignalSet`, executed through `vbt.Portfolio.from_orders(size_type="targetvalue")` against *initial* cash rather than `from_signals` — `targetpercent` is a fraction of current equity and compounds, so Task 3.5 replaced it. The two contracts coexist: the four original strategies keep the boolean path and their byte-identical results, `state_machine_v1` stays on it unchanged so R5's published numbers do not move, and `state_machine_v2` (Task 4) is the sibling that carries the taper.
 
 **Tech Stack:** Python 3.11, pandas, vectorbt, pytest.
 

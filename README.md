@@ -505,8 +505,9 @@ runs the continuous one and is registered in a third manual registry
 `generate_signals`. R6 measured what the second contract bought over R5's held-out half:
 **the taper it was built for is worth approximately zero** (+15.30 / −63.05 gross over
 75/77 bars), what v2 actually buys is 1.7–1.8× v1's average exposure with return scaling
-accordingly and Sharpe flat, and the reason is on v1's side — it never sized above its
-`BREAKOUT` row. See [STRATEGIES.md](STRATEGIES.md#state_machine_v2) and
+accordingly and Sharpe flat, and the reason is on v1's side — not one of its entries is
+sized for `RIDING`, the row its own policy sizes highest. See
+[STRATEGIES.md](STRATEGIES.md#state_machine_v2) and
 [the charter §9.3](docs/research/2026-08-03-market-dynamics-engine.md#93-r6-continuous-exposure-comparison--btcusdt-perp-4h).
 
 See [STRATEGIES.md](STRATEGIES.md) for the source of truth: per-strategy logic,

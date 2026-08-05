@@ -120,13 +120,16 @@ Key design decisions that span multiple files:
   **not one of `state_machine_v1`'s test-half entries is in `RIDING`**, so the
   largest position it ever opened is 52.3% of capital (trained) and 66.5%
   (default) against the **95%** its own `RIDING` row asks for, on a machine that
-  spent 209 / 516 bars there. The lifecycle is strictly forward, so the entry bar
-  is always the *smallest* non-zero row of the per-state table and the position
-  freezes there — the charter's per-state table has never executed above its
-  `BREAKOUT` row. A taper belongs on the continuous contract below, not here:
-  writing one against this engine ships a state machine whose defining behaviour
-  is silently ignored, which is exactly what "volatility targeting" turned out to
-  be before it was renamed `vol-scaled-entry`.
+  spent 209 / 516 bars there. Entries do reach the `CONFIRMED` and `EXHAUSTION`
+  rows; `RIDING` is the one they cannot, because it is only ever reached with a
+  position already open — the lifecycle passes `BREAKOUT` and `CONFIRMED` first,
+  both already carrying a non-zero target, and an entry needs a change of side.
+  The position then freezes at whatever size its entry bar carried, so the row
+  the policy sizes highest is the one row that never executes. A taper belongs
+  on the continuous contract below, not here: writing one against this engine
+  ships a state machine whose defining behaviour is silently ignored, which is
+  exactly what "volatility targeting" turned out to be before it was renamed
+  `vol-scaled-entry`.
 - **Two strategy contracts coexist, and what picks between them is whether a
   strategy needs to resize a position it already holds.** `SignalSet` says
   *enter*, *exit* and *how big to start*. `TargetExposure`
