@@ -233,7 +233,11 @@ The same `StateMachine` and policy as v1, emitting a continuous target instead o
 
 - [ ] **Steps: failing tests → implement → register → mutation-test → commit.**
 
-The registry entry puts v2 under `tests/test_lookahead.py` automatically — it must pass. Note the boolean determinism suite iterates the same registry, so confirm it either covers v2 correctly or skips it explicitly rather than silently comparing the wrong thing. **A silent skip here is the failure this phase is most likely to ship.**
+**v2 goes in its own registry, not `strategies/registry.py`.** Checked before dispatch: **six** parametrized tests across `test_lookahead.py`, `test_replay_determinism.py` and `test_strategy_metadata.py` iterate `list_strategies()` and every one calls `generate_signals`. Adding an exposure strategy there errors at best and skips silently at worst — and a silent skip is the failure this phase is most likely to ship.
+
+Create `strategies/exposure_registry.py` with `list_exposure_strategies()` / `get_exposure_strategy()`, mirroring how `features/registry.py` is separate from `strategies/registry.py`. The continuous suites (Task 3's determinism, plus a lookahead probe over exposure strategies) iterate *that* registry. Manual registration in two places, same as the other two registries.
+
+The lookahead probe needs an exposure variant: the existing one poisons future bars and compares a `SignalSet`'s boolean fields, so it needs to compare a target series instead. Reuse `tests/test_lookahead.py`'s poison profiles and `PROBE_SPAN` sizing rather than inventing new ones — those lengths are measured, not chosen.
 
 ---
 
