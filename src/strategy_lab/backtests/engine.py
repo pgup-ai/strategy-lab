@@ -14,7 +14,13 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-from strategy_lab.backtests.costs import CostModel, apply_funding, funding_ledger
+from strategy_lab.backtests.costs import (
+    CostModel,
+    apply_funding,
+    funding_ledger,
+    held_notional,
+    slippage_paid,
+)
 from strategy_lab.backtests.report import render_report_html
 from strategy_lab.backtests.sizing import (
     DEFAULT_VOL_SPAN,
@@ -537,20 +543,13 @@ def _split_by_curve(
 
 
 def _funding_notional(pf, df: pd.DataFrame) -> pd.Series:
-    """Signed notional held *into* each bar, valued at that bar's open.
+    """This portfolio's signed notional held into each bar -- see ``held_notional``.
 
-    Fills land at the bar's close, so ``assets()`` at bar *t* is the position
-    held over bar *t+1* -- the shift is what makes the charge causal rather than
-    settling funding against a position taken after the settlement happened.
-
-    The open is the mark at the instant a settlement on a bar boundary occurs,
-    which is every settlement when bars divide the funding interval (4h bars, 8h
-    funding). Bars coarser than the interval carry several settlements and mark
-    them all at the bar's open; that approximation moves a charge by a fraction
-    of a percent of itself and is not worth a mark-price series that is NULL for
-    60% of stored history.
+    The convention lives in ``backtests/costs.py`` because the continuous-exposure
+    path charges funding on the same basis, and a second copy of a causality rule
+    is a second thing to get wrong.
     """
-    return (pf.assets().shift(1) * df["open"]).fillna(0.0)
+    return held_notional(pf.assets(), df["open"])
 
 
 def _funding_flow(pf, df: pd.DataFrame, funding: pd.Series | None) -> pd.Series:
@@ -598,22 +597,8 @@ def _cost_breakdown(
 
 
 def _slippage_paid(pf, slippage: float) -> float:
-    """Currency lost to slippage, recovered from the fill prices it moved.
-
-    vectorbt folds slippage into the fill rather than reporting it, so it is
-    invisible next to ``Total Fees Paid`` unless it is backed out: a buy filled
-    at ``reference * (1 + slippage)`` and a sell at ``reference * (1 -
-    slippage)``, always against the trader.
-    """
-    if slippage == 0.0:
-        return 0.0
-    orders = pf.orders.records_readable
-    if orders.empty:
-        return 0.0
-
-    direction = np.where(orders["Side"].to_numpy() == "Buy", 1.0, -1.0)
-    reference = orders["Price"].to_numpy(dtype="float64") / (1.0 + direction * slippage)
-    return float((orders["Size"].to_numpy(dtype="float64") * reference * slippage).sum())
+    """This portfolio's slippage, backed out of its fills -- see ``slippage_paid``."""
+    return slippage_paid(pf.orders.records_readable, slippage)
 
 
 def _exit_signals(
