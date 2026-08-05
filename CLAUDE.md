@@ -28,7 +28,8 @@ strategy-lab features --exchange binance --market-type perp --symbol BTC/USDT \
 strategy-lab backtest --exchange binance --market-type perp --symbols BTC/USDT \
   --timeframe 4h --strategy state_machine_v1 --exit-mode opposite_signal_only \
   --start "2019-09-10 08:00:00" --cost-stress 1,2,3   # the MDE R5 state machine
-strategy-lab serve                 # serve reports/ with the live candle-refresh API
+strategy-lab serve                 # serve the frozen reports/ with the candle-refresh API
+strategy-lab browse                # the research browser: recomputed live, writes nothing
 ```
 
 `backtest` only reads candles already stored in Postgres — fetch first. Database URL
@@ -93,7 +94,33 @@ signed target risk; `strategies/state_machine_v1.py` exposes the pair through th
 ordinary `SignalSet` contract, so it runs on the existing engine, the replay
 path, and both safety suites unchanged.
 
+A fifth flow *looks at* the others rather than adding one. `api/analysis.py`
+loads a stored frame, attaches funding by `backtests/funding_frame`'s rule,
+dispatches on whichever registry holds the strategy, and returns candles, fills,
+the per-bar state and feature values, and provenance; `api/models.py` refuses
+any query parameter it does not recognise, by name; `api/app.py` serves that
+plus the one page in `browser/page.py`, which inlines the same vendored chart
+`backtests/report.py` does. `browse` runs it, on the loopback interface only.
+
 Key design decisions that span multiple files:
+
+- **`serve` hosts the record; `browse` hosts a view, and the two must not
+  merge.** A backtest writes a dated directory under `reports/` whose
+  `plot.html` re-renders byte-identically from the run it froze — that is the
+  reproducibility boundary, and `serve` is how you read it. The research browser
+  recomputes from stored candles on every request and **persists nothing**: no
+  report directory, no `signals` row, no schema. So it can show a strategy that
+  was never run, over a range nobody backtested, and can never become the record
+  of one that was. Two consequences. The browser is **not free to disagree** with
+  a backtest, which is why its markers are *fills* off the engine's own
+  `from_signals` call rather than the raw `SignalSet` — `accumulate=False`
+  ignores a repeated same-direction entry, so signals would mark bars no backtest
+  traded, and `tests/test_api_analysis.py` pins the payload against a real
+  `trades.csv`. And **provenance is not a detail panel**: `crowding_measured`,
+  the exit mode, warmup, the cost model and the frame's bounds are on the page at
+  all times, because M20 was one strategy's number moving on a silently absent
+  funding column, and a figure read off a chart without that context will
+  eventually contradict the charter with no way to see why.
 
 - **The state machine's conditioning is non-monotone, so a threshold rule is the
   wrong *shape*, not merely a suboptimal setting.** R4 measured `direction`'s IC

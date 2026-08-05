@@ -7,6 +7,7 @@ from pathlib import Path
 
 import typer
 
+from strategy_lab.api.app import DEFAULT_PORT as BROWSER_PORT
 from strategy_lab.backtests import ExitMode, SizeMode, run_backtest
 from strategy_lab.backtests.sizing import DEFAULT_VOL_SPAN
 from strategy_lab.db import init_db, list_candle_sets, load_candles, upsert_candles
@@ -891,11 +892,30 @@ def serve_command(
     host: str = typer.Option("127.0.0.1", help="Bind host."),
     port: int = typer.Option(8750, help="Bind port."),
 ) -> None:
-    """Serve reports with a candle-refresh API that live-updates report charts."""
+    """Serve the frozen per-run reports, with a candle-refresh API for their charts."""
     from strategy_lab.server import run_server
 
     typer.echo(f"Serving {report_root} at http://{host}:{port} (Ctrl+C to stop)")
     run_server(report_root=report_root, host=host, port=port)
+
+
+@app.command("browse")
+def browse_command(
+    host: str = typer.Option("127.0.0.1", help="Bind host; loopback only."),
+    port: int = typer.Option(BROWSER_PORT, help="Bind port."),
+) -> None:
+    """Open the read-only research browser: any strategy over any stored candle set.
+
+    A companion to `serve`, not a replacement for it. `serve` hosts the frozen
+    `plot.html` a backtest wrote -- the reproducibility record, dated and
+    byte-identical on re-render. This recomputes from stored candles on every
+    request and writes nothing, so it can show a strategy that was never run
+    and can never become the record of one that was.
+    """
+    from strategy_lab.api.app import run_api
+
+    typer.echo(f"Research browser at http://{host}:{port} (Ctrl+C to stop)")
+    run_api(host=host, port=port)
 
 
 @app.command("strategies")
