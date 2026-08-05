@@ -1,7 +1,20 @@
 # Real-time crypto trading framework — Phase 0 design
 
-Status: **proposed, awaiting approval**. No implementation has started.
-Date: 2026-08-02 · Base commit: `55a7c0f`
+Status: **approved. Phase 1a shipped; Phase 1b and Phase 3 have not started.**
+Proposed 2026-08-02 · Base commit: `55a7c0f`
+
+> **This document is the proposal as written, and is not rewritten as work lands.**
+> What actually happened is the charter's §9 progress log. Two parts of the body
+> below have been overtaken by the research and should be read against the
+> charter's 2026-08-05 state-of-play entry before being used as a spec:
+>
+> - **§1's inventory** predates R1's perp backfill and R4–R6; the stored-data
+>   counts, the strategy count, and "`SignalSet` / `Strategy` protocol" as *the*
+>   contract are all stale — there are two contracts now.
+> - **§10's Phase 3 dashboard** assumes a chart whose vocabulary is entry and
+>   exit markers. `TargetExposure` emits a continuous level that markers cannot
+>   draw, and the per-bar state and feature values that make the dashboard worth
+>   building are computed on every bar and persisted nowhere.
 
 ---
 
