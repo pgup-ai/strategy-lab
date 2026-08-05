@@ -23,7 +23,7 @@ from strategy_lab.backtests.sizing import (
     volatility_target_weights,
 )
 from strategy_lab.market_data.base import MarketDataIdentity
-from strategy_lab.strategies.base import SignalSet, Strategy
+from strategy_lab.strategies.base import SignalSet, Strategy, require_warmup_bars
 from strategy_lab.timeframes import timeframe_to_bars_per_year, timeframe_to_pandas_freq
 
 
@@ -297,7 +297,17 @@ def _warmup_bars(
     ``stats.json`` full of zeros, none of which reads as "there was no data" --
     it reads as a strategy that declined to trade. The sweep already refuses the
     same case for the same reason.
+
+    The declaration is checked *before* the ``max`` below, not after: under
+    ``vol-scaled-entry`` the estimator's budget is the larger number, so a
+    negative declaration is absorbed and the false claim never surfaces. A stub
+    declaring -5 resolves to -5 under ``fixed`` -- which then silences nothing,
+    since ``_mask_warmup``'s ``arange(n) >= -5`` is true on every row -- and to
+    1920 under ``vol-scaled-entry`` at the default span, where the run completes
+    and writes ``warmup_bars: 1920`` into ``config.json``, a number the strategy
+    never claimed. Guarding the resolved value catches one of those two.
     """
+    require_warmup_bars(strategy.name, strategy.warmup_bars)
     budgets = {f"{strategy.name} declares {strategy.warmup_bars}": int(strategy.warmup_bars)}
     if size_mode is not SizeMode.FIXED:
         estimator = vol_warmup_bars(vol_span)
