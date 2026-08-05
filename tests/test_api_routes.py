@@ -166,15 +166,46 @@ def test_every_provenance_field_survives_the_response_model(client):
     assert set(response.json()["provenance"]) == {f.name for f in fields(Provenance)}
 
 
-def test_the_continuous_contract_answers_with_a_target_and_no_markers(client):
+def test_the_continuous_contract_answers_with_a_target_and_no_markers(monkeypatch):
+    """Past the warmup, because ``state_machine_v2`` declares 2,192 bars.
+
+    This ran on the 600-bar fixture and passed, which it could only do while the
+    browser returned the strategy's raw target. The engine refuses a frame
+    shorter than a warmup rather than drawing a flat line over it, and now so
+    does this path -- see the test below.
+    """
+    bars = 2_600
+    monkeypatch.setattr(
+        "strategy_lab.api.analysis.load_candles",
+        lambda **kwargs: synthetic_ohlcv(n=bars, freq="4h"),
+    )
+    monkeypatch.setattr(
+        "strategy_lab.backtests.funding_frame.funding_rates",
+        lambda identity, frame, **_: None,
+    )
+    client = TestClient(app_module.create_app())
+
     response = _analysis(client, strategy="state_machine_v2")
 
     assert response.status_code == 200, response.text
     payload = response.json()
     assert payload["markers"] == []
-    assert len(payload["target"]) == 600
+    assert len(payload["target"]) == bars
     assert payload["provenance"]["contract"] == "target_exposure"
     assert payload["provenance"]["exit_mode"] is None
+
+
+def test_a_frame_shorter_than_the_warmup_is_refused_on_both_contracts(client):
+    """The boolean path already refused; the continuous one drew a flat line.
+
+    A target that is 0.0 on every bar because the frame never reached the
+    strategy's warmup looks exactly like a strategy that chose to hold nothing.
+    Both contracts now say which it is, in the engine's own words.
+    """
+    for strategy in ("state_machine_v1", "state_machine_v2"):
+        response = _analysis(client, strategy=strategy)
+        assert response.status_code == 400, f"{strategy}: {response.text}"
+        assert "warmup bars but the frame has" in response.json()["detail"]
 
 
 def test_the_strategy_list_labels_both_registries_by_contract(client):
@@ -369,3 +400,29 @@ def test_the_loopback_host_and_the_chosen_port_reach_the_server(served):
     app_module.run_api(host="127.0.0.1", port=9999)
 
     assert served == [{"host": "127.0.0.1", "port": 9999}]
+
+
+def test_no_handler_blocks_the_event_loop():
+    """Every handler here blocks, so none of them may be ``async``.
+
+    FastAPI runs an ``async def`` handler on the event loop and a plain ``def``
+    in a threadpool. These read Postgres, inline a 191 KB asset from disk, run a
+    whole-history ``from_signals``, and call the venue synchronously -- measured,
+    a 1 ms ``/api/strategies`` took **3,640 ms** when it landed inside an
+    in-flight analysis, and 35 ms once the handlers were synchronous. The page
+    polls, so the stall lands on the thing being drawn.
+    """
+    import inspect
+
+    from fastapi.routing import APIRoute
+
+    from strategy_lab.api.app import create_app
+
+    blocking = [
+        route.endpoint
+        for route in create_app().routes
+        if isinstance(route, APIRoute) or route.path == "/"
+    ]
+    assert blocking, "no routes found; the check would pass vacuously"
+    offenders = [fn.__name__ for fn in blocking if inspect.iscoroutinefunction(fn)]
+    assert offenders == [], f"async handlers run on the event loop: {offenders}"
