@@ -19,6 +19,8 @@ from typing import Protocol
 import numpy as np
 import pandas as pd
 
+from strategy_lab.strategies.base import require_warmup_bars
+
 
 class StateFeature(Protocol):
     """One dimension of market state, shaped exactly like ``strategies.base.Strategy``.
@@ -41,7 +43,7 @@ class StateFeature(Protocol):
         ...
 
 
-def mask_warmup(values: pd.Series, *, warmup_bars: int) -> pd.Series:
+def mask_warmup(values: pd.Series, *, warmup_bars: int, name: str) -> pd.Series:
     """``NaN`` the first ``warmup_bars`` rows, whatever the computation produced there.
 
     Not every indicator declines to answer early. ``rolling(n)`` yields ``NaN``
@@ -49,7 +51,20 @@ def mask_warmup(values: pd.Series, *, warmup_bars: int) -> pd.Series:
     zero -- a converging one, off by a decaying seed for some twenty spans. To a
     caller both are "a value", one of them silently unusable, so the warmup
     boundary is drawn here instead of being left to each indicator's own habit.
+
+    A negative warmup does not shrink that boundary, it inverts it:
+    ``iloc[:-5]`` is every row *but* the last five, so on a 200-row frame a
+    warmup of -5 keeps the unconverged prefix and ``NaN``s the 195 rows that
+    were actually measured. Hence the guard, which is on the *declaration*
+    rather than on the slice -- there is no clamp between the two to absorb it.
+
+    ``name`` is required rather than defaulted so that a tenth feature which
+    forgets it fails with a ``TypeError`` at the call. A default would instead
+    produce a correct-looking error naming nothing, and this helper is called
+    from every feature in the package -- the name is the only thing in it that
+    says which one declared the bad value.
     """
+    require_warmup_bars(name, warmup_bars)
     masked = values.copy()
     masked.iloc[:warmup_bars] = np.nan
     return masked

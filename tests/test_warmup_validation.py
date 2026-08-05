@@ -1,10 +1,12 @@
 """A negative ``warmup_bars`` must be refused, not arithmetically absorbed.
 
-``warmup_bars`` is a measured claim that a strategy's indicators have not
-converged, and every consumer of it does arithmetic on the number rather than
-asking whether the number is a warmup at all. Each one then fails *open* --
-towards trading the prefix, never towards refusing it. Measured against a stub
-declaring -5:
+``warmup_bars`` is a measured claim that an indicator has not converged, and
+every consumer of it does arithmetic on the number rather than asking whether
+the number is a warmup at all. Each one then fails *open* -- towards using the
+unconverged prefix, never towards refusing it. Both protocols declare the field
+and both are covered here, because the guarantee is one guarantee.
+
+``Strategy``, measured against a stub declaring -5:
 
 ===============================================  ==========================
 ``engine._warmup_bars``, ``size_mode=fixed``     returns -5, unreported
@@ -20,6 +22,22 @@ rather than on the resolved value: ``_warmup_bars`` returns
 swallowed by the ``max`` and the run reports a perfectly ordinary 400. Guarding
 the resolved number would catch the same broken strategy in one sizing mode and
 not the other.
+
+``StateFeature``, measured on a 200-row frame, where the same -5 inverts every
+slice it reaches rather than shortening it:
+
+===============================================  ==========================
+``features.base.mask_warmup``                    ``NaN``s 195 rows, not 5
+``features.diagnostics._diagnose``               measures 5 rows, not 195
+``cli._diagnosable_features``' probe frame       197 rows, not 7
+===============================================  ==========================
+
+The diagnostics row is the one that reaches a reader: coverage, IC, turnover and
+the split-half comparison are computed on those five bars and printed as though
+they covered the frame, and the existing ``measured.empty`` check does not trip,
+because a tail slice is not empty. The CLI row is the sharper irony -- that probe
+exists because a probe comparing ``NaN`` to ``NaN`` passes without testing
+anything, and a negative warmup restores exactly that by another route.
 """
 
 from __future__ import annotations
@@ -30,9 +48,13 @@ import pandas as pd
 import pytest
 
 from strategy_lab.backtests.sweep import sweep_parameters
+from strategy_lab.cli import _diagnosable_features
 from strategy_lab.core.clock import SimClock
 from strategy_lab.core.types import InstrumentId
 from strategy_lab.engine.runner import StrategyRunner
+from strategy_lab.features.base import mask_warmup
+from strategy_lab.features.diagnostics import diagnose
+from strategy_lab.features.registry import get_feature, list_features
 from strategy_lab.market_data.base import MarketDataIdentity
 from strategy_lab.strategies.base import SignalSet, require_warmup_bars
 from strategy_lab.strategies.registry import get_strategy, list_strategies
@@ -56,6 +78,42 @@ class _NegativeWarmup:
         always = pd.Series(True, index=df.index)
         flat = pd.Series(False, index=df.index)
         return SignalSet(always, flat.copy(), flat.copy(), flat.copy())
+
+
+@dataclass(frozen=True)
+class _UnmaskedFeature:
+    """Declares -5 and never calls ``mask_warmup``, which is what isolates it.
+
+    Every registered feature masks through that helper and so would raise there
+    first; a stub built the same way would measure that guard a second time
+    rather than the diagnostic's own. This one computes cleanly, leaving
+    ``_diagnose`` as the only thing that can refuse it.
+    """
+
+    name: str = "unmasked_stub"
+    version: str = "1.0.0"
+    warmup_bars: int = -5
+
+    def compute(self, df: pd.DataFrame) -> pd.Series:
+        return pd.Series(range(len(df)), index=df.index, dtype="float64")
+
+
+@dataclass(frozen=True)
+class _MaskedFeature:
+    """Declares -5 and masks through ``mask_warmup``, exactly as a real feature does.
+
+    So this one raises from inside ``compute``, which is the whole point of the
+    CLI test below: the loop's ``except ValueError`` would file that raise under
+    ``skipped``.
+    """
+
+    name: str = "masked_stub"
+    version: str = "1.0.0"
+    warmup_bars: int = -5
+
+    def compute(self, df: pd.DataFrame) -> pd.Series:
+        values = pd.Series(range(len(df)), index=df.index, dtype="float64")
+        return mask_warmup(values, warmup_bars=self.warmup_bars, name=self.name)
 
 
 def test_zero_is_a_warmup_and_not_an_omission() -> None:
@@ -143,3 +201,67 @@ def test_every_registered_strategy_declares_a_non_negative_warmup() -> None:
     """
     for name in list_strategies():
         require_warmup_bars(name, get_strategy(name).warmup_bars)
+
+
+def test_masking_a_warmup_refuses_the_negative_that_would_invert_it() -> None:
+    """``iloc[:-5]`` is every row *but* the last five, so the mask lands inside out.
+
+    Measured on this 200-row series without the guard: warmup 5 leaves 5 leading
+    ``NaN`` and warmup -5 leaves 195 -- the unconverged prefix kept, and every
+    row the feature actually measured erased.
+    """
+    values = pd.Series(range(200), dtype="float64")
+    assert int(mask_warmup(values, warmup_bars=5, name="stub").isna().sum()) == 5
+    with pytest.raises(ValueError, match="warmup_bars"):
+        mask_warmup(values, warmup_bars=-5, name="stub")
+
+
+def test_masking_a_warmup_makes_the_feature_name_itself() -> None:
+    """``name`` has no default, so a tenth feature that forgets it fails at the call.
+
+    A default would raise a correct-looking error naming nothing, from a helper
+    with nine call sites and no other way to tell them apart.
+    """
+    with pytest.raises(TypeError, match="name"):
+        mask_warmup(pd.Series([1.0, 2.0]), warmup_bars=1)
+
+
+def test_the_feature_diagnostic_refuses_a_negative_warmup_the_empty_check_misses() -> None:
+    """``measured.empty`` reads like this check and is not it.
+
+    ``iloc[-5:]`` is 5 rows of a 200-row frame -- non-empty, so the existing
+    guard waves it through and the diagnostic reports coverage, IC, turnover and
+    a split-half comparison computed on five bars as though they covered the
+    frame. A wrong number in the research charter, where the empty guard's own
+    failure would at least have been a blank.
+    """
+    with pytest.raises(ValueError, match="warmup_bars"):
+        diagnose(_UnmaskedFeature(), synthetic_ohlcv(n=200))
+
+
+def test_the_features_cli_refuses_a_negative_warmup_rather_than_filing_a_skip(monkeypatch) -> None:
+    """A guard inside that loop's ``try`` would reach the silent outcome it prevents.
+
+    ``_diagnosable_features`` turns a ``ValueError`` from ``compute`` into a
+    skip, which is the right reading for Crowding on a frame with no funding and
+    the wrong one for a broken declaration -- "this feature could not be measured
+    here" instead of "this feature's warmup is not a warmup". ``_MaskedFeature``
+    raises from inside ``compute`` for exactly that reason, so with the guard
+    moved into the ``try`` this call stops raising and returns ``([], {...})``
+    with the feature recorded under ``skipped``.
+    """
+    monkeypatch.setattr(
+        "strategy_lab.features.registry.get_feature", lambda name: _MaskedFeature()
+    )
+    with pytest.raises(ValueError, match="warmup_bars"):
+        _diagnosable_features(["masked_stub"], synthetic_ohlcv(n=200))
+
+
+def test_every_registered_feature_declares_a_non_negative_warmup() -> None:
+    """The same CI catch as for strategies, over the other protocol's registry.
+
+    Both are needed and neither generalises: the two registries are manual and
+    separate, and a feature never passes through ``get_strategy``.
+    """
+    for name in list_features():
+        require_warmup_bars(name, get_feature(name).warmup_bars)
