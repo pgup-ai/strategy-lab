@@ -357,3 +357,10 @@ in `tests/test_strategy_metadata.py`.
 Warmup rows are `0.0`, never `NaN` — the inverse of the feature convention, for
 the reason in the design bullet above. There is no `ExitMode` on this path: a
 target of 0.0 *is* the exit, so there is no exit-mode matrix to fill in.
+
+Then add its row and section to [STRATEGIES.md](STRATEGIES.md), the same as step 5
+of "Adding a strategy" — it is the source of truth for both contracts, and its
+at-a-glance table carries a `Sizing` column precisely so a continuous strategy is
+distinguishable from an entry-only one at a glance. Say which execution path the
+strategy runs on, and put `rebalance_threshold` where a boolean strategy's exit
+mode would go.

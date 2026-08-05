@@ -246,5 +246,13 @@ def test_a_flat_target_hides_lookahead_from_this_probe():
         _FutureReaderTarget(), df, warm=inert.warmup_bars, step=10
     ), "setup failed: the same rule must be caught when its target actually moves"
 
-    target = inert.compute_target(df).target
-    assert int((target.diff().fillna(0.0) != 0).sum()) < MIN_CHANGES
+    # Both halves of the gate, on the slice the gate itself measures -- so this
+    # tracks the gate rather than a quantity that merely resembles it. The
+    # length check is not decoration: these are the gate's assertions inverted,
+    # and inverting them removes the gate's own protection against an empty
+    # slice, which satisfies "fewer than MIN_CHANGES changes" and "never
+    # non-zero" without measuring anything.
+    live = inert.compute_target(df).target.iloc[inert.warmup_bars :]
+    assert len(live) == PROBE_SPAN
+    assert int((live.diff().fillna(0.0) != 0).sum()) < MIN_CHANGES
+    assert not (live != 0.0).any()

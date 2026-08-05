@@ -238,7 +238,7 @@ def run_exposure_backtest(
         position=assets,
         position_fraction=assets * df["close"] / gross_equity,
         orders=orders,
-        order_count=int(len(orders)),
+        order_count=len(orders),
         equity=gross_equity + flow.cumsum(),
         funding_flow=flow,
         fees_paid=float(pf.stats()["Total Fees Paid"]),
@@ -258,7 +258,7 @@ def run_exposure_backtest(
             "funding_applied": bool(funding is not None and not funding.empty),
             "data_start": str(df.index.min()),
             "data_end": str(df.index.max()),
-            "candle_count": int(len(df)),
+            "candle_count": len(df),
         },
     )
 
