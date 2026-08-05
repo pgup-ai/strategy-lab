@@ -377,13 +377,25 @@ def _exposure_payload(
     *,
     allow_shorts: bool,
 ) -> AnalysisPayload:
+    from strategy_lab.backtests.exposure_engine import _flat_through_warmup
+
     strategy, df = resolved.strategy, prepared.df
     exposure = strategy.compute_target(df)
+    # Flattened by the engine's own function, not returned raw. A strategy may
+    # emit a non-zero target inside its declared warmup -- measured,
+    # ``state_machine_v2`` does so on 45 of its 2,192 warmup rows -- and
+    # ``run_exposure_backtest`` zeroes those before executing anything. Drawing
+    # the raw target would put exposure on the page over bars a backtest holds
+    # nothing on, which is the continuous contract's version of marking signals
+    # instead of fills.
+    target = _flat_through_warmup(
+        exposure.target, warmup_bars=strategy.warmup_bars, strategy=strategy
+    )
     return AnalysisPayload(
         bars=build_candles_payload(df)["bars"],
         markers=[],
         position_size=None,
-        target=_values(exposure.target),
+        target=_values(target),
         why=_why_layer(strategy, df),
         provenance=_provenance(
             identity,
@@ -558,7 +570,7 @@ def _provenance(
         cost_model=cost_model,
         first_bar=str(prepared.df.index.min()),
         last_bar=str(prepared.df.index.max()),
-        bar_count=int(len(prepared.df)),
+        bar_count=len(prepared.df),
         generated_at=datetime.now(UTC).isoformat(),
     )
 

@@ -47,7 +47,7 @@ magnitude.** The state-of-play entry estimated "~seconds for the state machine
 on 15k bars" and warned it would be "wrong for anything multi-user". Measured on
 the stored 15,118-bar BTC/USDT perp 4h frame:
 
-```
+```text
 load_candles(15,118 bars)          272 ms     <- the actual cost
 state_machine_v1.generate_signals   19 ms
 state_machine_v2.compute_target     18 ms
@@ -88,8 +88,13 @@ that was already in the file.
   **reproducibility record** — frozen, dated, byte-identical on re-render. The
   browser is a **view**. Two commands, and the browser must never write into
   `reports/`.
-- **Not an order path.** Read-only, bound to 127.0.0.1, no trading, no
-  execution, no mutation of any table.
+- **Not an order path.** Bound to 127.0.0.1, no trading and no execution.
+  "Read-only" here means it writes no *derived* state — no report directory,
+  no `signals` row, no schema — and never becomes the record of a run. The
+  one exception is deliberate and is Task 2's refresh: it upserts
+  `market_candles` through `server.refresh_candles`, the existing fetch path,
+  called rather than copied. Fetching newer bars of the same public data is
+  not the kind of write this constraint exists to prevent.
 
 ---
 

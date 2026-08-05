@@ -226,6 +226,9 @@ def test_the_fill_on_a_bar_is_shown_where_it_can_be_read(page):
     marker_builder = script[
         script.index("function toMarkers") : script.index("function toLevels")
     ]
+    # Reorder the two functions and the slice inverts to empty, which passes the
+    # negative assertion below without reading a line of the builder.
+    assert marker_builder, "toLevels precedes toMarkers; the slice read nothing"
 
     assert "(view.fills[bar.time] || []).forEach" in script
     assert "fmt(fill.price, 2) + ' × ' + fmt(fill.size, 4)" in script

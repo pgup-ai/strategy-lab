@@ -50,6 +50,18 @@ DEFAULT_PORT = 8760
 
 
 def create_app() -> FastAPI:
+    """The read-only app.
+
+    **No handler here is ``async``, deliberately.** Every one of them blocks:
+    the page reads a 191 KB asset off disk, ``datasets`` queries Postgres,
+    ``analysis`` loads a frame and runs a whole-history ``from_signals``, and
+    ``refresh`` makes a synchronous call to the venue. FastAPI runs an ``async
+    def`` handler *on the event loop* and a plain ``def`` in a threadpool, so
+    declaring these async stalls every other request for the duration --
+    measured, a 1 ms ``/api/strategies`` took **3,640 ms** when it landed inside
+    an in-flight analysis, and the page polls. Adding ``async`` back is the
+    reflex this comment exists to stop.
+    """
     app = FastAPI(
         title="strategy-lab research browser",
         description=(
@@ -76,7 +88,7 @@ def create_app() -> FastAPI:
         return JSONResponse({"detail": str(exc)}, status_code=400)
 
     @app.get("/", response_class=HTMLResponse)
-    async def page() -> HTMLResponse:
+    def page() -> HTMLResponse:
         """The one page, rendered fresh so an edit to it needs no build step.
 
         Deliberately uncached: the asset it inlines is 191 KB off local disk,
@@ -87,17 +99,17 @@ def create_app() -> FastAPI:
         return HTMLResponse(render_browser_html())
 
     @app.get("/api/datasets", response_model=list[DatasetModel])
-    async def datasets() -> list[dict[str, Any]]:
+    def datasets() -> list[dict[str, Any]]:
         """Every candle set stored, on storage's own four-part identity."""
         return [_dataset_row(row) for _, row in list_candle_sets().iterrows()]
 
     @app.get("/api/strategies", response_model=list[StrategyModel])
-    async def strategies() -> list[dict[str, Any]]:
+    def strategies() -> list[dict[str, Any]]:
         """Both registries, each entry labelled with the contract it answers on."""
         return [asdict(entry) for entry in registered_strategies()]
 
     @app.get("/api/analysis", response_model=AnalysisModel)
-    async def analysis(query: Annotated[AnalysisQuery, Query()]) -> dict[str, Any]:
+    def analysis(query: Annotated[AnalysisQuery, Query()]) -> dict[str, Any]:
         """Candles, what the strategy did, why it did it, and under what settings."""
         payload = build_analysis(
             MarketDataIdentity(
@@ -121,7 +133,7 @@ def create_app() -> FastAPI:
         return asdict(payload)
 
     @app.post("/api/refresh", response_model=RefreshModel)
-    async def refresh(query: Annotated[RefreshQuery, Query()]) -> dict[str, Any]:
+    def refresh(query: Annotated[RefreshQuery, Query()]) -> dict[str, Any]:
         """Fetch the last few bars from the venue, upsert them, and return them.
 
         The one write in this app, and it is ``server.refresh_candles`` -- the

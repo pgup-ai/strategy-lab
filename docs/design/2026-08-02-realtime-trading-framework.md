@@ -11,6 +11,12 @@ Proposed 2026-08-02 · Base commit: `55a7c0f`
 > - **§1's inventory** predates R1's perp backfill and R4–R6; the stored-data
 >   counts, the strategy count, and "`SignalSet` / `Strategy` protocol" as *the*
 >   contract are all stale — there are two contracts now.
+> - **§2's replay-cost figures contradict this document's own correction.** The
+>   body still reads "5.9 ms versus 6 minutes is a 60,000×"; the quoted
+>   correction above it measured **0.39 s** over the whole history and **~43
+>   minutes** per-bar, so the ratio is **~6,600×**. The conclusion the section
+>   draws is unchanged and correct — replay is for windows, backtest takes the
+>   bulk path — but quote the corrected numbers, not the headline ones.
 > - **§10's Phase 3 dashboard** assumes a chart whose vocabulary is entry and
 >   exit markers. `TargetExposure` emits a continuous level that markers cannot
 >   draw, and the per-bar state and feature values that make the dashboard worth

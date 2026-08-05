@@ -225,7 +225,7 @@ def test_parity_holds_where_every_setting_is_away_from_its_default(tmp_path):
     A payload that quietly simulated at the engine's defaults would agree with a
     default backtest and disagree with every other one -- and it would disagree
     in what a fill *was* rather than in when it happened. Measured on this
-    window, reverting any single one of the four to its default changes the
+    window, reverting any single one of the five to its default changes the
     prices or the sizes, while only ``position_pct`` moves a bar at all. So the
     browser's arrows can carry the wrong number while landing in exactly the
     right place, which is the quietest way for a chart to be wrong.
@@ -350,6 +350,13 @@ def test_the_continuous_contract_returns_a_signed_level_rather_than_markers(perp
     assert len(payload.target) == _MACHINE_BARS
     assert max(payload.target) > 0.0 and min(payload.target) < 0.0
     assert all(abs(value) <= 1.0 for value in payload.target)
+    # Warmup is a leading run of 0.0 and never None -- the inverse of the feature
+    # convention, because a target says what to hold and before convergence that
+    # is exactly nothing. None would reach the page as "not measurable" and be
+    # drawn as a gap in the baseline rather than as flat.
+    warmup = payload.target[: payload.provenance.warmup_bars]
+    assert warmup and all(value == 0.0 for value in warmup)
+    assert all(value is not None for value in payload.target)
 
 
 def test_the_continuous_contract_reports_no_cost_model_because_it_executed_none(
