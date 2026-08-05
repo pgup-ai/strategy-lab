@@ -1,4 +1,5 @@
-"""The research browser's HTTP surface: read-only, loopback, four endpoints.
+"""The research browser's HTTP surface: read-only, loopback, one page and four
+endpoints.
 
 Read-only means read-only. Nothing here writes to ``signals``, nothing writes
 into ``reports/``, and the only write of any kind is the candle upsert
@@ -22,7 +23,7 @@ from typing import Annotated, Any
 
 import pandas as pd
 from fastapi import FastAPI, HTTPException, Query, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 
 from strategy_lab.api.analysis import (
     DatasetUnavailable,
@@ -73,6 +74,17 @@ def create_app() -> FastAPI:
     @app.exception_handler(ValueError)
     async def _bad_request(request: Request, exc: ValueError) -> JSONResponse:
         return JSONResponse({"detail": str(exc)}, status_code=400)
+
+    @app.get("/", response_class=HTMLResponse)
+    async def page() -> HTMLResponse:
+        """The one page, rendered fresh so an edit to it needs no build step.
+
+        Deliberately uncached: the asset it inlines is 191 KB off local disk,
+        and a cached page is a stale page the first time somebody changes one.
+        """
+        from strategy_lab.browser.page import render_browser_html
+
+        return HTMLResponse(render_browser_html())
 
     @app.get("/api/datasets", response_model=list[DatasetModel])
     async def datasets() -> list[dict[str, Any]]:
