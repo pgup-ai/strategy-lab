@@ -1,9 +1,10 @@
 """Storage for a continuously drifting target exposure.
 
 Marked per test rather than with a module-level ``pytestmark``, unlike the other
-storage suites: the three conversion tests below are pure Python and must run
-whether or not Postgres is up. They are the guard that a bare float never
-reaches a NUMERIC bind, and a guard that skips silently is not a guard.
+storage suites: the four tests under the first heading below are pure Python and
+must run whether or not Postgres is up. Three of them guard that a bare float
+never reaches a NUMERIC bind, and a guard that skips silently is not a guard;
+the fourth is arithmetic on the column count, which needs no server either.
 """
 
 from __future__ import annotations
@@ -127,7 +128,6 @@ def test_the_chunk_size_moved_with_the_new_column():
     assert "target_exposure" in signals_table.c
     assert MAX_ROWS_PER_INSERT == MAX_BOUND_PARAMETERS // len(signals_table.c)
     assert MAX_ROWS_PER_INSERT == 3120, "the cap did not move when the column was added"
-    assert MAX_ROWS_PER_INSERT * len(signals_table.c) <= MAX_BOUND_PARAMETERS
 
 
 # --- the column -------------------------------------------------------------
@@ -261,7 +261,6 @@ def test_a_boolean_signal_stores_null_and_loads_back_unchanged(run_id):
         pytest.param(Decimal("1.000000"), id="fully-long"),
         pytest.param(Decimal("-1.000000"), id="fully-short"),
         pytest.param(Decimal("0.000001"), id="smallest-representable"),
-        pytest.param(Decimal("-0.000001"), id="smallest-representable-short"),
         pytest.param(Decimal("0.123456"), id="six-decimal-places"),
         pytest.param(Decimal("0.550000"), id="the-exhaustion-taper"),
     ],

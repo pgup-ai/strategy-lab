@@ -116,23 +116,21 @@ def assert_tracks_at_decisions(result, df, *, position_pct: float) -> None:
     assert held_value.to_numpy() == pytest.approx(asked.to_numpy(), abs=1e-9)
 
 
-def test_a_drifting_target_produces_an_order_per_change():
-    """The whole point: from_signals would give one order for this."""
-    result = run(_Scripted())
-    assert result.order_count == 6
-
-
-def test_the_same_taper_through_the_boolean_path_produces_one_order():
+def test_the_taper_is_six_orders_here_and_one_through_the_boolean_path():
     """The measurement that made this contract necessary, re-run in place.
 
-    ``from_signals`` defaults to ``accumulate=False``: it fills on the bar a
-    position opens and ignores every later size, so the taper's six changes
-    collapse into a single fill. Nothing about the taper is expressible there --
-    which is why this is a second contract rather than a flag on the first one.
+    One frame, one taper, both engines, so the two counts are comparable rather
+    than merely both recorded. ``from_signals`` defaults to ``accumulate=False``:
+    it fills on the bar a position opens and ignores every later size, so the
+    taper's six changes collapse into a single fill. Nothing about the taper is
+    expressible there -- which is why this is a second contract rather than a
+    flag on the first one.
     """
     import vectorbt as vbt
 
     df = flat_frame(len(TAPER))
+    assert run(_Scripted(), df=df).order_count == 6
+
     size = pd.Series(TAPER, index=df.index) * CASH * 0.95 / df["close"]
     pf = vbt.Portfolio.from_signals(
         close=df["close"],
@@ -231,14 +229,14 @@ def test_costs_are_charged_on_every_resize_not_only_on_entry():
 
     orders = tapered.orders
     entry_notional = float(orders["Size"].iloc[0] * orders["Price"].iloc[0])
-    after_entry = orders.iloc[1:]
 
     # Every fill is charged, not merely the first: the total is the fee rate
-    # against the whole traded notional.
+    # against the whole traded notional. That equality is measured against the
+    # orders the engine placed, so it holds just as well for an engine that
+    # placed one -- the ratio below is what refuses that.
     assert tapered.fees_paid == pytest.approx(
         float((orders["Size"] * orders["Price"]).sum()) * model.fee
     )
-    assert float((after_entry["Size"] * after_entry["Price"]).sum()) * model.fee > 0
     # Measured 6.7x: an engine that charged the entry alone would land on 1.0x.
     assert tapered.fees_paid > 2 * entry_notional * model.fee
     # The control holds one level throughout, so the excess is the taper's own

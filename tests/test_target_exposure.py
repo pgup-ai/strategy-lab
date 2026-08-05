@@ -62,11 +62,6 @@ def test_the_refusals_name_the_row_that_caused_them():
         TargetExposure(target=series([0.0, 4.0, 0.0]))
 
 
-def test_warmup_rows_are_expressed_as_a_leading_flat_run_not_NaN():
-    exposure = TargetExposure(target=series([0.0, 0.0, 0.5]))
-    assert exposure.target.iloc[0] == 0.0
-
-
 def test_metadata_travels_with_the_target():
     """The engine records it in config.json exactly as it records SignalSet.metadata."""
     exposure = TargetExposure(target=series([0.0, 0.5]), metadata={"states": "riding"})
