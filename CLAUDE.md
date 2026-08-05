@@ -25,6 +25,9 @@ strategy-lab sweep --symbol BTC/USDT --timeframe 15m --strategy donchian \
   --grid '{"entry_span":[48,96,192],"exit_span":[24,48,96]}'
 strategy-lab features --exchange binance --market-type perp --symbol BTC/USDT \
   --timeframe 4h --horizons 1,6,30 --start 2019-09-10T08:00:00
+strategy-lab backtest --exchange binance --market-type perp --symbols BTC/USDT \
+  --timeframe 4h --strategy state_machine_v1 --exit-mode opposite_signal_only \
+  --start "2019-09-10 08:00:00" --cost-stress 1,2,3   # the MDE R5 state machine
 strategy-lab serve                 # serve reports/ with the live candle-refresh API
 ```
 
@@ -82,8 +85,42 @@ that. Signed features range −1..1, unsigned ones 0..1, and warmup rows are `Na
 — a 0.0 there reads as "measured and neutral", a different claim from "not yet
 measurable".
 
+`state/` consumes that fourth flow. `StateMachine` (`state/machine.py`) walks a
+feature frame through six states — compression → breakout → confirmed → riding →
+exhaustion → reset — with hysteresis, minimum dwell and a post-reset cooldown
+built into the transitions; `state/policy.py` maps state plus conditioning to a
+signed target risk; `strategies/state_machine_v1.py` exposes the pair through the
+ordinary `SignalSet` contract, so it runs on the existing engine, the replay
+path, and both safety suites unchanged.
+
 Key design decisions that span multiple files:
 
+- **The state machine's conditioning is non-monotone, so a threshold rule is the
+  wrong *shape*, not merely a suboptimal setting.** R4 measured `direction`'s IC
+  against the `[t+1, t+31]` return by `strength` tercile: low +0.002 (halves
+  disagree in sign), **mid −0.113** (halves −0.120 / −0.110), high +0.131.
+  `state/policy.py` therefore follows `direction` in the top band, **fades** it
+  in the middle one, and stands aside in the bottom — "trade when strength is
+  high" would discard the band with the larger absolute IC. Two consequences a
+  reader has to carry. The bands are **trailing ranks, not feature units**: a
+  tercile is a rank statement and the raw boundaries move 0.067/0.156 →
+  0.059/0.139 between halves, so a threshold in feature units is a differently
+  sized bucket per era. And **the fade did not survive out of sample** — R5
+  measured the follow band at **+100.0%** of test-half PnL on 54 trades and the
+  fade at **+0.0%** (+0.30 currency units on +1,567.15 total, 19 trades, 31.6%
+  win rate), against +70.8% on 53 trades / +29.2% on 24 in-sample — so the
+  machine's *design* is a hybrid while its *measured* result is trend following.
+  Do not describe it as either without saying which.
+- **`position_size` is consumed on the bar that opens a position and never
+  again.** `vbt.Portfolio.from_signals` defaults to `accumulate=False`; measured
+  in R2 against the installed vectorbt, `size = [1,1,1,1,5,5,5,5]` with an entry
+  every bar yields one order of size 1.0 and a position that never resizes. So
+  `state_machine_v1`'s per-state target risk picks the size *at entry* — a later
+  state can close the position but cannot scale it, and the charter's
+  exhaustion → distribution taper is deferred to R6 where the continuous-exposure
+  contract lands. Writing a taper against this engine ships a state machine whose
+  defining behaviour is silently ignored, which is exactly what "volatility
+  targeting" turned out to be before it was renamed `vol-scaled-entry`.
 - **Candle identity is `(exchange, market_type, symbol, timeframe)`** with the timeframe
   as a literal string — `1w` and `1wk` are distinct datasets. All indicators are computed
   at backtest time from raw candles. In the event engine that identity is `CandleId`

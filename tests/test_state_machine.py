@@ -1,0 +1,439 @@
+from __future__ import annotations
+
+import numpy as np
+import pandas as pd
+import pytest
+
+from strategy_lab.features.base import rolling_percentile
+from strategy_lab.state.machine import REQUIRED_COLUMNS, MarketState, StateMachine
+
+
+def frame(**columns) -> pd.DataFrame:
+    """A feature frame from whatever columns are named -- and only those.
+
+    No defaults on purpose: the machine's input contract is that every column
+    it reads is present, and a helper that filled the gaps would make the
+    rejection test below untestable.
+    """
+    n = len(next(iter(columns.values())))
+    index = pd.date_range("2024-01-01", periods=n, freq="4h", tz="UTC", name="timestamp")
+    return pd.DataFrame(columns, index=index)
+
+
+def quiet(n: int, **overrides) -> pd.DataFrame:
+    """A complete frame of unremarkable readings, for tests that vary one column."""
+    columns = {
+        "direction": [0.0] * n,
+        "strength": [0.1] * n,
+        "stability": [0.9] * n,
+        "crowding": [0.5] * n,
+    }
+    columns.update(overrides)
+    return frame(**columns)
+
+
+def wandering(n: int, *, seed: int, window: int = 200) -> np.ndarray:
+    """An autocorrelated 0..1 series shaped like what the adapter actually feeds.
+
+    The machine's inputs are trailing *ranks* of slow rolling statistics, so
+    they drift rather than jump. Drawing them iid would look like a harder test
+    and be a weaker one: the lifecycle needs several consecutive advancing bars
+    to reach ``RIDING`` at all, and under iid draws it essentially never gets
+    there, leaving the deeper states unexercised.
+    """
+    rng = np.random.default_rng(seed)
+    walk = pd.Series(np.cumsum(rng.normal(0.0, 1.0, n + window)))
+    return rolling_percentile(walk, window=window).to_numpy()[window:]
+
+
+def test_the_machine_starts_flat_rather_than_guessing():
+    """Bar 0 has no history behind it, so the machine may not claim a trend."""
+    states = StateMachine().run(quiet(20, direction=[0.9] * 20, strength=[0.95] * 20))
+    assert states.iloc[0] is MarketState.COMPRESSION
+
+
+def test_a_state_is_produced_for_every_bar():
+    features = quiet(20)
+    states = StateMachine().run(features)
+    assert len(states) == len(features)
+    assert states.index.equals(features.index)
+
+
+def test_an_unknown_feature_column_is_rejected_rather_than_ignored():
+    """A typo'd column name must not silently disable a transition rule."""
+    with pytest.raises(KeyError, match="strength"):
+        StateMachine().run(
+            frame(direction=[0.0] * 20, stability=[0.9] * 20, crowding=[0.5] * 20)
+        )
+
+
+def test_thresholds_that_collapse_the_dead_band_are_rejected():
+    with pytest.raises(ValueError, match="enter_strength"):
+        StateMachine(enter_strength=0.30, exit_strength=0.30)
+
+
+def test_hysteresis_lets_a_setup_survive_a_dip_that_a_single_threshold_would_kill():
+    """What the dead band buys: a dip below ``enter_strength`` stalls, not fails.
+
+    Two bars at 0.5 sit under the 2/3 entry and over the 1/3 exit. With the dead
+    band the ``BREAKOUT`` they land on merely stops climbing for two bars and
+    then goes on to ``RIDING``; with the thresholds all but collapsed
+    (2/3 against 0.66) the same two bars are outright failures and the machine
+    is knocked to ``RESET`` and has to serve a cooldown before it can even
+    re-break out.
+
+    Note this is a claim about *stalling*, not about nothing happening. A dip
+    lasting ``min_dwell`` bars does drop the setup -- see
+    ``test_a_setup_that_stops_advancing_fails_rather_than_parking``, which is
+    what makes the machine converge at all.
+    """
+    dipping = [0.9] * 8 + [0.5] * 2 + [0.9] * 14
+    features = quiet(24, direction=[0.8] * 24, strength=dipping)
+
+    with_band = StateMachine(min_dwell=4, cooldown=8).run(features)
+    without_band = StateMachine(
+        enter_strength=2.0 / 3.0, exit_strength=0.66, min_dwell=4, cooldown=8
+    ).run(features)
+
+    assert MarketState.RESET not in set(with_band), "a dead-band bar knocked the setup back"
+    assert with_band.iloc[-1] is MarketState.RIDING
+    assert without_band.iloc[10] is MarketState.RESET, (
+        "setup failed: the collapsed thresholds were supposed to fail on the dip"
+    )
+    assert MarketState.RIDING not in set(without_band)
+
+
+def test_minimum_dwell_blocks_a_one_bar_spike_from_advancing_the_machine():
+    """The bars around the spike sit in the dead band, not below ``exit_strength``.
+
+    Putting them at 0.1 instead would make the machine reset on every one of
+    them, and the state would then hold across the spike for a reason that has
+    nothing to do with dwell.
+    """
+    machine = StateMachine(min_dwell=5)
+    spike = [0.5] * 10 + [0.9] + [0.5] * 10
+    states = machine.run(quiet(21, direction=[0.8] * 21, strength=spike))
+    assert states.iloc[10] is states.iloc[9], "a single bar advanced the state despite dwell"
+
+
+def test_dwell_paces_the_lifecycle_rather_than_letting_it_run_in_three_bars():
+    """The other half of dwell: the state itself must also have lasted.
+
+    Without it, a condition that has already been true for a while satisfies
+    every step at once and the machine walks COMPRESSION to RIDING one bar at a
+    time.
+    """
+    min_dwell = 5
+    machine = StateMachine(min_dwell=min_dwell)
+    states = machine.run(quiet(30, direction=[0.8] * 30, strength=[0.9] * 30))
+    first_breakout = int(np.argmax((states == MarketState.BREAKOUT).to_numpy()))
+    first_riding = int(np.argmax((states == MarketState.RIDING).to_numpy()))
+    assert states.iloc[first_riding] is MarketState.RIDING, "setup failed: never rode"
+    assert first_riding - first_breakout >= 2 * min_dwell, (
+        f"BREAKOUT to RIDING took {first_riding - first_breakout} bars, which is "
+        f"less than the two dwell periods of {min_dwell} bars it has to cross"
+    )
+
+
+def test_cooldown_prevents_immediate_re_entry_after_a_reset():
+    cooldown = 8
+    machine = StateMachine(cooldown=cooldown, min_dwell=1)
+    pattern = [0.9] * 6 + [0.05] * 3 + [0.9] * 20        # trend, failure, immediate retry
+    states = machine.run(quiet(29, direction=[0.8] * 29, strength=pattern))
+
+    reset_bar = int(np.argmax((states == MarketState.RESET).to_numpy()))
+    assert states.iloc[reset_bar] is MarketState.RESET, "setup failed: the trend never reset"
+    blocked = states.iloc[reset_bar + 1 : reset_bar + 1 + cooldown]
+    assert (blocked != MarketState.BREAKOUT).all(), "re-entered during cooldown"
+    assert (states.iloc[reset_bar + 1 + cooldown :] == MarketState.BREAKOUT).any(), (
+        "never re-entered at all, so the cooldown window above proves nothing"
+    )
+
+
+def test_a_direction_flip_while_riding_exits_immediately_despite_dwell():
+    """Refusing to leave on a real break is worse than churning."""
+    machine = StateMachine(min_dwell=4, cooldown=0)
+    direction = [0.8] * 40 + [-0.8] * 10
+    states = machine.run(quiet(50, direction=direction, strength=[0.9] * 50))
+    assert states.iloc[39] is MarketState.RIDING, "setup failed: never reached RIDING"
+    assert states.iloc[40] is MarketState.RESET
+
+
+def test_a_stability_collapse_exits_immediately_despite_dwell():
+    machine = StateMachine(min_dwell=4, cooldown=0)
+    stability = [0.9] * 40 + [0.02] * 10
+    states = machine.run(
+        quiet(50, direction=[0.8] * 50, strength=[0.9] * 50, stability=stability)
+    )
+    assert states.iloc[39] is MarketState.RIDING, "setup failed: never reached RIDING"
+    assert states.iloc[40] is MarketState.RESET
+
+
+def test_extreme_crowding_ends_a_ride_while_strength_still_holds():
+    """Crowding is the only non-price input the machine has.
+
+    If an extreme reading changes no transition, the column is decoration --
+    and the strength here never leaves the top tercile, so nothing else could
+    have ended the ride.
+    """
+    machine = StateMachine(min_dwell=4, cooldown=0)
+    crowding = [0.5] * 40 + [0.99] * 10
+    states = machine.run(
+        quiet(50, direction=[0.8] * 50, strength=[0.9] * 50, crowding=crowding)
+    )
+    assert states.iloc[39] is MarketState.RIDING, "setup failed: never reached RIDING"
+    assert states.iloc[40] is MarketState.EXHAUSTION
+
+
+def test_a_ride_whose_lean_decays_ends_even_with_strength_intact():
+    """``advancing`` has two halves and both have to be able to end a ride.
+
+    Strength stays in the top band throughout, so the old "strength left the top
+    tercile" rule never fires. What goes is ``direction``: 0.02 is under the
+    0.10 floor, which is too small to have a usable sign and therefore too small
+    to be riding. Before this, such a tail parked ``RIDING`` forever.
+    """
+    machine = StateMachine(min_dwell=4, cooldown=0)
+    direction = [0.8] * 40 + [0.02] * 10
+    states = machine.run(quiet(50, direction=direction, strength=[0.9] * 50))
+    assert states.iloc[39] is MarketState.RIDING, "setup failed: never reached RIDING"
+    assert states.iloc[40] is MarketState.EXHAUSTION
+
+
+def test_a_setup_that_stops_advancing_fails_rather_than_parking():
+    """``min_dwell`` runs both ways: it steps the machine up and it drops it out.
+
+    The tail sits in the dead band, so nothing fails and nothing advances. A
+    ``BREAKOUT`` that keeps its label there is keeping a position in the
+    lifecycle it has no claim to -- ``advance_run`` has already been reset, so
+    it is no closer to ``CONFIRMED`` than a fresh ``COMPRESSION`` is.
+    """
+    min_dwell = 4
+    machine = StateMachine(min_dwell=min_dwell, cooldown=2)
+    strength = [0.9] * 5 + [0.5] * 20
+    states = machine.run(quiet(25, direction=[0.8] * 25, strength=strength))
+    assert states.iloc[4] is MarketState.BREAKOUT, "setup failed: never broke out"
+    assert states.iloc[4 + min_dwell] is MarketState.RESET, (
+        f"a stalled BREAKOUT was still held {min_dwell} bars later: {list(states)}"
+    )
+
+
+def test_exhaustion_ends_on_its_own_timer_rather_than_waiting_for_a_failure():
+    """The one transition on a plain timer, and the one the bug lived in.
+
+    The tail neither fails, destabilises nor flips, so every *conditional* exit
+    from ``EXHAUSTION`` stays shut. Without the dwell the machine sits here for
+    the rest of the input, which is a memory of where the run began that no
+    ``warmup_bars`` can erase.
+    """
+    exhaustion_dwell = 6
+    machine = StateMachine(min_dwell=4, cooldown=0, exhaustion_dwell=exhaustion_dwell)
+    strength = [0.9] * 40 + [0.5] * 30
+    states = machine.run(quiet(70, direction=[0.8] * 70, strength=strength))
+
+    assert states.iloc[40] is MarketState.EXHAUSTION, "setup failed: never exhausted"
+    held = int((states.iloc[40:] == MarketState.EXHAUSTION).sum())
+    assert held == exhaustion_dwell, f"EXHAUSTION lasted {held} bars, not {exhaustion_dwell}"
+    assert states.iloc[40 + exhaustion_dwell] is MarketState.RESET
+
+
+@pytest.mark.parametrize("blocker", ["stability", "crowding"])
+def test_a_breakout_is_refused_under_a_condition_that_would_end_the_move(blocker):
+    """The entry gate checks what the exits check, or the machine cycles.
+
+    Gated on ``advancing`` alone, a tail that is strong *and* unstable walks
+    COMPRESSION -> BREAKOUT -> RESET -> COMPRESSION forever, at a phase that
+    depends on where the run started. Both blockers are conditions the machine
+    already treats as ending a live move.
+    """
+    values = {"stability": [0.02] * 60, "crowding": [0.99] * 60}[blocker]
+    states = StateMachine(min_dwell=4, cooldown=8).run(
+        quiet(60, direction=[0.8] * 60, strength=[0.95] * 60, **{blocker: values})
+    )
+    assert set(states) == {MarketState.COMPRESSION}, (
+        f"a {blocker} blocker let the machine into {sorted({s.name for s in states})}"
+    )
+
+
+def test_an_unmeasurable_bar_is_treated_as_a_failure_not_as_no_news():
+    """Warmup rows are NaN, and a machine that coasts through them holds a trend
+    it can no longer see."""
+    machine = StateMachine(min_dwell=4, cooldown=0)
+    strength = [0.9] * 40 + [np.nan] * 10
+    states = machine.run(quiet(50, direction=[0.8] * 50, strength=strength))
+    assert states.iloc[39] is MarketState.RIDING, "setup failed: never reached RIDING"
+    assert states.iloc[40] is MarketState.RESET
+
+
+def test_every_transition_taken_is_legal():
+    """The lifecycle is a cycle; the machine must not jump COMPRESSION -> EXHAUSTION."""
+    n = 4000
+    states = StateMachine().run(
+        frame(
+            direction=2.0 * wandering(n, seed=5) - 1.0,
+            strength=wandering(n, seed=6),
+            stability=wandering(n, seed=7),
+            crowding=wandering(n, seed=8),
+        )
+    )
+    assert states.nunique() == len(MarketState), (
+        f"only {states.nunique()} of {len(MarketState)} states were ever reached, so "
+        "the legality check below never saw most of the lifecycle"
+    )
+    for previous, current in zip(states.iloc[:-1], states.iloc[1:]):
+        assert current in StateMachine.LEGAL_TRANSITIONS[previous], f"{previous} -> {current}"
+
+
+# Feature readings that between them trip every predicate the machine has:
+# NaN (unmeasurable), each strength band, both sides of the direction floor,
+# a stability collapse and an extreme carry.
+DIRECTIONS = (-0.9, -0.05, 0.0, 0.05, 0.9, np.nan)
+STRENGTHS = (0.05, 0.34, 0.5, 0.95, np.nan)
+STABILITIES = (0.02, 0.95)
+CROWDINGS = (0.5, 0.99)
+
+CONSTANT_TAILS = [
+    dict(direction=d, strength=s, stability=st, crowding=c)
+    for d in DIRECTIONS
+    for s in STRENGTHS
+    for st in STABILITIES
+    for c in CROWDINGS
+]
+
+
+def rows_to_frame(rows: list[dict]) -> pd.DataFrame:
+    return frame(**{name: [row[name] for row in rows] for name in REQUIRED_COLUMNS})
+
+
+# Leads chosen to leave the machine in every one of the six states, at every
+# age within each: a strong block long enough to reach RIDING, then a second
+# constant block of every length up to the bound. ``test_every_state_is_reached
+# _by_some_lead`` is what keeps that claim honest rather than assumed.
+STRONG = dict(direction=0.9, strength=0.95, stability=0.95, crowding=0.5)
+
+
+def leads_for(machine: StateMachine) -> list[list[dict]]:
+    climb = [STRONG] * (3 * machine.min_dwell + 2)
+    spans = range(1, machine.convergence_bars + 3)
+    second_blocks = CONSTANT_TAILS[:: max(1, len(CONSTANT_TAILS) // 8)]
+    # Truncations of the climb walk the machine up the lifecycle one bar at a
+    # time; a full climb followed by a second constant block of every length
+    # reaches the states below RIDING and every age within them. Anything past
+    # ``len(climb)`` would repeat the whole climb, so the first list stops there.
+    return [climb[:span] for span in range(1, len(climb) + 1)] + [
+        climb + [reading] * span for reading in second_blocks for span in spans
+    ]
+
+
+@pytest.mark.parametrize(
+    "machine",
+    [
+        StateMachine(),
+        StateMachine(enter_strength=0.80, exit_strength=1.0 / 3.0, min_dwell=2, cooldown=16),
+        StateMachine(min_dwell=1, cooldown=0, exhaustion_dwell=1),
+    ],
+    ids=["default", "trained", "fastest-legal"],
+)
+def test_a_constant_tail_converges_from_any_start(machine):
+    """**The invariant a live process rests on.** No finite prefix survives.
+
+    A backtest reaches bar *t* carrying years of history; a replay or a live
+    process reaches it cold. They can only agree if the state stops depending on
+    where the input began, and the machine cannot promise that unless every
+    state has a bounded exit. Before that landed, a tail of
+    ``direction=0.8, strength=0.5, stability=0.9, crowding=0.5`` left a cold run
+    in COMPRESSION and a warm one in EXHAUSTION *permanently* -- target risk 0.0
+    against -0.55 -- and raising ``warmup_bars`` could not have fixed it, since
+    the disagreement is unbounded.
+
+    Every start is exercised by prefixing, which is the only way in from
+    outside; the internal counters are not reachable any other way and a test
+    that set them would be testing its own copy of the transition table.
+    """
+    bound = machine.convergence_bars
+    tail_bars = bound + 20
+    leads = leads_for(machine)
+
+    worst = 0
+    for reading in CONSTANT_TAILS:
+        cold = machine.run(rows_to_frame([reading] * tail_bars)).to_numpy()
+        for lead in leads:
+            warm = machine.run(rows_to_frame(lead + [reading] * tail_bars)).to_numpy()[
+                len(lead) :
+            ]
+            disagreements = np.flatnonzero(warm != cold)
+            lag = int(disagreements[-1]) + 1 if len(disagreements) else 0
+            worst = max(worst, lag)
+            assert lag <= bound, (
+                f"a run led by {len(lead)} bars still disagreed with a cold start "
+                f"{lag} bars into a constant tail {reading}, past the declared "
+                f"bound of {bound}"
+            )
+    assert worst > bound // 2, (
+        f"the worst observed lag was {worst} against a bound of {bound}; a bound "
+        "that loose is not measuring the machine any more"
+    )
+
+
+def test_every_state_is_reached_by_some_lead():
+    """Otherwise the convergence check above starts from three states, not six."""
+    machine = StateMachine()
+    reached = {machine.run(rows_to_frame(lead)).iloc[-1] for lead in leads_for(machine)}
+    assert reached == set(MarketState), f"never started from {set(MarketState) - reached}"
+
+
+def test_the_mid_band_tail_does_not_split_a_cold_run_from_a_warm_one():
+    """The exact reading that was reported, kept as its own regression.
+
+    It is the ordinary case rather than a corner: strength parked in the middle
+    tercile with a clean lean and no carry pressure is what the policy calls the
+    fade band, so the two runs disagreed about a *live short* rather than about
+    a bookkeeping detail.
+    """
+    reading = dict(direction=0.8, strength=0.5, stability=0.9, crowding=0.5)
+    machine = StateMachine()
+    tail_bars = machine.convergence_bars + 20
+
+    cold = machine.run(rows_to_frame([reading] * tail_bars)).to_numpy()
+    warm = machine.run(rows_to_frame([STRONG] * 200 + [reading] * tail_bars)).to_numpy()[200:]
+
+    assert warm[-1] is cold[-1] is MarketState.COMPRESSION
+    assert (warm[machine.convergence_bars :] == cold[machine.convergence_bars :]).all()
+
+
+# Bars a cold start may take to agree with a run that has seen the whole history
+# on *realistic* input. The bound proved above covers constant tails only, and
+# real features drift rather than holding still, so this is the independent
+# measurement rather than a restatement: over the 38 frames below the worst lag
+# is 74 and 25 of them agree immediately, against a proven constant-tail bound
+# of 34. The limit is set at roughly twice the worst rather than at it.
+MAX_CONVERGENCE_LAG = 150
+
+
+@pytest.mark.parametrize("seed", range(10, 200, 5))
+def test_the_machine_forgets_where_it_started(seed):
+    """Saturating counters make this a finite automaton, not an endless recursion.
+
+    A live process starts cold in COMPRESSION while a backtest reaches the same
+    bar carrying years of history. The two agree only if the state stops
+    depending on where the input began, and this measures how many bars that
+    costs: cutting the frame in half and re-running the tail from scratch must
+    converge on the whole-history answer, quickly and then permanently.
+    """
+    n = 2000
+    features = frame(
+        direction=2.0 * wandering(n, seed=seed) - 1.0,
+        strength=wandering(n, seed=seed + 1),
+        stability=wandering(n, seed=seed + 2),
+        crowding=wandering(n, seed=seed + 3),
+    )
+    split = n // 2
+    whole = StateMachine().run(features).to_numpy()[split:]
+    late = StateMachine().run(features.iloc[split:]).to_numpy()
+
+    disagreements = np.flatnonzero(whole != late)
+    lag = int(disagreements[-1]) + 1 if len(disagreements) else 0
+    assert lag <= MAX_CONVERGENCE_LAG, (
+        f"a cold start still disagreed {lag} bars after the split; the machine is "
+        "carrying memory of where its input began"
+    )

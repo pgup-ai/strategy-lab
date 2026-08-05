@@ -47,6 +47,22 @@ SUB = Subscription(INSTRUMENT, "15m")
 STREAM_SPAN = 1_000
 REPEAT_SPAN = 400
 
+# Bars discarded before a primed runner's warmup window starts, so the backtest
+# it is compared against has history the runner was never given. Zero would make
+# the primed comparison identical to the two above and it would stop testing
+# anything.
+#
+# The offset and the seed are both load-bearing and both measured rather than
+# picked. Under-declaring ``state_machine_v1``'s warmup by its whole machine
+# margin -- 2,192 bars down to the features' own 1,920 -- still produces
+# *identical* signal lists at offset 500 on every seed tried, and at offset
+# 1,500 on seed 7: a state disagreement only shows here if it lands on a bar
+# that emits, and the runner deliberately emits sides only, never
+# ``position_size``. At offset 1,500 on seed 3 it diverges, so this frame can
+# actually fail. Every registered strategy clears MIN_SIGNALS on it.
+PRIME_OFFSET = 1_500
+PRIME_SEED = 3
+
 # Every comparison below must have real signals behind it. A floor rather than
 # ">0" so the tests cannot quietly decay to a single-signal comparison either.
 MIN_SIGNALS = 10
@@ -68,13 +84,15 @@ _SIDE_BY_FIELD = (
 )
 
 
-def vectorized_signals(strategy, df: pd.DataFrame) -> list[tuple[int, Side]]:
+def vectorized_signals(strategy, df: pd.DataFrame, *, first: int | None = None) -> list[tuple[int, Side]]:
     """What a whole-history backtest would produce, skipping warmup.
 
     The warmup boundary must be the runner's boundary exactly: the runner
     suppresses while ``len(buffer) <= warmup_bars``, so its first emitting bar is
     0-based position ``warmup_bars``. Skipping one bar more or less here would
-    shift the whole list and the equality would be off by one signal.
+    shift the whole list and the equality would be off by one signal. ``first``
+    overrides that boundary for the primed comparison below, whose runner has
+    already been handed its warmup and therefore emits from a later bar.
 
     Timestamps use ``Timestamp.value // 1_000_000`` -- the same integer path as
     ``feeds.replay._epoch_ms``, which is what stamps ``Signal.ts_bar_ms``.
@@ -83,9 +101,10 @@ def vectorized_signals(strategy, df: pd.DataFrame) -> list[tuple[int, Side]]:
     comparison must not depend on that holding.
     """
     signal_set = strategy.generate_signals(df)
+    boundary = strategy.warmup_bars if first is None else first
     out: list[tuple[int, Side]] = []
     for position, timestamp in enumerate(df.index):
-        if position < strategy.warmup_bars:
+        if position < boundary:
             continue
         ts_ms = timestamp.value // 1_000_000
         for field_name, side in _SIDE_BY_FIELD:
@@ -152,6 +171,53 @@ def test_replay_is_repeatable(name):
         f"{strategy.warmup_bars}; repeatability would be vacuous. Raise REPEAT_SPAN."
     )
     assert streamed_signals(strategy, df) == first
+
+
+@pytest.mark.parametrize("name", list_strategies())
+def test_a_primed_runner_agrees_with_the_backtest_it_started_late_for(name):
+    """The third drive path, and the only one where *where you started* can show.
+
+    The two comparisons above both begin at bar 0, so a causal strategy passes
+    them by construction: row *t* of a run over ``[0, N]`` and row *t* of a run
+    over ``[0, t]`` are the same computation. What they cannot see is the case a
+    live process actually is -- ``StrategyRunner.prime`` is handed exactly
+    ``warmup_bars`` bars from the middle of history and then streams, while the
+    backtest reaches the same bar carrying everything before it. Those agree
+    only if ``warmup_bars`` is genuinely enough history.
+
+    That is the guarantee ``state_machine_v1`` broke: its machine had states
+    with no bounded exit, so a whole-history run could sit in ``EXHAUSTION``
+    -- a live short at 0.55 risk -- while a cold one sat in ``COMPRESSION``
+    flat, for as long as the input stayed in the middle strength band. No
+    ``warmup_bars`` fixes an unbounded disagreement, which is why the machine
+    now proves a convergence bound (``tests/test_state_machine.py``) rather than
+    declaring a bigger number here.
+    """
+    strategy = get_strategy(name)
+    df = synthetic_ohlcv(n=PRIME_OFFSET + strategy.warmup_bars + REPEAT_SPAN, seed=PRIME_SEED)
+    first_streamed = PRIME_OFFSET + strategy.warmup_bars
+
+    runner = StrategyRunner(
+        strategy=strategy, instrument=INSTRUMENT, timeframe="15m", clock=SimClock()
+    )
+    runner.prime(df.iloc[PRIME_OFFSET:first_streamed])
+    feed = ReplayFeed(frames={INSTRUMENT.at("15m"): df.iloc[first_streamed:]})
+
+    async def _run() -> list[tuple[int, Side]]:
+        collected: list[tuple[int, Side]] = []
+        async for event in feed.stream([SUB]):
+            collected.extend((s.ts_bar_ms, s.side) for s in runner.on_event(event))
+        return collected
+
+    expected = vectorized_signals(strategy, df, first=first_streamed)
+    assert len(expected) >= MIN_SIGNALS, (
+        f"{name}: only {len(expected)} signals over the {len(df) - first_streamed} "
+        f"streamed bars; the equality would be vacuous. Raise REPEAT_SPAN."
+    )
+    assert asyncio.run(_run()) == expected, (
+        f"{name}: a runner primed with exactly warmup_bars={strategy.warmup_bars} bars "
+        f"from position {PRIME_OFFSET} disagrees with the whole-history backtest."
+    )
 
 
 def test_the_determinism_check_can_fail():

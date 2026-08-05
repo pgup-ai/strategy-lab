@@ -18,6 +18,7 @@ Last reviewed: 2026-08-03 at commit `498eed5`.
 | `ema_cross` | long + short | any (MDE R0 baseline) | EMA48 vs EMA192 | none | engine | flat | R0 baseline |
 | `donchian` | long + short | any (MDE R0 baseline) | close breaks the 96-bar channel | none | strategy (48-bar reverse channel) | flat | R0 baseline |
 | `multi_horizon` | long + short | any (MDE R0 baseline) | sign of a 24/48/96/192 vol-normalized blend | none | engine | flat | R0 baseline |
+| `state_machine_v1` | long + short | crypto perp 4h (MDE R5) | side of the state machine's target risk | the state machine itself | strategy (target side change) | per-state target, entry only | R5 gate passed out of sample |
 
 \* Status is inferred from report history — correct these labels as research priorities change.
 
@@ -241,6 +242,69 @@ entry state, which is the Turtle asymmetry paying off structurally.
 
 ---
 
+## state_machine_v1
+
+The MDE R5 strategy. It runs the six-state lifecycle in `state/machine.py` over four R4
+features and sizes each entry from the state it opened in.
+
+It was designed as a hybrid — follow the top `strength` tercile, *fade* the middle one —
+but **out of sample it earns its result as a trend follower**: the follow band produced
+essentially all of its test-half PnL on 54 trades, and the fade band exactly nothing. The
+fade is kept for now because it contributed in-sample and one half is not enough to delete
+a rule on, but it is not what the gate passed on.
+
+- **Entry**: whenever the policy's signed target risk changes side. High `strength`
+  follows `direction`; **mid `strength` fades it**; low `strength` is flat.
+- **Why the middle band inverts**: R4 measured the IC of `direction` against the
+  `[t+1, t+31]` return on 13,167 BTC/USDT perp 4h bars, by `strength` tercile — low
+  +0.0022 (halves disagree in sign), **mid −0.1128** (halves −0.1201 / −0.1101), high
+  +0.1314 (halves +0.1953 / +0.0621). Unconditional is +0.0385. A "trade when strength is
+  high" threshold discards the band with the larger absolute IC.
+- **Inputs**: `direction` raw, `strength` and `stability` as trailing ranks over
+  `rank_window=480`, `crowding` raw. The ranks are why the thresholds are tercile
+  boundaries: R4's conditioning was measured by tercile, and on the stored history the raw
+  boundaries move 0.067/0.156 → 0.059/0.139 between halves.
+- **Exits provided**: opposite side only, so run it under `--exit-mode
+  opposite_signal_only`. The other modes layer engine exits on top of a machine that
+  already owns its exits.
+- **Sizing**: `position_size` carries the state's target risk (COMPRESSION/RESET 0,
+  BREAKOUT 0.35, CONFIRMED 0.70, RIDING 1.00, EXHAUSTION 0.55), damped by extreme
+  `crowding` on the paying side only. **The engine applies it on the entry bar and never
+  again**, so a state change mid-position cannot resize — the taper is R6's job.
+- **Params**: `rank_window=480`, `machine=StateMachine(enter_strength=2/3,
+  exit_strength=1/3, min_dwell=4, cooldown=4, …)`, `warmup_bars=2192` — derived as
+  `deepest_feature + 8 x machine.convergence_bars`, so it tracks the machine it holds.
+- **`warmup_bars` is not the max over its features.** `direction` declares 1920, and at
+  exactly 1920 the cold-start replay in `tests/test_strategy_metadata.py` disagrees with
+  the whole-history run on 52–156 of 300 probed bars depending on seed, because the
+  machine is a recursion on top of the features and has its own cold start. 60 more bars
+  takes it to zero on every seed tried; the declared 240 is four times that.
+- **Run** (the canonical R5 command — the `--start` is the first stored funding
+  settlement, and a perp run refuses to start earlier because Binance settled nothing over
+  the contract's first 40 hours):
+
+  ```bash
+  strategy-lab backtest --exchange binance --market-type perp --symbols BTC/USDT \
+    --timeframe 4h --strategy state_machine_v1 --exit-mode opposite_signal_only \
+    --start "2019-09-10 08:00:00" --cost-stress 1,2,3
+  ```
+
+- **R5 gate: passes.** Parameters chosen on the first 60% of the 15,118-bar BTC/USDT perp
+  4h frame (54 configurations), the last 40% evaluated once. Out of sample it returns
+  **+15.45% net of funding at Sharpe +0.896 and 4.67% max drawdown** on 73 trades,
+  against the R0 baseline `donchian` 40/10 at **−6.64% / +0.072 / 43.86%** over the
+  identical 6,048 bars. The untuned R4 default also passes (+15.52% / +0.746 / 7.11%).
+  Two limits belong with that: it wins on **risk, not return** (buy-and-hold is +85.78%
+  over the same bars), and it **loses to the best donchian cell chosen with the test half
+  in hand** (40/40 at +112.57% / Sharpe +1.070). It now **does** survive 3× costs
+  (+15.45% / +10.93% / +6.41%) — the bounded-exit fix cut turnover from 159 trades to 73
+  and lengthened the median hold from 3 bars to 7. Full tables in
+  [the charter §9.2](docs/research/2026-08-03-market-dynamics-engine.md#92-r5-split-sample-gate--btcusdt-perp-4h);
+  `tests/test_state_machine_gate.py` re-runs the out-of-sample comparison against the
+  stored candles.
+
+---
+
 ## Exit mode × strategy matrix
 
 Engine defaults: `exit_mode=continuation_failure`, `failure_bars=4`.
@@ -260,8 +324,19 @@ R0 baselines (verified against the engine on 5,000 synthetic bars, 2026-08-03):
 | `continuation_failure` (default) | opposite state OR N adverse closes | channel exit OR N adverse closes |
 | `opposite_signal_only` | ✅ canonical — opposite state, unaffected by `--no-allow-shorts` | ✅ canonical — channel exit, unaffected by `--no-allow-shorts` |
 | `trend_failure` | ✗ raises (no trend-failure series) | ✗ raises (no trend-failure series) |
-| `setup_invalidation_stop` | ✗ raises (no setup stop) | ✗ raises (no setup stop) |
+| `setup_invalidation_stop` | ⚠ runs, but identical to `opposite_signal_only` — the strategy emits no setup stop, so none is applied | ✗ raises (no setup stop) |
 | `trend_structure` | long-only (raises if short entries exist — pass `--no-allow-shorts`); SMA40 via fallback | same; note it *replaces* the channel exit |
+
+`state_machine_v1` owns its exits the way `trend_rider_v1` does, so the same warning
+applies — anything layered on top fires *before* the machine decides the trend is over:
+
+| `exit_mode` | `state_machine_v1` |
+|---|---|
+| `continuation_failure` (default) | ⚠ target side change OR N adverse closes — cuts rides the machine would still hold |
+| `opposite_signal_only` | ✅ canonical — target side change only |
+| `trend_failure` | ✗ raises (no trend-failure series) |
+| `setup_invalidation_stop` | ✗ raises (no setup stop) |
+| `trend_structure` | long-only (raises if short entries exist — pass `--no-allow-shorts`); ⚠ replaces the machine's own exits with an SMA40 break |
 
 ## Engine behavior worth remembering
 
