@@ -49,7 +49,7 @@ def funding(monkeypatch, candles):
         candles.index[0], candles.index[-1], freq="8h", tz="UTC", name="timestamp"
     ) + pd.Timedelta(47, unit="ms")
     frame = pd.DataFrame({"funding_rate": 0.0001}, index=index)
-    monkeypatch.setattr(cli, "_funding_rates", lambda identity, df: frame["funding_rate"])
+    monkeypatch.setattr(cli, "_funding_rates", lambda identity, df, **_: frame["funding_rate"])
     return frame
 
 
@@ -65,7 +65,7 @@ def machine_candles(monkeypatch):
     df = synthetic_ohlcv_with_funding(n=_MACHINE_BARS, freq="4h")
     settlements = df[FUNDING_COLUMN][df[FUNDING_COLUMN] != 0.0]
     monkeypatch.setattr(cli, "load_candles", lambda **kwargs: df.drop(columns=FUNDING_COLUMN))
-    monkeypatch.setattr(cli, "_funding_rates", lambda identity, df: settlements)
+    monkeypatch.setattr(cli, "_funding_rates", lambda identity, df, **_: settlements)
     return settlements
 
 
@@ -278,7 +278,7 @@ def test_the_funding_column_is_matched_by_containment_not_equality(monkeypatch):
     )
     settled = index[::2] + pd.Timedelta(47, unit="ms")
     rates = pd.Series(0.0001, index=settled, name=FUNDING_COLUMN)
-    monkeypatch.setattr(cli, "_funding_rates", lambda identity, frame: rates)
+    monkeypatch.setattr(cli, "_funding_rates", lambda identity, frame, **_: rates)
 
     framed, returned = cli._with_funding_column(_IDENTITY, df, enabled=True)
 

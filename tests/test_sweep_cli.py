@@ -14,6 +14,7 @@ from __future__ import annotations
 import json
 
 import pytest
+import typer
 from typer.testing import CliRunner
 
 from strategy_lab import cli
@@ -42,7 +43,7 @@ def settlements(monkeypatch):
     df = synthetic_ohlcv(n=900)
     rates = synthetic_ohlcv_with_funding(n=900)[FUNDING_COLUMN]
     monkeypatch.setattr(cli, "load_candles", lambda **kwargs: df)
-    monkeypatch.setattr(cli, "_funding_rates", lambda identity, df: rates[rates != 0.0])
+    monkeypatch.setattr(cli, "_funding_rates", lambda identity, df, **_: rates[rates != 0.0])
     return df
 
 
@@ -57,7 +58,7 @@ def machine_candles(monkeypatch):
     df = synthetic_ohlcv_with_funding(n=_MACHINE_BARS, freq="4h")
     rates = df[FUNDING_COLUMN]
     monkeypatch.setattr(cli, "load_candles", lambda **kwargs: df.drop(columns=FUNDING_COLUMN))
-    monkeypatch.setattr(cli, "_funding_rates", lambda identity, df: rates[rates != 0.0])
+    monkeypatch.setattr(cli, "_funding_rates", lambda identity, df, **_: rates[rates != 0.0])
     return df
 
 
@@ -157,6 +158,39 @@ def test_a_perp_sweep_scores_every_cell_with_crowding_measured(machine_candles, 
     assert measured["config"]["funding_attached"] is True
     assert neutral["config"]["funding_attached"] is False
     assert measured["points"] != neutral["points"]
+
+
+def test_an_unfunded_perp_sweep_still_runs_for_a_strategy_that_reads_no_funding(
+    monkeypatch, tmp_path
+):
+    """A perp sweep of `donchian` must not need funding that `donchian` never reads.
+
+    Attaching the column made every perp sweep route through `_funding_rates`,
+    which refuses an absent or gap-ridden series -- so sweeping a baseline over a
+    perp began failing where it had always worked, with a message written for
+    `backtest` about a net-of-funding number this surface never computes. The
+    requirement now follows the strategy's own declared inputs.
+    """
+    df = synthetic_ohlcv(n=900, freq="4h")
+    monkeypatch.setattr(cli, "load_candles", lambda **kwargs: df)
+    monkeypatch.setattr(
+        cli,
+        "_funding_rates",
+        lambda identity, frame, *, required=True: _refuse_or_none(required),
+    )
+
+    result = _invoke(tmp_path, "--strategy", "donchian", "--grid", '{"entry_span":[40]}', *_PERP)
+
+    assert result.exit_code == 0, result.output
+    assert _record(tmp_path)["config"]["funding_attached"] is False
+    assert "reads no funding-derived feature" in result.output
+
+
+def _refuse_or_none(required):
+    """What `_funding_rates` does when nothing usable is stored."""
+    if required:
+        raise typer.BadParameter("no stored funding")
+    return None
 
 
 def test_a_spot_sweep_attaches_nothing_because_there_is_nothing_to_attach(candles, tmp_path):

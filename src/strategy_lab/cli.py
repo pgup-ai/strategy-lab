@@ -454,7 +454,7 @@ def _parse_cost_stress(raw: str) -> tuple[float, ...]:
     return multiples
 
 
-def _with_funding_column(identity: MarketDataIdentity, df, *, enabled: bool):
+def _with_funding_column(identity: MarketDataIdentity, df, *, enabled: bool, required: bool = True):
     """The frame a perp strategy should actually see, plus the settlement series.
 
     Funding is two different things to two different consumers, and ``backtest``
@@ -479,11 +479,13 @@ def _with_funding_column(identity: MarketDataIdentity, df, *, enabled: bool):
 
     from strategy_lab.features.flow import FUNDING_COLUMN, align_funding_to_bars
 
-    rates = _funding_rates(identity, df)
+    rates = _funding_rates(identity, df, required=required)
+    if rates is None:
+        return df, None
     return df.assign(**{FUNDING_COLUMN: align_funding_to_bars(df.index, rates)}), rates
 
 
-def _funding_rates(identity: MarketDataIdentity, df):
+def _funding_rates(identity: MarketDataIdentity, df, *, required: bool = True):
     """Stored funding for a perp, bounded to the candle window.
 
     A perp backtest that quietly skips funding reports a gross number that reads
@@ -511,17 +513,23 @@ def _funding_rates(identity: MarketDataIdentity, df):
         end=str(window_end(df.index)),
     )
     if rates.empty:
+        if not required:
+            return None
         raise typer.BadParameter(
             f"No stored funding for {identity.exchange}/perp/{identity.symbol} over "
             f"{df.index.min()} -> {df.index.max()}.\n\n"
             "A perp backtest without funding is gross of carry and not a tradeable "
             "number. Fetch it first:\n"
             f"strategy-lab fetch-funding --symbol {identity.symbol} --since 2019-09-01\n\n"
-            "Pass --no-funding to run gross of funding on purpose."
+            "Pass --no-funding to proceed without it: on a backtest that means gross of "
+            "carry, and on a sweep -- which never charges carry -- it means any "
+            "funding-derived feature falls back to neutral."
         )
 
     gaps = funding_coverage_gaps(funding=rates["funding_rate"], index=df.index)
     if gaps:
+        if not required:
+            return None
         raise typer.BadParameter(_uncovered_funding(identity, df, gaps))
     return rates["funding_rate"]
 
@@ -539,7 +547,9 @@ def _uncovered_funding(identity: MarketDataIdentity, df, gaps) -> str:
         f"strategy-lab fetch-funding --symbol {identity.symbol} "
         f"--since {gaps[0][0]:%Y-%m-%d}\n\n"
         "If the venue genuinely settled nothing there, narrow the run with --start. "
-        "Pass --no-funding to run gross of funding on purpose."
+        "Pass --no-funding to proceed without it: on a backtest that means gross of "
+            "carry, and on a sweep -- which never charges carry -- it means any "
+            "funding-derived feature falls back to neutral."
     )
 
 
@@ -615,7 +625,21 @@ def sweep_command(
     )
     if df.empty:
         _raise_missing_candles(identity)
-    df, _ = _with_funding_column(identity, df, enabled=funding)
+    # Only a strategy that reads ``crowding`` actually needs the column, and this
+    # surface never charges funding, so an unfunded perp must not be fatal here the
+    # way it is for a backtest: sweeping ``donchian`` over a perp worked before this
+    # attachment existed and has to keep working. The strategy declares its own
+    # inputs, so ask it rather than hardcoding a list.
+    needs_funding = "crowding" in getattr(get_strategy(strategy_name), "features", ())
+    df, rates = _with_funding_column(identity, df, enabled=funding, required=needs_funding)
+    attached = rates is not None
+    if funding and market_type == "perp" and not needs_funding and not attached:
+        typer.secho(
+            f"No usable stored funding, so {strategy_name} is scored without it. "
+            "Harmless here -- it reads no funding-derived feature, and a sweep never "
+            "charges carry.",
+            fg=typer.colors.YELLOW,
+        )
 
     try:
         points = sweep_parameters(
@@ -632,7 +656,9 @@ def sweep_command(
         "data_start": str(df.index.min()),
         "data_end": str(df.index.max()),
         "candle_count": int(len(df)),
-        "funding_attached": bool(funding and market_type == "perp"),
+        # What happened, not what was asked for: a perp sweep of a strategy that
+        # reads no funding feature runs without the column rather than failing.
+        "funding_attached": attached,
         "generated_at": datetime.now(UTC).isoformat(),
     }
 
