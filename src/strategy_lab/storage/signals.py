@@ -55,6 +55,13 @@ class ExposureSignal:
     is a bug worth raising on, while a target is a float64 out of a pandas
     series by construction. Refusing it would only move ``Decimal(str(float(x)))``
     out to every call site, which is precisely where it gets forgotten.
+
+    Reads of the wrapped signal's fields are **forwarded**, so a caller can
+    iterate a mixed result from :func:`load_signals` and read ``.side`` or
+    ``.ts_bar_ms`` off every element without first asking which contract wrote
+    it. Without that the union is a trap rather than an answer, and one that
+    hides until the first run that stores a level: the type is there for a
+    caller who wants to know, and stays out of the way of one who does not.
     """
 
     signal: Signal
@@ -62,6 +69,33 @@ class ExposureSignal:
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "target_exposure", _to_numeric(self.target_exposure))
+
+    def __getattr__(self, name: str):
+        """Read the wrapped signal's fields as if they were this type's own.
+
+        Runs only when ordinary lookup fails, so ``signal`` and
+        ``target_exposure`` resolve normally, and a field added to either would
+        win over the same name on ``Signal`` rather than being shadowed by it.
+
+        The ``signal`` guard is the base case of an unbounded recursion, not a
+        defensive check. On an instance whose fields are not assigned yet, any
+        forwarded read asks for ``self.signal``, which is missing for the same
+        reason, which forwards again. Measured on
+        ``ExposureSignal.__new__(ExposureSignal)``: without the guard every
+        attribute raises ``RecursionError``, with it every attribute raises
+        ``AttributeError``.
+
+        What does *not* reach that state, contrary to the obvious guess, is
+        copying. ``slots=True`` makes dataclasses generate a real
+        ``__setstate__``, so the copy protocol finds one by ordinary lookup
+        rather than probing a half-built instance for it -- measured,
+        ``deepcopy`` round-trips with the guard removed, and recurses as soon as
+        ``slots`` is dropped. The guard is what keeps that keyword from being
+        load-bearing at a distance.
+        """
+        if name == "signal":
+            raise AttributeError(name)
+        return getattr(self.signal, name)
 
 
 def create_run(

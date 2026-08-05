@@ -9,6 +9,7 @@ the fourth is arithmetic on the column count, which needs no server either.
 
 from __future__ import annotations
 
+import copy
 import uuid
 from decimal import Decimal
 
@@ -128,6 +129,54 @@ def test_the_chunk_size_moved_with_the_new_column():
     assert "target_exposure" in signals_table.c
     assert MAX_ROWS_PER_INSERT == MAX_BOUND_PARAMETERS // len(signals_table.c)
     assert MAX_ROWS_PER_INSERT == 3120, "the cap did not move when the column was added"
+
+
+def test_a_wrapped_signals_fields_are_readable_without_unwrapping_it():
+    """The wrapper forwards, so a mixed result needs no isinstance at the call site.
+
+    ``load_signals`` returns a union, and a caller that has to unwrap one arm of
+    it before reading ``.side`` would be correct today only because nothing
+    writes a level yet.
+    """
+    signal = make_signal(1_785_723_300_000, Side.ENTER_SHORT)
+    wrapped = ExposureSignal(signal, Decimal("-0.550000"))
+
+    assert wrapped.side is Side.ENTER_SHORT
+    assert wrapped.ts_bar_ms == signal.ts_bar_ms
+    assert wrapped.instrument.symbol == "BTC/USDT"
+    assert wrapped.entry_price == signal.entry_price
+    # Its own fields still win; forwarding fires only when lookup has failed.
+    assert wrapped.target_exposure == Decimal("-0.550000")
+    assert wrapped.signal is signal
+
+    with pytest.raises(AttributeError):
+        wrapped.no_such_field
+
+
+def test_forwarding_a_missing_signal_stops_rather_than_looping():
+    """``__getattr__`` must terminate when ``signal`` itself is what is missing.
+
+    ``__new__`` without ``__init__`` is the half-built state itself, and it has
+    to be built that way: on a *finished* instance ``self.signal`` resolves, so
+    forwarding terminates whether or not the guard is there and a test written
+    against one cannot fail. Without the guard every attribute here raises
+    ``RecursionError`` instead.
+
+    Copying does not reach this state, which is the part worth knowing:
+    ``slots=True`` makes dataclasses generate a real ``__setstate__``, so the
+    copy protocol finds one rather than probing for it. ``deepcopy`` is asserted
+    below because it is what a reader expects the guard to be about -- it
+    round-trips with the guard removed, and recurses once ``slots`` is dropped.
+    """
+    half_built = ExposureSignal.__new__(ExposureSignal)
+    for name in ("side", "signal"):
+        with pytest.raises(AttributeError):
+            getattr(half_built, name)
+
+    wrapped = ExposureSignal(make_signal(1_785_723_300_000), Decimal("0.550000"))
+    duplicate = copy.deepcopy(wrapped)
+    assert duplicate == wrapped
+    assert duplicate.side is wrapped.side
 
 
 # --- the column -------------------------------------------------------------
@@ -319,6 +368,14 @@ def test_a_batch_mixing_both_contracts_writes_both(run_id, exposure_first):
     loaded = load_signals(run_id=run_id)
     assert [type(item) for item in loaded] == [Signal, ExposureSignal]
     assert loaded[1].target_exposure == Decimal("-0.550000")
+
+    # The union is readable without asking which arm each element is. This is
+    # the shape every existing consumer already uses -- `[s.side for s in
+    # load_signals(...)]` -- and it worked before only because nothing wrote a
+    # level, so the first run that did would have raised AttributeError here.
+    assert [item.side for item in loaded] == [Side.EXIT_LONG, Side.ENTER_SHORT]
+    assert [item.ts_bar_ms for item in loaded] == [first, second]
+    assert {item.instrument.symbol for item in loaded} == {"BTC/USDT"}
 
 
 @pytest.mark.db
