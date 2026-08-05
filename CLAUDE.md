@@ -291,3 +291,10 @@ probe compares NaN to NaN and passes without testing anything) and in the
 warmup rows are `NaN`, never 0.0. A feature that cannot be computed from a given
 frame should **raise** rather than return a neutral value, as `Crowding` does
 without funding.
+
+`mask_warmup(values, warmup_bars=..., name=...)` takes the feature's own name,
+with no default, so the negative-warmup refusal can say which feature declared
+it — a helper that cannot name the offender sends the reader to the wrong file.
+It is also the only guard that runs inside `compute`, and it does not reach a
+feature that delegates: `Compression` returns `1 - Energy.compute(df)`, so its
+own warmup never passes through, and the registry test is what covers it.

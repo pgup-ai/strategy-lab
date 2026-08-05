@@ -40,6 +40,7 @@ import numpy as np
 import pandas as pd
 
 from strategy_lab.features.base import StateFeature
+from strategy_lab.strategies.base import require_warmup_bars
 
 DEFAULT_HORIZONS: tuple[int, ...] = (1, 6, 30)
 
@@ -282,6 +283,18 @@ def _diagnose(
     *,
     horizons: Sequence[int],
 ) -> FeatureDiagnostic:
+    """Reduce one computed feature to the numbers the R4 gate asks for.
+
+    The warmup is checked before the slice, and the ``measured.empty`` guard
+    below is not the same check however much it looks like one. A negative
+    warmup turns ``iloc[warmup:]`` into a *tail* slice: measured on a 200-row
+    frame, -5 leaves 5 rows rather than 195, which is non-empty and so sails
+    past. Coverage, IC, turnover and the split-half comparison are then computed
+    on those five bars and reported as if they covered the frame -- a wrong
+    number in the research charter, which is worse than the blank the empty
+    guard exists to prevent.
+    """
+    require_warmup_bars(feature.name, feature.warmup_bars)
     measured = values.iloc[feature.warmup_bars :]
     if measured.empty:
         raise ValueError(

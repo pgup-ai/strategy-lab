@@ -77,7 +77,9 @@ class Direction:
         spread = (fast - slow) / df["close"]
         range_fraction = true_range_fraction(df, window=self.atr_window)
         ratio = (spread / range_fraction).where(range_fraction != 0, 0.0)
-        return mask_warmup(np.tanh(ratio / self._scale()), warmup_bars=self.warmup_bars)
+        return mask_warmup(
+            np.tanh(ratio / self._scale()), warmup_bars=self.warmup_bars, name=self.name
+        )
 
     def _scale(self) -> float:
         """Spread a driftless series would show anyway, in ATRs.
@@ -122,7 +124,7 @@ class Strength:
         # A window that never moved travelled no distance either, so the ratio is
         # 0/0. No displacement is no efficiency.
         efficiency = (net_move / path_length).where(path_length != 0, 0.0)
-        return mask_warmup(efficiency, warmup_bars=self.warmup_bars)
+        return mask_warmup(efficiency, warmup_bars=self.warmup_bars, name=self.name)
 
 
 @dataclass(frozen=True)
@@ -146,7 +148,7 @@ class Persistence:
     def compute(self, df: pd.DataFrame) -> pd.Series:
         validate_ohlcv(df)
         r_squared, _ = trend_fit(np.log(df["close"]), window=self.window)
-        return mask_warmup(r_squared, warmup_bars=self.warmup_bars)
+        return mask_warmup(r_squared, warmup_bars=self.warmup_bars, name=self.name)
 
 
 @dataclass(frozen=True)
@@ -178,7 +180,7 @@ class Stability:
         scatter = residual_std / (range_fraction * np.sqrt(self.window))
         # A window with no range at all never left its trend line.
         stability = 1.0 - scatter.where(range_fraction != 0, 0.0).clip(0.0, 1.0)
-        return mask_warmup(stability, warmup_bars=self.warmup_bars)
+        return mask_warmup(stability, warmup_bars=self.warmup_bars, name=self.name)
 
 
 def trend_fit(log_price: pd.Series, *, window: int) -> tuple[pd.Series, pd.Series]:
