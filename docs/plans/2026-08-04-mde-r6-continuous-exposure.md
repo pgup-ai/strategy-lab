@@ -210,6 +210,58 @@ Mutation: shift the target by one bar in the streaming path and confirm test 1 f
 
 ---
 
+## Task 3.5: The rebalance model — added after Tasks 1–3, on evidence
+
+Tasks 1–3 built the path on `size_type="targetpercent"` and documented two hazards
+honestly. Both turn out to make this phase's actual deliverable — what the taper is
+worth — **unmeasurable**, so they are fixed before Task 4 rather than caveated in
+Task 6.
+
+On the stored 15,128-bar BTC/USDT 4h history the path turned 10,000 into **557**,
+from **4,996 target changes producing 14,404 fills**. Measured on a 3,000-bar
+synthetic whose target changes **41 times**:
+
+```
+sizing                          orders     fees   final equity
+targetpercent (compounds)         1989      244          9,049
+targetvalue @ initial cash        1861      251         11,305
+```
+
+Both churn, so **compounding is not the cause — price is.** Holding a constant
+*fraction* means selling as price rises to stay at that fraction. Sending a new
+target only when it moves ≥ a band from the last one *sent*:
+
+```
+band    sent   orders    fees    final
+0.00    3000     1861     251   11,305      <- trade on every bar
+0.01      42       41     155   10,661      <- 41 orders == 41 decisions
+0.25      42       41     155   10,661
+```
+
+Two changes follow.
+
+**`targetpercent` → `targetvalue`, anchored to initial cash.** CLAUDE.md states the
+repo convention: *entries are sized from initial cash × `position_pct`, never from
+current equity*. The continuous path silently broke it. Restoring it makes v1-vs-v2
+a comparison of **the taper alone** instead of taper-plus-a-sizing-model-change.
+
+**A `rebalance_threshold`, defaulting to 0.05.** Not a cost optimisation — a
+statement about what the strategy is. Between decisions the book holds a fixed
+*quantity*, so its fraction of equity **rises with a winner**. Continuous
+rebalancing to a constant fraction does the opposite: it trims winners and adds to
+losers, a mean-reversion overlay bolted onto a strategy whose thesis is *趋势出现后，
+需要一直 trend riding*. Band `0.0` is the honest name for that behaviour, not the
+neutral default.
+
+The band is measured against the last target **sent**, not the realized position
+fraction — realized fraction depends on fills, which depend on the band, which is a
+feedback loop a vectorized path cannot precompute.
+
+This invalidates "the position tracks the target on every bar": under a band it
+tracks at **decision bars** and drifts between them by design.
+
+---
+
 ## Task 4: `state_machine_v2` — the taper
 
 **Files:**
@@ -279,7 +331,7 @@ The honest possibilities, all worth reporting:
 
 ## R6 GATE
 
-- [ ] A continuous target executes as a position that tracks it, verified against `from_orders`
+- [ ] A continuous target executes as a position that tracks it at decision bars, and drifts between them by design, verified against `from_orders`
 - [ ] The continuous path has its own determinism proof, covering primed-runner and target-level equality
 - [ ] The four original strategies remain byte-identical
 - [ ] `state_machine_v1` unchanged and still registered; v2 is a sibling
