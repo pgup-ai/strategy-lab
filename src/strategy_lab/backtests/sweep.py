@@ -9,7 +9,7 @@ from dataclasses import dataclass
 import numpy as np
 import pandas as pd
 
-from strategy_lab.strategies.base import SignalSet, Strategy
+from strategy_lab.strategies.base import SignalSet, Strategy, require_warmup_bars
 from strategy_lab.strategies.registry import get_strategy
 from strategy_lab.timeframes import timeframe_to_millis
 
@@ -77,6 +77,15 @@ def sweep_parameters(
             for combination in itertools.product(*(grid[name] for name in names))
         )
     ]
+
+    # Every cell, not merely the one that turns out deepest: a negative
+    # declaration is exactly the claim that never wins a ``max``, so checking
+    # the winner alone would leave it unexamined. When the whole grid is
+    # negative it does win, and ``.iloc[warmup:]`` in ``_evaluate`` silently
+    # becomes a tail slice -- measured, a 600-bar frame scored on its last 5
+    # bars reports a Sharpe of 25.2 on a strategy that took no trades at all.
+    for params, cell in cells:
+        require_warmup_bars(f"{strategy_name} cell {params}", cell.warmup_bars)
 
     deepest_params, deepest = max(cells, key=lambda cell: cell[1].warmup_bars)
     warmup = deepest.warmup_bars

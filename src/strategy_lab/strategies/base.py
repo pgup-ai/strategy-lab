@@ -48,6 +48,27 @@ def require_positive_span(strategy: str, field: str, value: object) -> None:
         raise ValueError(f"{strategy} {field} must be a positive integer, got {value!r}")
 
 
+def require_warmup_bars(strategy: str, value: object) -> None:
+    """Reject a warmup claim that would open the very bars it exists to close.
+
+    ``warmup_bars`` is a measured claim that an indicator has not converged, and
+    every consumer trusts it arithmetically rather than checking it. A negative
+    one is not a smaller warmup, it is an inverted one, and each consumer fails
+    open in its own way: ``_mask_warmup``'s ``arange(n) >= -5`` is true on every
+    row so it silences nothing, and ``StrategyRunner``'s ``len(buffer) <= -5``
+    is false on bar one so replay emits from the first bar it ever sees. Neither
+    reports anything -- the run simply trades the unconverged prefix, which is
+    the defect ``warmup_bars`` was introduced to prevent.
+
+    Zero is accepted, unlike :func:`require_positive_span`: a strategy with no
+    lookback has genuinely nothing to warm up, and saying so is a claim rather
+    than an omission. ``bool`` is rejected on the same grounds as there, being
+    an ``int`` subclass that would otherwise pass as 0 or 1.
+    """
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise ValueError(f"{strategy} warmup_bars must be a non-negative integer, got {value!r}")
+
+
 def validate_ohlcv(df: pd.DataFrame) -> None:
     required = {"open", "high", "low", "close", "volume"}
     missing = required.difference(df.columns)
