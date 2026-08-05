@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import pytest
 from sqlalchemy import inspect, text
+from sqlalchemy.engine import make_url
 
+from strategy_lab.config import settings
 from strategy_lab.db.candles import get_engine, list_candle_sets, load_candles
 from strategy_lab.storage.migrations import MIGRATIONS, PRICE_COLUMNS, run_migrations
 
@@ -98,6 +100,44 @@ def test_rerunning_migrations_does_not_rewrite_the_table():
         "migrate rewrote market_candles on a re-run; the NUMERIC conversion is "
         "firing unconditionally instead of checking the column type first"
     )
+
+
+def test_rerunning_migrations_does_not_block_a_reader_of_signals():
+    """A no-op statement is still not a lock-free one.
+
+    ``ALTER TABLE ... ADD COLUMN IF NOT EXISTS`` takes ACCESS EXCLUSIVE *before*
+    it checks whether there is a column to add, and Postgres holds it until the
+    migration transaction commits -- so an unguarded re-run stalls every reader
+    and writer of ``signals``, live sessions included, for the rest of
+    ``migrate``. The test above measures rewrites, which that statement does not
+    do; this is the cost it does have.
+
+    Asserted with a lock rather than a stopwatch. The second connection holds
+    ACCESS SHARE, what a plain ``SELECT`` takes: it conflicts with ACCESS
+    EXCLUSIVE and with nothing else the migration needs, so only the offending
+    statement can trip it. ``lock_timeout`` on the migrating connection alone
+    turns "would have waited" into a failure instead of a hung suite.
+
+    A reader on purpose, and not because a writer is now safe: measured against
+    a session holding ROW EXCLUSIVE, ``migrate`` still waits on ``CREATE INDEX
+    IF NOT EXISTS ix_signals_lookup``, which asks for a SHARE lock even when the
+    index is already there. That is a different statement needing the same guard
+    -- widening this test to a writer would fail for something this change never
+    claimed to fix.
+    """
+    run_migrations()  # reach the migrated state first
+    impatient = (
+        make_url(settings.database_url)
+        .update_query_dict({"options": "-c lock_timeout=2s"})
+        .render_as_string(hide_password=False)
+    )
+
+    with get_engine().begin() as reader:
+        reader.execute(text("LOCK TABLE signals IN ACCESS SHARE MODE"))
+        # Returning is the assertion: unguarded, this raises LockNotAvailable
+        # once the timeout expires, naming the ADD COLUMN as the waiting
+        # statement.
+        run_migrations(impatient)
 
 
 def test_load_candles_returns_float64_not_decimal():

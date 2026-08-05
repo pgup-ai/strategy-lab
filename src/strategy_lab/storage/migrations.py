@@ -175,7 +175,30 @@ SIGNAL_MIGRATIONS: tuple[str, ...] = (
     # below 0.5499995 stores as 0.550000 bound as a float and 0.549999 bound as
     # a Decimal, because the cast lands it exactly on the 6dp half-way boundary
     # that NUMERIC then rounds away from zero.
-    "ALTER TABLE signals ADD COLUMN IF NOT EXISTS target_exposure NUMERIC(10,6)",
+    #
+    # Guarded for the reason `_guarded_trigger_migration` is, and `IF NOT
+    # EXISTS` is not that guard: ALTER TABLE takes its ACCESS EXCLUSIVE lock
+    # before it looks at whether there is anything to do, and Postgres holds
+    # that lock until the migration transaction commits, so a no-op still
+    # blocks every reader and writer of `signals` for the rest of `migrate`.
+    # Measured against a session holding only ACCESS SHARE: the bare statement
+    # waits out a 2s lock_timeout and fails, the guarded one returns without
+    # waiting. The guard tests presence alone -- exactly what `IF NOT EXISTS`
+    # tested, and no more, since this statement never repaired a column of the
+    # wrong shape either.
+    """
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM information_schema.columns
+    WHERE table_schema = current_schema()
+      AND table_name = 'signals'
+      AND column_name = 'target_exposure'
+  ) THEN
+    ALTER TABLE signals ADD COLUMN target_exposure NUMERIC(10,6);
+  END IF;
+END $$
+""".strip(),
     "CREATE INDEX IF NOT EXISTS ix_signals_lookup ON signals (symbol, timeframe, ts_bar_ms)",
     "CREATE INDEX IF NOT EXISTS ix_signals_run ON signals (run_id, ts_bar_ms)",
     """
@@ -204,9 +227,15 @@ SIGNAL_MIGRATIONS: tuple[str, ...] = (
 # one. `funding_time_ms` is stored as the venue reported it, and the spacing is a
 # property of the data rather than a rule the schema imposes.
 #
-# `CREATE TABLE/INDEX IF NOT EXISTS` are genuine no-ops on re-run: they take no
-# lock on an already-existing object and never rewrite one, which is what
-# `test_rerunning_migrations_does_not_rewrite_the_table` is defending.
+# `CREATE TABLE/INDEX IF NOT EXISTS` never rewrite an existing object, which is
+# what `test_rerunning_migrations_does_not_rewrite_the_table` defends. They are
+# not lock-free, though, and the two `signals` indexes above are where that
+# bites: measured against a session holding ROW EXCLUSIVE -- the lock an
+# ordinary INSERT takes -- `CREATE INDEX IF NOT EXISTS ix_signals_lookup` waits
+# for a SHARE lock it cannot get, and waits out a 2s lock_timeout. So the
+# guarded ADD COLUMN above stops `migrate` blocking a *reader* of `signals`;
+# not blocking a live *writer* needs those two guarded the same way, which is
+# not done here.
 FUNDING_MIGRATIONS: tuple[str, ...] = (
     """
     CREATE TABLE IF NOT EXISTS funding_rates (

@@ -44,6 +44,13 @@ TRUNCATING_TARGET = 0.5499994999999999
 TARGET_AS_DECIMAL_BIND = Decimal("0.549999")
 TARGET_AS_FLOAT_BIND = Decimal("0.550000")
 
+# 21 significant digits -- more than float64 carries and more than the column
+# stores, which is what makes it the one value that separates those two claims.
+# It reaches the dataclass intact and the database rounded, and there is a test
+# for each.
+EXACT_21_DIGITS = Decimal("0.123456789012345678901")
+STORED_AT_COLUMN_SCALE = Decimal("0.123457")
+
 
 def make_signal(ts_bar_ms: int, side: Side = Side.ENTER_LONG, **overrides) -> Signal:
     fields = {
@@ -99,9 +106,11 @@ def test_an_incoming_decimal_is_not_routed_through_float():
     This value needs 21 significant digits. Through ``float()`` it would come
     back as 0.12345678901234568 -- and the point of accepting a Decimal at all
     is that the caller already had digits worth keeping.
+
+    In memory, which is as far as this claim goes: the column keeps six of
+    those digits, and what that costs is pinned below.
     """
-    exact = Decimal("0.123456789012345678901")
-    assert ExposureSignal(make_signal(0), exact).target_exposure == exact
+    assert ExposureSignal(make_signal(0), EXACT_21_DIGITS).target_exposure == EXACT_21_DIGITS
 
 
 @pytest.mark.parametrize(
@@ -324,6 +333,30 @@ def test_a_target_round_trips_at_the_full_column_precision(run_id, target):
     loaded = load_signals(run_id=run_id)
     assert loaded == [entry]
     assert loaded[0].target_exposure == target
+
+
+@pytest.mark.db
+def test_a_target_finer_than_the_column_comes_back_rounded_and_unequal(run_id):
+    """Surviving in memory and surviving the column are separate claims.
+
+    The pure-Python test above pins the first; this pins what the second costs.
+    NUMERIC(10,6) rounds on write, so an ``ExposureSignal`` carrying more than
+    six decimals is **not equal** to the one that comes back -- pinned here so
+    that the obvious write-then-load equality assertion is a documented trap
+    rather than a discovery.
+
+    Not an argument for widening the column. A millionth of the risk budget is
+    finer than any sizing decision this book makes, and widening a live NUMERIC
+    is the operation that rewrote ~14,700 stored candles in this repo and needed
+    a pg_dump restore.
+    """
+    entry = ExposureSignal(make_signal(1_785_723_300_000), EXACT_21_DIGITS)
+    assert write_signals(run_id, Mode.REPLAY, [entry]) == 1
+
+    loaded = load_signals(run_id=run_id)
+    assert loaded[0].target_exposure == STORED_AT_COLUMN_SCALE
+    assert loaded[0].target_exposure != entry.target_exposure
+    assert loaded != [entry]
 
 
 @pytest.mark.db

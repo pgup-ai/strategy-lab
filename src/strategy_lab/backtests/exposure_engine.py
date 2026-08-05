@@ -208,6 +208,14 @@ def run_exposure_backtest(
         # broke here.
         size=submitted * position_pct * cash,
         size_type="targetvalue",
+        # Pinned rather than resolved from vectorbt's mutable
+        # ``settings.portfolio['order_direction']`` global, which any caller can
+        # set process-wide. Measured under ``'longonly'``, the target
+        # [0, 1, .5, 0, -.5, -1, -.4, 0] fills to positions
+        # [0, 100, 50, 0, 0, 0, 0, 0] -- every short silently flattened, with no
+        # error and no warning, so a signed strategy reports the long half of
+        # its record as the whole of it.
+        direction="both",
         init_cash=cash,
         fees=model.fee,
         slippage=model.slippage,
@@ -325,7 +333,17 @@ def _flat_through_warmup(
     ``engine._warmup_bars``: a run flat on every bar produces an empty order
     book and a flat curve, which reads as a strategy that declined to trade
     rather than as an absence of data.
+
+    A negative count is refused for the same reason and by the same standard:
+    ``iloc[:-n]`` flattens everything *except* the final ``n`` bars, so the run
+    would trade a sliver of the history and report a plausible number off it.
     """
+    if warmup_bars < 0:
+        raise ValueError(
+            f"warmup_bars must be >= 0, not {warmup_bars} (declared by {strategy.name}). "
+            f"A negative count reads as 'less warmup than none' while doing the opposite: "
+            f"it would flatten every bar but the last {abs(warmup_bars)}."
+        )
     if warmup_bars >= len(target):
         raise ValueError(
             f"{strategy.name} declares {warmup_bars} warmup bars but the frame has "

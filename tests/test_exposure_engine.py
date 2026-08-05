@@ -185,6 +185,45 @@ def test_a_target_crossing_zero_reverses_rather_than_flattening():
     assert result.order_count == 7
 
 
+@pytest.fixture
+def longonly_by_default():
+    """vectorbt's process-wide order direction, set to the value that drops shorts.
+
+    Restored in a fixture rather than in the test body because it is a mutable
+    module global: a failure part-way through the test would otherwise leave
+    every later run in the session silently long-only.
+    """
+    import vectorbt as vbt
+
+    previous = vbt.settings.portfolio["order_direction"]
+    vbt.settings.portfolio["order_direction"] = "longonly"
+    try:
+        yield
+    finally:
+        vbt.settings.portfolio["order_direction"] = previous
+
+
+def test_a_short_survives_a_global_that_would_otherwise_flatten_it(longonly_by_default):
+    """The short side must not depend on process state the run never records.
+
+    ``from_orders`` resolves an unset ``direction`` from
+    ``vbt.settings.portfolio['order_direction']``, which defaults to ``'both'``
+    and which anything sharing the interpreter can change. Under ``'longonly'``
+    an unpinned engine fills the long legs and flattens every short to 0, with
+    no error and nothing in ``config`` to explain the difference -- and
+    ``state_machine_v2`` defaults to ``allow_shorts=True``.
+
+    ``'both'`` is the string to pin: the enum is ``Direction.Both / LongOnly /
+    ShortOnly``, so the plausible-looking ``'longshort'`` raises ``KeyError``.
+    """
+    levels = (0.0, 1.0, 0.5, 0.0, -0.5, -1.0, -0.4, 0.0)
+    df = flat_frame(len(levels))
+    result = run(_Scripted(levels=levels), df=df, position_pct=1.0)
+
+    assert result.position.min() < 0, "the short side was flattened by the global"
+    assert_tracks_at_decisions(result, df, position_pct=1.0)
+
+
 def test_funding_is_charged_on_the_held_fraction_not_a_full_unit():
     """A 20% position pays 20% of the carry -- the taper's whole economic point.
 
@@ -355,6 +394,18 @@ def test_the_engine_holds_a_strategy_to_its_declared_warmup():
 def test_a_frame_that_is_entirely_warmup_is_refused():
     with pytest.raises(ValueError, match="warmup"):
         run(_Constant(warmup_bars=10), df=flat_frame(10))
+
+
+def test_a_negative_warmup_is_refused():
+    """The guard above catches too much warmup; this one catches its inverse.
+
+    Flattening is ``iloc[:warmup_bars]``, so a negative count flattens every bar
+    *except* the last few and the run reports a plausible number off a target
+    that was almost entirely zeroed. Nothing else in the path notices: the count
+    is smaller than the frame, so the entirely-warmup refusal passes it through.
+    """
+    with pytest.raises(ValueError, match="warmup_bars must be >= 0"):
+        run(_Constant(level=1.0, warmup_bars=-4), df=flat_frame(10))
 
 
 def test_a_target_on_a_different_index_from_the_candles_is_refused():
