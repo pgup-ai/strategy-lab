@@ -354,3 +354,38 @@ def test_a_slower_earlier_request_cannot_overwrite_a_later_one(page):
 
     assert "var token = ++pending;" in script
     assert "if (token !== pending) return;" in script
+
+def test_the_level_is_revealed_before_it_is_filled(page):
+    """A chart sized while its wrapper is ``display:none`` has no width.
+
+    ``linkRange`` is bidirectional, so the degenerate first range such a chart
+    reports was mirrored onto the price chart — measured on the stored BTC/USDT
+    perp 4h frame, the continuous contract opened showing one bar against a
+    600-wide price scale while the candles were fine. Revealing before filling
+    is the fix, and the order is the whole of it.
+    """
+    reveal = page.index("el('exposure-wrap').hidden")
+    fill = page.index("exposureSeries.setData(levels)")
+    assert reveal < fill, "the exposure pane is filled before it has a width"
+
+
+def test_the_price_chart_is_the_authority_on_what_range_is_shown(page):
+    """Whoever wins the two-way range link decides where the user is looking.
+
+    The price pane carries the candles and survives a strategy switch, so it
+    leads; the exposure pane follows it on reveal rather than reporting a range
+    of its own into the link.
+    """
+    assert "priceChart.timeScale().getVisibleLogicalRange()" in page
+    assert "exposureChart.timeScale().setVisibleLogicalRange(range)" in page
+
+
+def test_the_deepest_candle_set_is_selected_rather_than_the_first(page):
+    """Storage holds probe sets as small as 25 bars.
+
+    Landing on one opens the tool on a warmup error about a dataset nobody
+    chose, which reads as the tool being broken rather than as the frame being
+    short.
+    """
+    assert "row.candles > deepest.candles" in page
+    assert "datasetSel.value = deepest.id" in page

@@ -357,6 +357,7 @@ __SHELL_CSS__
   }
 
   function fillDatasets(rows) {
+    var deepest = null;
     rows.forEach(function (row) {
       var id = [row.exchange, row.market_type, row.symbol, row.timeframe].join('|');
       datasetSel.appendChild(option(
@@ -364,7 +365,15 @@ __SHELL_CSS__
         row.symbol + ' · ' + row.timeframe + ' · ' + row.exchange + '/' +
         row.market_type + ' · ' + row.candles.toLocaleString() + ' bars'
       ));
+      if (!deepest || row.candles > deepest.candles) deepest = { id: id, candles: row.candles };
     });
+    // The deepest set rather than whichever the API listed first. Storage holds
+    // small probe sets -- a 25-bar 1h series among them -- and landing on one
+    // opens the tool on "declares 4000 warmup bars but the frame has 25", which
+    // is a true error about a set nobody chose and reads as the tool being
+    // broken. Depth is the only ordering that cannot pick a frame too short for
+    // the strategy beside it.
+    if (deepest) datasetSel.value = deepest.id;
   }
 
   function fillStrategies(rows) {
@@ -457,8 +466,18 @@ __SHELL_CSS__
     // fills is never drawn as a level.
     markerLayer.setMarkers(primitive === 'markers' ? toMarkers(payload.markers) : []);
     var levels = primitive === 'baseline' ? toLevels(payload.target, payload.bars) : [];
-    exposureSeries.setData(levels);
+    // Reveal before setData, then hand the exposure chart the price chart's
+    // range. A chart sized while its wrapper is display:none has no width, so
+    // its first visible range is degenerate -- and linkRange is bidirectional,
+    // so that degenerate range was being mirrored onto the price chart, leaving
+    // the continuous contract showing one bar against a 600-wide price scale.
+    // Price is the authority on where we are looking; exposure follows it.
     el('exposure-wrap').hidden = primitive !== 'baseline';
+    exposureSeries.setData(levels);
+    if (primitive === 'baseline') {
+      var range = priceChart.timeScale().getVisibleLogicalRange();
+      if (range) exposureChart.timeScale().setVisibleLogicalRange(range);
+    }
 
     renderProvenance(payload.provenance);
     view.pinned = null;
