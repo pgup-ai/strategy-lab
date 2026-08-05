@@ -6,7 +6,12 @@ from sqlalchemy.engine import make_url
 
 from strategy_lab.config import settings
 from strategy_lab.db.candles import get_engine, list_candle_sets, load_candles
-from strategy_lab.storage.migrations import MIGRATIONS, PRICE_COLUMNS, run_migrations
+from strategy_lab.storage.migrations import (
+    MIGRATIONS,
+    PRICE_COLUMNS,
+    _guarded_index_migration,
+    run_migrations,
+)
 
 pytestmark = pytest.mark.db
 
@@ -118,12 +123,11 @@ def test_rerunning_migrations_does_not_block_a_reader_of_signals():
     statement can trip it. ``lock_timeout`` on the migrating connection alone
     turns "would have waited" into a failure instead of a hung suite.
 
-    A reader on purpose, and not because a writer is now safe: measured against
-    a session holding ROW EXCLUSIVE, ``migrate`` still waits on ``CREATE INDEX
-    IF NOT EXISTS ix_signals_lookup``, which asks for a SHARE lock even when the
-    index is already there. That is a different statement needing the same guard
-    -- widening this test to a writer would fail for something this change never
-    claimed to fix.
+    A reader is the narrower claim, and it isolates this statement: ACCESS SHARE
+    conflicts with ACCESS EXCLUSIVE and with nothing else the migration needs.
+    The writer case is
+    :func:`test_rerunning_migrations_does_not_block_a_writer_of_signals`, which
+    covers the two index statements instead.
     """
     run_migrations()  # reach the migrated state first
     impatient = (
@@ -138,6 +142,70 @@ def test_rerunning_migrations_does_not_block_a_reader_of_signals():
         # once the timeout expires, naming the ADD COLUMN as the waiting
         # statement.
         run_migrations(impatient)
+
+
+def test_rerunning_migrations_does_not_block_a_writer_of_signals():
+    """The same cost, one lock level up, from a different pair of statements.
+
+    ``CREATE INDEX IF NOT EXISTS`` asks for a SHARE lock before it looks for the
+    index, and SHARE conflicts with the ROW EXCLUSIVE an ordinary INSERT holds.
+    A reader never sees it -- ACCESS SHARE and SHARE are compatible -- so the
+    test above passes against the unguarded statements and this one does not,
+    which is why both exist rather than one widened.
+
+    ROW EXCLUSIVE is what makes this specific: measured statement by statement
+    against a session holding it, ``ix_signals_lookup`` and ``ix_signals_run``
+    were the only two of the 22 that blocked. The live session this protects is
+    a replay writing signals while someone runs ``migrate``.
+    """
+    run_migrations()
+    impatient = (
+        make_url(settings.database_url)
+        .update_query_dict({"options": "-c lock_timeout=2s"})
+        .render_as_string(hide_password=False)
+    )
+
+    with get_engine().begin() as writer:
+        # LOCK rather than a real INSERT: `signals` is append-only and the row
+        # would outlive the test. The lock is what an INSERT would hold anyway.
+        writer.execute(text("LOCK TABLE signals IN ROW EXCLUSIVE MODE"))
+        run_migrations(impatient)
+
+
+def test_the_index_guard_still_builds_an_index_that_is_missing():
+    """The guard has to skip an existing index *and* create an absent one.
+
+    Every other test here runs against an already-migrated database, where a
+    guard that silently never fires is indistinguishable from one that works --
+    including the lock tests above, which a statement that does nothing passes
+    most easily of all. On a scratch table because that is the only place the
+    absent case exists.
+    """
+    scratch, index = "_index_guard_probe", "ix_index_guard_probe"
+    statement = _guarded_index_migration(index, scratch, "side")
+    oid = text("SELECT oid FROM pg_class WHERE relname = :n")
+    engine = get_engine()
+    try:
+        with engine.begin() as conn:
+            conn.execute(text(f"CREATE TABLE {scratch} (id bigserial primary key, side text)"))
+
+            conn.execute(text(statement))
+            built = conn.execute(
+                text("SELECT indexdef FROM pg_indexes WHERE indexname = :n"), {"n": index}
+            ).scalar_one_or_none()
+            before = conn.execute(oid, {"n": index}).scalar_one()
+
+            conn.execute(text(statement))
+            after = conn.execute(oid, {"n": index}).scalar_one()
+    finally:
+        with engine.begin() as conn:
+            conn.execute(text(f"DROP TABLE IF EXISTS {scratch}"))
+
+    assert built is not None, "the guard skipped an index that did not exist"
+    assert "(side)" in built, f"built over the wrong columns: {built}"
+    # An unchanged OID is the no-op: a guard that dropped and rebuilt would
+    # satisfy every other assertion here while taking the lock it exists to avoid.
+    assert before == after
 
 
 def test_load_candles_returns_float64_not_decimal():

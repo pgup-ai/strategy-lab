@@ -93,6 +93,36 @@ END $$
 """.strip()
 
 
+def _guarded_index_migration(name: str, table: str, columns: str) -> str:
+    """Create one index, but only when it isn't already there.
+
+    ``CREATE INDEX IF NOT EXISTS`` takes a SHARE lock on the table before it
+    checks whether there is anything to build, and SHARE conflicts with the ROW
+    EXCLUSIVE an ordinary INSERT holds. Measured against a session holding ROW
+    EXCLUSIVE on ``signals``, these were the only two statements in the whole
+    migration set that blocked -- so an unguarded re-run stalls a live replay
+    writing signals for the rest of ``migrate``, while a *reader* passes
+    unharmed and makes the problem invisible.
+
+    Presence is the whole check, unlike the trigger guard above, which compares
+    the function and event mask too. An index of the same name over different
+    columns is a schema change rather than drift, and repairing one silently
+    would rebuild it under the lock this exists to avoid.
+    """
+    return f"""
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_class
+    WHERE relname = '{name}'
+      AND relnamespace = current_schema()::regnamespace
+  ) THEN
+    CREATE INDEX {name} ON {table} ({columns});
+  END IF;
+END $$
+""".strip()
+
+
 # Signals are a permanent audit trail: one table for both historical replays and
 # live sessions, separated only by `mode` and `run_id`, so a replay can be diffed
 # against a live session by joining on (symbol, timeframe, ts_bar_ms, side).
@@ -199,8 +229,8 @@ BEGIN
   END IF;
 END $$
 """.strip(),
-    "CREATE INDEX IF NOT EXISTS ix_signals_lookup ON signals (symbol, timeframe, ts_bar_ms)",
-    "CREATE INDEX IF NOT EXISTS ix_signals_run ON signals (run_id, ts_bar_ms)",
+    _guarded_index_migration("ix_signals_lookup", "signals", "symbol, timeframe, ts_bar_ms"),
+    _guarded_index_migration("ix_signals_run", "signals", "run_id, ts_bar_ms"),
     """
     CREATE OR REPLACE FUNCTION signals_reject_mutation() RETURNS trigger AS $$
     BEGIN
@@ -229,13 +259,18 @@ END $$
 #
 # `CREATE TABLE/INDEX IF NOT EXISTS` never rewrite an existing object, which is
 # what `test_rerunning_migrations_does_not_rewrite_the_table` defends. They are
-# not lock-free, though, and the two `signals` indexes above are where that
-# bites: measured against a session holding ROW EXCLUSIVE -- the lock an
-# ordinary INSERT takes -- `CREATE INDEX IF NOT EXISTS ix_signals_lookup` waits
-# for a SHARE lock it cannot get, and waits out a 2s lock_timeout. So the
-# guarded ADD COLUMN above stops `migrate` blocking a *reader* of `signals`;
-# not blocking a live *writer* needs those two guarded the same way, which is
-# not done here.
+# not lock-free, though: `CREATE INDEX IF NOT EXISTS` takes a SHARE lock before
+# it looks for the index, and SHARE conflicts with the ROW EXCLUSIVE an INSERT
+# holds. The two `signals` indexes are guarded above for that reason -- measured
+# statement by statement against a session holding ROW EXCLUSIVE on `signals`,
+# they were the only two of the 22 that blocked.
+#
+# The four indexes below are deliberately left bare. They are on `funding_rates`
+# and `open_interest`, which are batch-fetched between runs and have no live
+# writer to block; the `signals` pair was worth the guard because a replay
+# writes signals continuously and `migrate` is exactly what someone runs while
+# one is going. Guarding these too would spend the same complexity on a session
+# that does not exist -- revisit it when something writes funding live.
 FUNDING_MIGRATIONS: tuple[str, ...] = (
     """
     CREATE TABLE IF NOT EXISTS funding_rates (
