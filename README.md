@@ -466,7 +466,9 @@ through it (`http://127.0.0.1:8750/<report-dir>/plot.html`) and a "delayed" pill
 appears in the header: the page polls `/api/candles` every 60 seconds, which
 re-fetches the latest bars from the upstream source (Yahoo Finance or ccxt),
 upserts them into Postgres, and streams them onto the chart — including the
-current forming bar. Click the pill to refresh immediately. The same file opened
+current forming bar. On a perp it fetches the funding settlements over the same
+window too, so the candle history cannot outrun the funding history into a
+coverage refusal. Click the pill to refresh immediately. The same file opened
 directly from disk stays fully static.
 
 **`browse` — the live view.** Any registered strategy over any stored candle set,
@@ -493,9 +495,12 @@ because a perp whose funding column went missing is a different run from one
 whose did not, and that is exactly how a published figure moved once without
 anyone noticing.
 
-Nothing on this path writes to `reports/` or to `signals`; the one write it can
-make is the candle upsert behind the refresh button, which is `serve`'s existing
-fetch path called rather than copied.
+Nothing on this path writes to `reports/` or to `signals`; the only writes it can
+make are behind the refresh button, which is `serve`'s existing fetch path called
+rather than copied — candles for the identity, plus the funding settlements on a
+perp. The response reports both counts, because a refresh that moved three
+candles and no settlements is the drift that ends with the coverage guard
+refusing the dataset you were just looking at.
 
 ## Strategies
 
