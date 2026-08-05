@@ -4,7 +4,8 @@ Source of truth for what each strategy does, how it is meant to be run, and what
 about its behavior. Update this file whenever strategy logic, parameters, or engine exit
 behavior changes — the README only carries quick-start commands.
 
-Last reviewed: 2026-08-04, MDE R6 (`state_machine_v2` and the continuous-exposure contract).
+Last reviewed: 2026-08-05, the ETH replication of the MDE R5/R6 protocol (no strategy or
+engine change; it added the `state_machine_v1` known defect below).
 
 ## At a glance
 
@@ -303,6 +304,16 @@ a rule on, but it is not what the gate passed on.
     --start "2019-09-10 08:00:00" --cost-stress 1,2,3
   ```
 
+- **Known defect: that command does not reproduce the published figures**, and the figures
+  are the correct ones. `backtest` passes funding to `run_backtest` for cost accounting but
+  **never attaches a `funding_rate` column to the frame**, where the `features` command does
+  `df.assign(**{FUNDING_COLUMN: align_funding_to_bars(...)})` — so a CLI run reads
+  `crowding` as the neutral 0.5 fallback and records `crowding_measured=False`. Measured on
+  the trained cell: **without the column +16.44% / +0.801 / 6.08% / 71 trades; with it
+  +15.45% / +0.896 / 4.67% / 73**, the second matching every published digit. Applies to
+  `state_machine_v2` equally, since both read the same feature frame. Found during the ETH
+  replication, 2026-08-05; recorded as charter M20 with a follow-up, not yet fixed.
+
 - **R5 gate: passes.** Parameters chosen on the first 60% of the 15,118-bar BTC/USDT perp
   4h frame (54 configurations), the last 40% evaluated once. Out of sample it returns
   **+15.45% net of funding at Sharpe +0.896 and 4.67% max drawdown** on 73 trades,
@@ -316,6 +327,14 @@ a rule on, but it is not what the gate passed on.
   [the charter §9.2](docs/research/2026-08-03-market-dynamics-engine.md#92-r5-split-sample-gate--btcusdt-perp-4h);
   `tests/test_state_machine_gate.py` re-runs the out-of-sample comparison against the
   stored candles.
+- **Replicated on ETH/USDT — the method only.** Re-running the same 54-cell search on ETH's
+  own training half beats ETH's baseline out of sample (**+18.14% / +0.868** against
+  donchian 40/10's +84.00% / +0.785, surviving 3× costs at +10.53%), but **BTC's cell
+  transfers only partially** (+3.77% / +0.184, dead at 3× costs) and **the untuned R4
+  default fails outright** (−19.58% / −0.563). The selected ETH cell agrees with BTC on
+  `enter_strength` and `exit_strength` and disagrees on both timing axes (`min_dwell` and
+  `cooldown` 4 → 8). Full tables in
+  [the charter §9.4](docs/research/2026-08-03-market-dynamics-engine.md#94-eth-replication-of-the-r5r6-protocol--ethusdt-perp-4h).
 
 ---
 
