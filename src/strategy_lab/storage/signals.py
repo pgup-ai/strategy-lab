@@ -4,12 +4,21 @@
 insert is the only supported mutation, and re-recording a range that was already
 stored has to be free rather than an error: every write goes through ``ON
 CONFLICT DO NOTHING`` on ``uq_signals_identity``.
+
+One table serves both strategy contracts. A boolean strategy writes a
+:class:`~strategy_lab.core.types.Signal` and leaves ``target_exposure`` NULL,
+exactly as it did before that column existed; a continuous one writes an
+:class:`ExposureSignal`, which is a signal plus the position *level* it asks
+for. Which contract a stored row came from is therefore a type distinction on
+the way back out, not a ``None`` a reader has to remember to check.
 """
 
 from __future__ import annotations
 
 import uuid
 from collections.abc import Iterable
+from dataclasses import dataclass
+from decimal import Decimal
 
 from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert
@@ -21,9 +30,38 @@ from strategy_lab.storage.schema import runs_table, signals_table
 # Postgres caps a statement at 65535 bound parameters and a multi-row INSERT
 # binds one per column per row, so an unchunked write of a long replay's signals
 # raises OperationalError rather than merely running slowly. Deriving the chunk
-# from the column count keeps the bound correct if a column is ever added.
+# from the column count keeps the bound correct if a column is ever added -- as
+# one now has been: `target_exposure` took this from 3276 rows to 3120, which a
+# hardcoded 3276 would instead have moved 4% past the cap.
 MAX_BOUND_PARAMETERS = 65535
 MAX_ROWS_PER_INSERT = MAX_BOUND_PARAMETERS // len(signals_table.c)
+
+
+@dataclass(frozen=True, slots=True)
+class ExposureSignal:
+    """A signal and the position *level* it asks the book to hold.
+
+    ``core.types.Signal`` describes an event -- one of four sides -- and stays
+    that way: the level belongs to one strategy contract out of two, so putting
+    it on ``Signal`` would give every boolean strategy a field it can only ever
+    leave ``None``. Pairing the two here instead is what lets the boolean path
+    keep writing exactly the row it writes today.
+
+    ``target_exposure`` is normalised to ``Decimal`` on construction, so no
+    float can reach the ``NUMERIC(10,6)`` bind by any route -- see
+    :func:`_to_numeric` for what that cast costs. ``Bar`` refuses a non-Decimal
+    price rather than coercing one, and the difference is where the number comes
+    from: an exchange sends a price as an exact decimal string, so a float there
+    is a bug worth raising on, while a target is a float64 out of a pandas
+    series by construction. Refusing it would only move ``Decimal(str(float(x)))``
+    out to every call site, which is precisely where it gets forgotten.
+    """
+
+    signal: Signal
+    target_exposure: float | Decimal
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "target_exposure", _to_numeric(self.target_exposure))
 
 
 def create_run(
@@ -54,7 +92,7 @@ def create_run(
 def write_signals(
     run_id: uuid.UUID,
     mode: Mode,
-    signals: Iterable[Signal],
+    signals: Iterable[Signal | ExposureSignal],
     *,
     database_url: str | None = None,
 ) -> int:
@@ -63,6 +101,10 @@ def write_signals(
     ``RETURNING`` after ``ON CONFLICT DO NOTHING`` emits a row only for a tuple
     that was really inserted, so a resumed replay re-offering a range it already
     stored reports 0 instead of claiming it discovered those signals again.
+    ``target_exposure`` is deliberately outside ``uq_signals_identity``: a
+    re-offer carrying a *different* level is still a duplicate and still writes
+    nothing, because a stored decision a later pass can overwrite is not an
+    audit trail.
 
     A ``Decimal`` in ``Signal.features`` raises ``TypeError`` before anything is
     written -- deliberately, since coercing it to a string would round-trip back
@@ -92,9 +134,13 @@ def load_signals(
     symbol: str | None = None,
     timeframe: str | None = None,
     database_url: str | None = None,
-) -> list[Signal]:
+) -> list[Signal | ExposureSignal]:
     """Read signals ordered by ``(ts_bar_ms, id)`` -- bar order, then insertion
     order within a bar, so a reversal bar's exit stays ahead of its entry.
+
+    A row that stored a level comes back as the :class:`ExposureSignal` that
+    stored it, and a row that did not comes back as a bare ``Signal``; see
+    :func:`_from_row`.
 
     ``signals`` is append-only and never pruned, so calling this with no filters
     selects an ever-growing table into memory; pass at least ``run_id`` outside
@@ -112,7 +158,45 @@ def load_signals(
         return [_from_row(row) for row in conn.execute(query).mappings()]
 
 
-def _to_row(run_id: uuid.UUID, mode: Mode, signal: Signal) -> dict:
+def _to_numeric(value: float | Decimal) -> Decimal:
+    """Convert a target exposure to the exact decimal the NUMERIC column holds.
+
+    Two conventions already in this repo, one rule underneath: never let a bare
+    ``float`` reach a NUMERIC bind. ``db/candles.py`` emits
+    ``Decimal(str(float(x)))`` because its input is float64 out of pandas and
+    ``str`` on a float is the shortest representation that round-trips;
+    ``db/funding.py`` passes an incoming ``Decimal`` through untouched, because
+    routing an exact decimal through float64 would discard digits the column can
+    hold. A target arrives either way, so both branches live here.
+
+    SQLAlchemy's ``Numeric`` has no bind processor on a dialect with native
+    decimal support, so a float reaches psycopg as a float8 parameter and
+    Postgres applies its implicit ``float8 -> numeric`` cast, which formats via
+    "%.15g". A scale of 6 does not hide that. Measured through this exact insert
+    path against Postgres 16.13, ``0.5499994999999999`` -- the float64
+    immediately below the taper's 0.55 -- stores as ``0.550000`` bound as a
+    float and ``0.549999`` bound as a Decimal: the cast rounds it onto the 6dp
+    half-way boundary, which NUMERIC then rounds away from zero.
+
+    NaN is refused rather than stored, because Postgres NUMERIC *accepts* it
+    (measured: it comes back as ``Decimal('NaN')``, which no later comparison
+    matches -- including a comparison with itself). It is the one non-finite
+    value the column will not catch on its own; ``Infinity`` overflows
+    NUMERIC(10,6) and the server rejects it.
+    """
+    numeric = value if isinstance(value, Decimal) else Decimal(str(float(value)))
+    if not numeric.is_finite():
+        raise ValueError(
+            f"target_exposure must be finite, got {value!r}. Postgres NUMERIC "
+            f"stores NaN without complaint, so an unguarded one becomes an audit "
+            f"row that nothing will ever match."
+        )
+    return numeric
+
+
+def _to_row(run_id: uuid.UUID, mode: Mode, entry: Signal | ExposureSignal) -> dict:
+    is_exposure = isinstance(entry, ExposureSignal)
+    signal = entry.signal if is_exposure else entry
     return {
         "run_id": run_id,
         "mode": str(mode),
@@ -132,11 +216,16 @@ def _to_row(run_id: uuid.UUID, mode: Mode, signal: Signal) -> dict:
         "take_profit": signal.take_profit,
         "reason": signal.reason,
         "features": signal.features or {},
+        # Always present, NULL for a boolean signal. A multi-row INSERT takes
+        # its column list from the first row offered, so a key that appears only
+        # on some rows either raises or silently writes the wrong shape,
+        # depending on which contract happened to be first in the batch.
+        "target_exposure": entry.target_exposure if is_exposure else None,
     }
 
 
-def _from_row(row) -> Signal:
-    return Signal(
+def _from_row(row) -> Signal | ExposureSignal:
+    signal = Signal(
         instrument=InstrumentId(row["exchange"], row["market_type"], row["symbol"]),
         timeframe=row["timeframe"],
         strategy_id=row["strategy_id"],
@@ -153,11 +242,17 @@ def _from_row(row) -> Signal:
         strength=row["strength"],
         features=row["features"],
     )
+    target = row["target_exposure"]
+    # NULL is the boolean path's row, and the *type* is the answer: a caller
+    # holding an ExposureSignal knows a level was stored, where a Signal with a
+    # None field is something the caller can read straight past.
+    return signal if target is None else ExposureSignal(signal, target)
 
 
 __all__ = [
     "MAX_BOUND_PARAMETERS",
     "MAX_ROWS_PER_INSERT",
+    "ExposureSignal",
     "create_run",
     "write_signals",
     "load_signals",

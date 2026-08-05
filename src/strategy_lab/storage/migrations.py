@@ -154,6 +154,28 @@ SIGNAL_MIGRATIONS: tuple[str, ...] = (
         (run_id, strategy_id, strategy_version, exchange, symbol, timeframe, ts_bar_ms, side)
     )
     """,
+    # A drifting target cannot be a `side`: that column is a CHECK on four
+    # discrete events, and a level moving 1.00 -> 0.55 -> 0.20 is not an event.
+    # It gets its own column, nullable, so the boolean path keeps writing the
+    # row it writes today with NULL here -- no backfill, and no need to decide
+    # what level a strategy that never held one "really meant".
+    #
+    # ADD COLUMN rather than a line in the CREATE above: that CREATE is IF NOT
+    # EXISTS and does nothing whatever against a database that already has the
+    # table, so a column declared only there would exist on a fresh checkout and
+    # nowhere else. Nullable with no default is metadata-only from Postgres 11
+    # on -- the catalog gains a row and the heap is not rewritten -- and the
+    # append-only triggers are untouched, since no row is updated or deleted.
+    #
+    # NUMERIC(10,6) matches `strength`. NUMERIC rather than float8 for the
+    # reason `db/candles.py` documents: a float bound to this column arrives as
+    # a float8 parameter and Postgres applies its implicit float8 -> numeric
+    # cast, which formats via "%.15g". Scale 6 does not hide that. Measured
+    # through the real insert path against Postgres 16.13, the float64 just
+    # below 0.5499995 stores as 0.550000 bound as a float and 0.549999 bound as
+    # a Decimal, because the cast lands it exactly on the 6dp half-way boundary
+    # that NUMERIC then rounds away from zero.
+    "ALTER TABLE signals ADD COLUMN IF NOT EXISTS target_exposure NUMERIC(10,6)",
     "CREATE INDEX IF NOT EXISTS ix_signals_lookup ON signals (symbol, timeframe, ts_bar_ms)",
     "CREATE INDEX IF NOT EXISTS ix_signals_run ON signals (run_id, ts_bar_ms)",
     """
