@@ -269,15 +269,22 @@ tracks at **decision bars** and drifts between them by design.
 - Modify: `src/strategy_lab/strategies/registry.py`
 - Test: `tests/test_state_machine_v2.py`
 
-The same `StateMachine` and policy as v1, emitting a continuous target instead of booleans — so the charter's per-state table finally executes:
+The same `StateMachine` and policy as v1, emitting a continuous target instead of booleans — so the charter's per-state table finally executes.
 
-| State | Target |
-|---|---|
-| Compression / Reset | 0.00 |
-| Breakout | 0.25 |
-| Confirmed | 0.55 |
-| Riding | 1.00 |
-| Exhaustion | 0.55 |
+**Corrected after reading the code: v2 introduces no table of its own.** This plan
+originally listed 0.25 / 0.55 for breakout / confirmed. The shipped
+`state.policy.STATE_TARGET_RISK` is 0.00 / 0.35 / 0.70 / 1.00 / 0.55 / 0.00, and
+those are R5's published numbers. Writing this plan's figures instead would be
+tuning v2 against a v1 whose results are already on the record — exactly what
+Task 6 forbids. **Reuse `STATE_TARGET_RISK` and `target_risk_series` unchanged.**
+
+That makes the phase's real finding sharper than planned. `state_machine_v1`
+*already computes* the full signed continuous target on every bar via
+`target_risk_series`, then discards it: it keeps `np.sign(target)` for the entry
+booleans and `target.abs()` as a `position_size` the engine reads **only at
+entry**. The taper is not missing from v1 — it is computed and thrown away. So
+v2 is v1 with the collapse removed, and v1-vs-v2 measures precisely what the
+engine's truncation costs, with no new parameter anywhere in the comparison.
 
 **v1 stays registered and unchanged.** Its R5 gate numbers are published; this is a sibling, not a replacement, and having both is what makes the taper's contribution measurable.
 
