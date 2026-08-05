@@ -258,7 +258,8 @@ def test_the_refresh_endpoint_reuses_the_existing_fetch_and_upsert_path(
         seen["identity"] = identity
         seen["after"] = after
         return {"bars": [{"time": 1, "open": 1.0, "high": 2.0, "low": 0.5, "close": 1.5,
-                          "volume": 3.0}]}
+                          "volume": 3.0}],
+                "candles_upserted": 3, "funding_upserted": 0}
 
     monkeypatch.setattr("strategy_lab.server.refresh_candles", _refresh)
 
@@ -268,6 +269,58 @@ def test_the_refresh_endpoint_reuses_the_existing_fetch_and_upsert_path(
     assert seen["identity"].symbol == "BTC/USDT"
     assert seen["after"] == 1_700_000_000
     assert response.json()["bars"][0]["close"] == 1.5
+
+
+def test_what_a_refresh_wrote_reaches_the_caller_and_not_only_the_database(
+    client, monkeypatch
+):
+    """Three candles and no settlements is the drift that made the browser refuse
+    the dataset it had just been showing. It is a fact about the write, so it
+    belongs in the response rather than in a server log nobody is reading."""
+    monkeypatch.setattr(
+        "strategy_lab.server.refresh_candles",
+        lambda identity, after: {
+            "bars": [], "candles_upserted": 3, "funding_upserted": 0
+        },
+    )
+
+    body = client.post("/api/refresh", params=_PERP).json()
+
+    assert body["candles_upserted"] == 3
+    assert body["funding_upserted"] == 0
+
+
+def test_a_refresh_that_sought_no_settlements_says_so_rather_than_reporting_none(
+    client, monkeypatch
+):
+    """``null`` is "not a perp, nothing was sought"; ``0`` is "asked, and the
+    contract settled nothing". Collapsing them would make an equity refresh
+    indistinguishable from the drift above."""
+    monkeypatch.setattr(
+        "strategy_lab.server.refresh_candles",
+        lambda identity, after: {
+            "bars": [], "candles_upserted": 1, "funding_upserted": None
+        },
+    )
+
+    body = client.post("/api/refresh", params={**_PERP, "market_type": "spot"}).json()
+
+    assert body["funding_upserted"] is None
+
+
+def test_a_refresh_that_reported_no_counts_is_an_error_rather_than_a_default(
+    client, monkeypatch
+):
+    """Same reason ``_Strict`` forbids extras. A default here would let a refresh
+    that stopped reporting what it wrote serialize as "0 candles, no funding
+    sought" -- a plausible answer nobody computed, which is the failure the whole
+    provenance habit exists to prevent."""
+    monkeypatch.setattr(
+        "strategy_lab.server.refresh_candles", lambda identity, after: {"bars": []}
+    )
+
+    with pytest.raises(Exception, match="candles_upserted"):
+        client.post("/api/refresh", params=_PERP)
 
 
 def test_a_venue_failure_on_refresh_is_a_502_not_a_traceback(client, monkeypatch):

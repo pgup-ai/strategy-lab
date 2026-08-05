@@ -128,6 +128,11 @@ def create_app() -> FastAPI:
         existing path, called rather than copied, so the browser cannot store a
         candle by a rule the rest of the lab does not use. POST because it has an
         effect on storage; every other endpoint here is a GET that cannot.
+
+        On a perp that path advances funding alongside the candles, and the
+        response carries both counts. A refresh that moved only the bars would
+        push the candle window past the last stored settlement and leave the
+        coverage guard refusing the dataset the caller was just looking at.
         """
         from strategy_lab.server import refresh_candles
 

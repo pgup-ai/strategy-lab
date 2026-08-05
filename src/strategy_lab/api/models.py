@@ -216,7 +216,18 @@ class AnalysisModel(_Strict):
 
 
 class RefreshModel(_Strict):
+    """The bars, and what the refresh actually wrote to get them.
+
+    ``funding_upserted`` is ``None`` on anything that is not a perp, because no
+    settlements were sought there -- a different fact from a contract that
+    settled none, and the whole point of the counts is that "3 candles and 0
+    settlements" is visible as drift rather than inferred from a chart that
+    later refuses to load.
+    """
+
     bars: list[BarModel]
+    candles_upserted: int
+    funding_upserted: int | None
 
 
 __all__ = [

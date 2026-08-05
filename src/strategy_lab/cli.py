@@ -13,7 +13,10 @@ from strategy_lab.backtests.sizing import DEFAULT_VOL_SPAN
 from strategy_lab.db import init_db, list_candle_sets, load_candles, upsert_candles
 from strategy_lab.db.candles import normalize_candle_frame
 from strategy_lab.market_data.base import MarketDataIdentity
-from strategy_lab.market_data.binance_futures import OPEN_INTEREST_HISTORY_DAYS
+from strategy_lab.market_data.binance_futures import (
+    OPEN_INTEREST_HISTORY_DAYS,
+    SUPPORTED_PERP_EXCHANGES,
+)
 from strategy_lab.market_data.binance_futures import SOURCE as BINANCE_FUTURES_SOURCE
 from strategy_lab.strategies import get_strategy, list_strategies
 from strategy_lab.strategies.base import require_warmup_bars
@@ -21,12 +24,6 @@ from strategy_lab.universe.etfs import ETF_UNIVERSE
 
 
 app = typer.Typer(help="Fetch candles, store them locally, and run reproducible backtests.")
-
-# The perp/funding/OI commands all go through `BinanceFuturesClient`, which is
-# hardwired to `fapi.binance.com`. The --exchange value is only a label written
-# into the stored identity, so anything else here files Binance data under
-# another venue's name.
-SUPPORTED_PERP_EXCHANGES = ("binance",)
 
 
 @app.command("init-db")

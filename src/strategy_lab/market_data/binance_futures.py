@@ -33,6 +33,12 @@ import pandas as pd
 BASE_URL = "https://fapi.binance.com"
 SOURCE = "binance-futures"
 
+# This client is hardwired to `fapi.binance.com`; ``exchange`` is only the label
+# written into the stored identity, so any other value files Binance data under
+# another venue's name. Every caller that takes a venue from outside -- the CLI's
+# perp commands, the browser's refresh -- checks against this first.
+SUPPORTED_PERP_EXCHANGES = ("binance",)
+
 # Page sizes the endpoints actually accept, measured 2026-08-03.
 KLINE_PAGE_LIMIT = 1500
 FUNDING_PAGE_LIMIT = 1000
@@ -418,6 +424,7 @@ __all__ = [
     "OPEN_INTEREST_HISTORY_DAYS",
     "OPEN_INTEREST_PAGE_LIMIT",
     "SOURCE",
+    "SUPPORTED_PERP_EXCHANGES",
     "BinanceFuturesClient",
     "BinanceFuturesError",
     "parse_funding",
