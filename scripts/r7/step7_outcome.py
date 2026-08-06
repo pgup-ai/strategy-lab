@@ -71,22 +71,22 @@ def main() -> None:
               f"{' -- ' + ', '.join(cleared) if cleared else ''}")
 
     print("\nA candidate is usable (median run length >= 6 bars)")
-    print("  N/A: the declared population is empty -- nothing cleared the three "
-          "thresholds above,")
-    print("  so there is no candidate to test for persistence. Measured anyway "
-          "in step 6.")
+    if persistence["declared_population_empty"]:
+        print("  N/A: nothing cleared the three thresholds above, so there is no "
+              "candidate to")
+        print("  test. Measured anyway in step 6.")
+    else:
+        print(f"  {sum(persistence['usable'].values())}/{len(persistence['usable'])} "
+              f"of the cleared candidates are usable")
 
     any_feature = any(features["verdicts"].values())
     incumbent_clears = any(incumbent["verdicts"].values())
     composite_clears = any(composite["verdicts"].values())
     extension_clears = any(extension["verdicts"].values())
-    everything = any_feature and incumbent_clears and composite_clears
 
-    if everything:
+    if any_feature and incumbent_clears and composite_clears:
         row = 4
-    elif any_feature and not incumbent_clears:
-        row = 1
-    elif any_feature and incumbent_clears:
+    elif any_feature:
         row = 1
     elif incumbent_clears:
         row = 2
@@ -106,35 +106,27 @@ def main() -> None:
     print(f"  control reproduces R9's +1.3974: {extension['control_reproduces']}")
 
     # The ETH replication is declared "run after BTC and never used to choose
-    # anything", so it is printed *after* the row is decided and cannot move it.
-    try:
-        eth = R.read("step8_eth_replication.json")
-    except FileNotFoundError:
-        print("\nETH replication not yet run (step8).")
-        return
-    eth_features = [name for name, ok in eth["feature_verdicts"].items() if ok]
-    eth_incumbent = [name for name, ok in eth["incumbent_verdicts"].items() if ok]
-    eth_composite = [name for name, ok in eth["composite_verdicts"].items() if ok]
-    print("\nETH REPLICATION (declared in the plan; run after BTC, chooses nothing):")
-    print(f"  features clearing: {eth_features or 'none'}")
-    print(f"  COMPRESSION clearing: {eth_incumbent or 'none'}")
-    print(f"  composite clearing: {eth_composite or 'none'}")
-    if eth_features and not any_feature:
-        print("  The replication does NOT reproduce BTC's null on the feature "
-              "threshold. The same")
-        print("  feature that came closest on BTC clears on ETH, in the same "
-              "direction and in both")
-        print("  halves -- so BTC's near-miss reads as a signal under the bar "
-              "rather than as noise.")
-        print("  BTC's row stands as the phase's verdict; this is the "
-              "qualification on it.")
+    # anything", so it is read *after* the row is decided and cannot move it.
+    # Step 8 runs last, so on the first pass through the chain there is nothing
+    # here yet and the row above still stands on its own.
+    eth = R.read_if_present("step8_eth_replication.json")
+    eth_clearing = {
+        f"eth_{kind}_clearing": [name for name, ok in eth[f"{kind}_verdicts"].items() if ok]
+        for kind in ("feature", "incumbent", "composite")
+    } if eth else {}
 
-    R.write("step7_outcome.json", {
-        **R.read("step7_outcome.json"),
-        "eth_features_clearing": eth_features,
-        "eth_incumbent_clearing": eth_incumbent,
-        "eth_composite_clearing": eth_composite,
-    })
+    if eth:
+        print("\nETH REPLICATION (declared in the plan; run after BTC, chooses nothing):")
+        for kind in ("feature", "incumbent", "composite"):
+            print(f"  {kind} clearing: {eth_clearing[f'eth_{kind}_clearing'] or 'none'}")
+    else:
+        print("\nETH replication not yet run (step8).")
+    if eth_clearing.get("eth_feature_clearing") and not any_feature:
+        print("  The replication does NOT reproduce BTC's null on the feature "
+              "threshold: the")
+        print("  same feature clears on ETH, same direction, both halves. BTC's "
+              "row stands as")
+        print("  the verdict; this is the qualification on it.")
 
     R.write("step7_outcome.json", {
         "outcome_row": row,
@@ -145,6 +137,7 @@ def main() -> None:
         "control_checks_pass": sum(control_checks.values()) == len(control_checks),
         "label_checks_pass": sum(label_checks.values()) == len(label_checks),
         "persistence_population_empty": persistence["declared_population_empty"],
+        **eth_clearing,
     })
 
 

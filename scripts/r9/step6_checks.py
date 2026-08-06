@@ -69,7 +69,6 @@ def main() -> None:
     print(f"    whole-history run over the test half: {whole['trades']} trades total over "
           f"{whole['tradeable_bars']} tradeable bars")
 
-    # (b)
     alternative = R.gate.machine(replace(R.gate.TRAINED_MACHINE, exit_strength=0.20))
     left = R.run(strategy, frame, OUT / "same" / "winner", first_tradeable=split, stop=len(df))
     right = R.run(alternative, frame, OUT / "same" / "exit020", first_tradeable=split, stop=len(df))
@@ -78,7 +77,6 @@ def main() -> None:
           f"{len(left['equity'])} bars: {equal}; "
           f"max abs difference {np.max(np.abs(left['equity'].to_numpy() - right['equity'].to_numpy())):.3e}")
 
-    # (c)
     rows = json.loads((OUT / "training_surface.json").read_text())
     returns = np.load(OUT / "training_returns.npz")
     winner = max(rows, key=lambda row: row["sharpe_tradeable"])

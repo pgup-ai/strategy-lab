@@ -113,7 +113,6 @@ def main() -> None:
             "rates": rows,
         }
 
-    # ---- the declared threshold ----------------------------------------
     print("\n" + "=" * 78)
     print("DECLARED THRESHOLD -- the incumbent COMPRESSION detects chop if its "
           "trend rate is")

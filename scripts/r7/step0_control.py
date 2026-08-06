@@ -127,7 +127,6 @@ def main() -> None:
     checks: list[tuple[str, bool]] = []
     rounding_notes: list[str] = []
 
-    # ---- Control A ------------------------------------------------------
     features = R.feature_columns(df)
     table = conditional_ic(
         features["direction"], features["strength"],
@@ -153,7 +152,6 @@ def main() -> None:
         checks.append((f"A {name} ic", abs(got - want["ic"]) <= 5e-5))
         checks.append((f"A {name} n", n == want["n"]))
 
-    # ---- Control B ------------------------------------------------------
     ordered = [get_feature(name) for name in list_features()]
     result = diag.diagnose_features(ordered, df, horizons=(1, 6, 30))
     print("\nCONTROL B -- R4's §9.1 table: nine features vs forward return, "

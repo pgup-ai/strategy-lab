@@ -193,9 +193,6 @@ def strategy_warmup(machine) -> int:
     return replace(gate.get_strategy("state_machine_v1"), machine=machine).warmup_bars
 
 
-# --------------------------------------------------------------------------
-# The label
-# --------------------------------------------------------------------------
 
 
 def forward_er(close: pd.Series, *, horizon: int) -> pd.Series:
@@ -223,9 +220,6 @@ def trend_label(
     return label, (low, high)
 
 
-# --------------------------------------------------------------------------
-# Statistics
-# --------------------------------------------------------------------------
 
 
 def ic_table(values: pd.Series, target: pd.Series, halves: Halves, *, horizon: int) -> dict:
@@ -322,9 +316,6 @@ def persistence_row(verdict: pd.Series, halves: Halves, which: str) -> dict:
     }
 
 
-# --------------------------------------------------------------------------
-# The one place R7 runs the engine (plan §4)
-# --------------------------------------------------------------------------
 
 CASH = 10_000.0
 FREQ = "4h"
@@ -394,6 +385,12 @@ def write(name: str, payload) -> Path:
 
 def read(name: str):
     return json.loads((OUT / name).read_text())
+
+
+def read_if_present(name: str):
+    """``read``, or ``None`` for a step that has not run yet."""
+    path = OUT / name
+    return json.loads(path.read_text()) if path.exists() else None
 
 
 def _json_default(value):

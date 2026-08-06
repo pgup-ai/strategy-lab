@@ -163,6 +163,9 @@ def test_forward_efficiency_ratio_is_net_displacement_over_distance_travelled():
     assert forward_efficiency_ratio(close, horizon=3).iloc[0] == pytest.approx(4.0 / 6.0)
     # t=1: entry 103, exit 104; path 1 + 3 + 1 = 5, displacement 1.
     assert forward_efficiency_ratio(close, horizon=3).iloc[1] == pytest.approx(1.0 / 5.0)
+    # A move that never retraces travels exactly its own displacement.
+    monotone = forward_efficiency_ratio(pd.Series([1.0, 2.0, 4.0, 8.0, 16.0]), horizon=2)
+    assert monotone.iloc[0] == pytest.approx(1.0)
 
 
 def test_forward_efficiency_ratio_never_reads_the_feature_s_own_bar():
@@ -192,7 +195,6 @@ def test_a_window_price_never_moved_over_is_unmeasurable_not_zero():
     # The incomplete tail is NaN on the same rule ``forward_return`` uses.
     ratio = forward_efficiency_ratio(pd.Series([1.0, 2.0, 4.0, 8.0, 16.0, 32.0]), horizon=2)
     assert ratio.iloc[-3:].isna().all()
-    assert ratio.iloc[0] == pytest.approx(1.0)  # a one-way move is perfectly efficient
 
 
 def test_a_target_anchored_at_the_feature_s_own_bar_manufactures_an_ic():

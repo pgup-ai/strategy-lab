@@ -182,7 +182,6 @@ def main() -> None:
     print("  and largely cancels. The t+1 anchor is still the rule; what it "
           "buys on ER is small.")
 
-    # ---- the real frame -------------------------------------------------
     df, _ = R.load_frame()
     halves = R.halves_of(df)
     print(f"\nframe: {len(df)} bars {df.index[0]} -> {df.index[-1]}; "

@@ -283,9 +283,9 @@ def test_the_baseline_is_a_cell_of_the_pinned_r0_surface():
 
     A ``BASELINE`` outside that grid would still run, still lose to the machine,
     and still read as a passing gate -- while the sentence the gate is named for
-    had quietly stopped being true. Membership is the part of it that is cheap to
-    check; which cell wins the training half is not re-derived here, so this is
-    the weaker half of the claim and the docstring above says so.
+    had quietly stopped being true. Membership is the half of the claim that is
+    cheap to check; which cell of the grid wins the training half is not
+    re-derived here.
     """
     assert BASELINE.entry_span in R0_DONCHIAN_GRID["entry_span"]
     assert BASELINE.exit_span in R0_DONCHIAN_GRID["exit_span"]

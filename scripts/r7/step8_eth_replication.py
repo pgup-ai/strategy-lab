@@ -65,7 +65,6 @@ def main() -> None:
               f"train {rate['train']['base_rate']:.4f} / "
               f"test {rate['test']['base_rate']:.4f}")
 
-    # ---- part 2: the nine features ---------------------------------------
     print("\nPART 2 -- Spearman IC vs forward ER, full (train / test)")
     columns = R.feature_columns(df)
     targets = {h: R.forward_er(df["close"], horizon=h) for h in R.HORIZONS}
@@ -87,7 +86,6 @@ def main() -> None:
             and min(abs(first), abs(second)) >= R.IC_HALF_BAR
         )
 
-    # ---- part 1: the incumbent -------------------------------------------
     print("\nPART 1 -- COMPRESSION / CONFIRMED / RIDING as chop detectors")
     print(f"{'config':>13} {'state':>12} {'H':>4} {'cover':>7} "
           f"{'train lift pp':>14} {'test lift pp':>13}")
@@ -117,7 +115,6 @@ def main() -> None:
                         and table["test"]["lift_pp"] <= -R.INCUMBENT_BAR_PP
                     )
 
-    # ---- part 3: the composite gate --------------------------------------
     print("\nPART 3 -- the composite gate at R5's trained values")
     frame, crowding_measured = R.machine_frame(df)
     assert crowding_measured, "ETH frame lost its funding column"
@@ -148,7 +145,6 @@ def main() -> None:
             for alone in ("strength >= 0.80 (rank)", "|direction| >= 0.10")
         ))
 
-    # ---- part 5: persistence ---------------------------------------------
     print("\nPART 5 -- persistence of the same verdicts")
     verdict_series["composite gate"] = R.verdict_of(gates["composite (both)"], df.index, defined)
     print(f"{'verdict':>34} {'half':>6} {'share':>7} {'median':>7} {'AC(1)':>8}")
@@ -162,7 +158,6 @@ def main() -> None:
                   f"{row['share_of_bars']:>7.1%} {row['median_run']:>7.1f} "
                   f"{row['ac1']:>+8.4f}")
 
-    # ---- the declared thresholds -----------------------------------------
     print("\n" + "=" * 78)
     print("ETH REPLICATION -- the same declared thresholds")
     for title, verdicts in (

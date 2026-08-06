@@ -74,7 +74,6 @@ def main() -> None:
                   f"{table['test']['lift_pp']:>+10.2f}")
         payload[horizon] = rows
 
-    # ---- the declared threshold ----------------------------------------
     print("\n" + "=" * 78)
     print("DECLARED THRESHOLD -- the composite earns its second input if its "
           "trend rate beats")

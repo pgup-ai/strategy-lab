@@ -136,21 +136,37 @@ def main() -> None:
                   f"{table['train']['lift_pp']:>+14.2f} "
                   f"{table['test']['lift_pp']:>+13.2f}")
 
+    # Read off the earlier steps rather than asserted here: this phase's
+    # population happens to be empty, and a hardcoded claim about that would
+    # keep printing after a rerun in which it stopped being true.
+    cleared = [
+        name
+        for step in ("step3_features.json", "step2_incumbent.json", "step4_composite.json")
+        for name, ok in R.read(step)["verdicts"].items()
+        if ok
+    ]
+
     print("\n" + "=" * 78)
     print(f"DECLARED THRESHOLD -- a candidate is usable if its median run length "
           f"is >= {R.RUN_LENGTH_BAR:.0f} bars")
-    print("(one day). The declared population is EMPTY: nothing cleared §2, §1 "
-          "or §3, so no")
-    print("row below is a declared candidate. Evaluated anyway, as context for R8.")
+    if cleared:
+        print(f"(one day). The declared population is {cleared}.")
+    else:
+        print("(one day). The declared population is EMPTY: nothing cleared §1, §2 "
+              "or §3, so no")
+        print("row below is a declared candidate. Evaluated anyway, as context for R8.")
     print(f"\n{'verdict':>40} {'train median':>13} {'test median':>12} "
           f"{'would clear':>12}")
+    usable = {}
     for name, rows in payload.items():
         train, test = rows["train"]["median_run"], rows["test"]["median_run"]
-        would = train >= R.RUN_LENGTH_BAR and test >= R.RUN_LENGTH_BAR
-        print(f"{name:>40} {train:>13.1f} {test:>12.1f} {R.mark(would):>12}")
+        usable[name] = train >= R.RUN_LENGTH_BAR and test >= R.RUN_LENGTH_BAR
+        print(f"{name:>40} {train:>13.1f} {test:>12.1f} {R.mark(usable[name]):>12}")
 
     R.write("step6_persistence.json", {
-        "declared_population_empty": True,
+        "declared_population_empty": not cleared,
+        "declared_population": cleared,
+        "usable": usable,
         "persistence": payload,
         "feature_verdict_rates": rates,
     })

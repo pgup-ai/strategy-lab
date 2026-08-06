@@ -103,7 +103,6 @@ def main() -> None:
                          f"({entry['first_half_ic']:+.4f}/{entry['second_half_ic']:+.4f})")
         print(f"{name:>20} " + " ".join(f"{cell:>28}" for cell in cells))
 
-    # ---- the declared threshold ----------------------------------------
     print("\n" + "=" * 78)
     print("DECLARED THRESHOLD -- a feature detects chop if |IC| >= "
           f"{R.IC_BAR} at H=30, both halves")
