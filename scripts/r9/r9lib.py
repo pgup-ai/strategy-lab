@@ -51,6 +51,11 @@ FREQ = "4h"
 # the reproducibility record of a run someone chose to publish, and none of
 # these were.
 OUT = Path(os.environ.get("R9_OUT", Path(tempfile.gettempdir()) / "strategy-lab-r9"))
+# The docstring above says this must never be ``reports/``; that is a guard
+# rather than a comment, because a report directory is the reproducibility
+# record of a run someone chose to publish and none of these are.
+if OUT.resolve() == REPO.resolve() or REPO.resolve() in OUT.resolve().parents:
+    raise SystemExit(f"R9_OUT must point outside the repository, not {OUT}")
 
 
 def load_frame():

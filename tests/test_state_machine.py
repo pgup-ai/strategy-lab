@@ -21,12 +21,20 @@ def frame(**columns) -> pd.DataFrame:
 
 
 def quiet(n: int, **overrides) -> pd.DataFrame:
-    """A complete frame of unremarkable readings, for tests that vary one column."""
+    """A complete frame of unremarkable readings, for tests that vary one column.
+
+    ``energy`` is 0.1 rather than a midpoint because "unremarkable" here means
+    "blocks nothing": it has to sit under every ceiling any test below sets, and
+    a 0.5 reading would land exactly *on* the 0.5 ceiling the energy tests use,
+    where ``<=`` admits it and a reader would have to check which way the
+    boundary falls to know what the test was asserting.
+    """
     columns = {
         "direction": [0.0] * n,
         "strength": [0.1] * n,
         "stability": [0.9] * n,
         "crowding": [0.5] * n,
+        "energy": [0.1] * n,
     }
     columns.update(overrides)
     return frame(**columns)
@@ -63,7 +71,12 @@ def test_an_unknown_feature_column_is_rejected_rather_than_ignored():
     """A typo'd column name must not silently disable a transition rule."""
     with pytest.raises(KeyError, match="strength"):
         StateMachine().run(
-            frame(direction=[0.0] * 20, stability=[0.9] * 20, crowding=[0.5] * 20)
+            frame(
+                direction=[0.0] * 20,
+                stability=[0.9] * 20,
+                crowding=[0.5] * 20,
+                energy=[0.1] * 20,
+            )
         )
 
 
@@ -265,6 +278,254 @@ def test_an_unmeasurable_bar_is_treated_as_a_failure_not_as_no_news():
     assert states.iloc[40] is MarketState.RESET
 
 
+def test_the_default_energy_ceiling_is_provably_inert():
+    """R7b's change has to cost the published figures nothing, by construction.
+
+    ``energy`` is a ``rolling_percentile``, so a measurable reading lies in
+    ``(0, 1]`` and can never exceed the 1.0 default -- which means the default
+    machine's states cannot depend on the column's *values* at all. Asserted by
+    driving the whole 0..1 range through it and comparing against a frame where
+    every energy reading is the same number: identical states, on input that
+    walks the entire lifecycle.
+
+    This is the assertion R7b's no-op control rests on, and it is the cheap half
+    of it. The expensive half is the engine reproducing +15.45% / +0.896 /
+    4.67% / 73 trades on BTC, which needs Postgres and lives in
+    ``scripts/r7b/step0_control.py``.
+    """
+    n = 2000
+    varying = frame(
+        direction=2.0 * wandering(n, seed=41) - 1.0,
+        strength=wandering(n, seed=42),
+        stability=wandering(n, seed=43),
+        crowding=wandering(n, seed=44),
+        energy=wandering(n, seed=45),
+    )
+    assert StateMachine().energy_ceiling == 1.0
+    assert varying["energy"].max() > 0.99, "the probe never approached the ceiling"
+
+    pinned = varying.assign(energy=0.0)
+    states = StateMachine().run(varying)
+    assert states.nunique() == len(MarketState), "the probe never walked the lifecycle"
+    assert states.equals(StateMachine().run(pinned))
+
+
+def test_a_lower_energy_ceiling_suppresses_entries():
+    """And the machine is otherwise identical -- one field moved, nothing else.
+
+    The same input reaches ``RIDING`` under the inert default and never leaves
+    ``COMPRESSION`` once the ceiling drops below the energy it is carrying. A
+    gate that changed nothing would be indistinguishable from not having added
+    it, which is the failure mode a no-op default makes easy to ship.
+    """
+    features = quiet(60, direction=[0.8] * 60, strength=[0.95] * 60, energy=[0.90] * 60)
+
+    assert MarketState.RIDING in set(StateMachine(min_dwell=4, cooldown=8).run(features))
+    gated = StateMachine(min_dwell=4, cooldown=8, energy_ceiling=0.50).run(features)
+    assert set(gated) == {MarketState.COMPRESSION}, (
+        f"the energy gate let the machine into {sorted({s.name for s in gated})}"
+    )
+
+
+def test_the_energy_gate_binds_at_its_own_boundary_and_not_beside_it():
+    """``<=``, so a reading exactly on the ceiling is admitted.
+
+    Worth pinning because the direction of the inequality is the whole content
+    of the parameter: R7 measured high ``energy`` as the chop side, so a ceiling
+    excludes the top of the axis. A ``<`` here, or a floor instead of a ceiling,
+    would still produce a machine that trades and a surface that ranks.
+    """
+    def rides(energy: float, ceiling: float) -> bool:
+        features = quiet(60, direction=[0.8] * 60, strength=[0.95] * 60, energy=[energy] * 60)
+        machine = StateMachine(min_dwell=4, cooldown=8, energy_ceiling=ceiling)
+        return MarketState.RIDING in set(machine.run(features))
+
+    assert rides(0.50, 0.50), "a reading exactly on the ceiling was refused"
+    assert rides(0.49, 0.50)
+    assert not rides(0.51, 0.50)
+
+
+def test_an_unmeasurable_energy_is_a_failure_like_any_other_input():
+    """``energy`` joins ``measurable``, so a NaN there is not "no news" either.
+
+    The mirror of ``test_an_unmeasurable_bar_is_treated_as_a_failure_not_as_no
+    _news`` for the new column. Without this the NaN would instead fall through
+    ``energy <= ceiling`` as a plain False and merely stop the machine
+    *advancing*, which reads as a stall rather than as a blind bar.
+    """
+    machine = StateMachine(min_dwell=4, cooldown=0)
+    energy = [0.10] * 40 + [np.nan] * 10
+    states = machine.run(
+        quiet(50, direction=[0.8] * 50, strength=[0.9] * 50, energy=energy)
+    )
+    assert states.iloc[39] is MarketState.RIDING, "setup failed: never reached RIDING"
+    assert states.iloc[40] is MarketState.RESET
+
+
+@pytest.mark.parametrize("value", [-0.01, 1.01])
+def test_an_energy_ceiling_outside_the_rank_space_is_refused(value):
+    """It is a threshold on a percentile, so outside 0..1 it is not a threshold."""
+    with pytest.raises(ValueError, match="energy_ceiling"):
+        StateMachine(energy_ceiling=value)
+
+
+# --- R7c: the energy-first lifecycle -----------------------------------------
+
+
+ENERGY_FIRST = StateMachine(enter_energy=0.50, exit_energy=0.80)
+
+
+def test_energy_thresholds_that_collapse_the_dead_band_are_rejected():
+    """The mirror of ``enter_strength > exit_strength``, and it must be enforced.
+
+    The inequality runs the other way because the axis is inverted -- entry
+    wants energy *low*, so the failure threshold sits above the entry one. Equal
+    thresholds are the no-dead-band case whichever axis they are on, and a
+    machine that accepted them here would toggle state every bar on a feature
+    hovering at the constant, exactly as it would on ``strength``.
+    """
+    with pytest.raises(ValueError, match="exit_energy"):
+        StateMachine(enter_energy=0.50, exit_energy=0.50)
+    with pytest.raises(ValueError, match="exit_energy"):
+        StateMachine(enter_energy=0.80, exit_energy=0.50)
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [{"enter_energy": 0.50}, {"exit_energy": 0.80}],
+    ids=["enter-only", "exit-only"],
+)
+def test_half_an_energy_lifecycle_is_refused(kwargs):
+    """Both sides move together, or the hysteresis spans two features.
+
+    Setting only ``enter_energy`` would advance on energy and fail on strength.
+    The dead band would then be a region of a *plane* with no ordering between
+    its edges -- there is no inequality to enforce between a threshold on one
+    axis and a threshold on another -- so the machine would silently lose the
+    property the ``enter_strength > exit_strength`` check exists to guarantee
+    while still producing a plausible state for every bar.
+    """
+    with pytest.raises(ValueError, match="enter_energy and exit_energy"):
+        StateMachine(**kwargs)
+
+
+@pytest.mark.parametrize("value", [-0.01, 1.01])
+@pytest.mark.parametrize("field", ["enter_energy", "exit_energy"])
+def test_an_energy_lifecycle_threshold_outside_the_rank_space_is_refused(field, value):
+    """Same rank space as the ceiling, so the same 0..1 refusal applies."""
+    other = {"enter_energy": 0.05, "exit_energy": 0.95}[
+        "exit_energy" if field == "enter_energy" else "enter_energy"
+    ]
+    with pytest.raises(ValueError, match=field):
+        StateMachine(**{field: value, ("exit_energy" if field == "enter_energy"
+                                       else "enter_energy"): other})
+
+
+def test_the_energy_first_mode_is_off_by_default_and_provably_inert():
+    """R7c's change has to cost the published figures nothing, by construction.
+
+    The same argument ``test_the_default_energy_ceiling_is_provably_inert``
+    makes for R7b's field, made once more for R7c's pair and in the stronger
+    form the mode needs: with both thresholds ``None`` the machine does not read
+    ``energy``'s *values* at all, so driving the whole 0..1 range through the
+    column and pinning it to a constant give identical states over input that
+    walks the entire lifecycle. That is what makes the default inert rather than
+    merely untested, and it is the cheap half of control 2 -- the expensive half
+    is ``scripts/r7c/step0_control.py`` reproducing all four published v1/v2
+    rows bit-for-bit against ``main``.
+    """
+    n = 2000
+    varying = frame(
+        direction=2.0 * wandering(n, seed=41) - 1.0,
+        strength=wandering(n, seed=42),
+        stability=wandering(n, seed=43),
+        crowding=wandering(n, seed=44),
+        energy=wandering(n, seed=45),
+    )
+    assert StateMachine().enter_energy is None
+    assert StateMachine().exit_energy is None
+    assert not StateMachine().energy_first
+    assert ENERGY_FIRST.energy_first, "the probe machine is not in the mode it names"
+
+    states = StateMachine().run(varying)
+    assert states.nunique() == len(MarketState), "the probe never walked the lifecycle"
+    assert states.equals(StateMachine().run(varying.assign(energy=0.0)))
+    assert not states.equals(ENERGY_FIRST.run(varying)), (
+        "the energy-first machine agrees with the default on every bar, so the "
+        "mode is inert where it is supposed to bite"
+    )
+
+
+def test_the_energy_first_mode_inverts_which_bars_advance():
+    """Not a filter bolted onto the old gate -- the other axis, both ways.
+
+    Two frames, each of which one machine rides and the other refuses. Strong
+    and violent is what ``strength`` was built to enter on and is precisely what
+    R7b measured as the chop side; quiet with a clean lean and no strength is
+    what the energy-first machine is for. A mode that merely *narrowed* the old
+    gate would ride the first frame under both machines and neither under the
+    second, which is the reading a reader has to be able to rule out.
+    """
+    violent = quiet(60, direction=[0.8] * 60, strength=[0.95] * 60, energy=[0.90] * 60)
+    orderly = quiet(60, direction=[0.8] * 60, strength=[0.05] * 60, energy=[0.10] * 60)
+    fast = dict(min_dwell=4, cooldown=8)
+
+    assert MarketState.RIDING in set(StateMachine(**fast).run(violent))
+    assert MarketState.RIDING not in set(
+        StateMachine(enter_energy=0.50, exit_energy=0.80, **fast).run(violent)
+    )
+    assert MarketState.RIDING not in set(StateMachine(**fast).run(orderly))
+    assert MarketState.RIDING in set(
+        StateMachine(enter_energy=0.50, exit_energy=0.80, **fast).run(orderly)
+    )
+
+
+def test_the_energy_dead_band_stalls_a_setup_rather_than_failing_it():
+    """The hysteresis is on the new axis too, and it is what makes it hysteresis.
+
+    Two bars at 0.65 sit above the 0.50 entry and below the 0.80 failure, so a
+    ``BREAKOUT`` merely stops climbing and goes on to ride. With the thresholds
+    all but collapsed (0.50 against 0.51) the same two bars are outright
+    failures and the machine is knocked to ``RESET``. This is
+    ``test_hysteresis_lets_a_setup_survive_a_dip_that_a_single_threshold_would
+    _kill`` re-asked on the axis R7c moved the lifecycle onto -- and it is the
+    assertion that would fail if ``failing`` had been left on ``strength``,
+    since the strength column below never moves.
+    """
+    spiking = [0.10] * 8 + [0.65] * 2 + [0.10] * 14
+    features = quiet(24, direction=[0.8] * 24, strength=[0.5] * 24, energy=spiking)
+
+    with_band = StateMachine(
+        enter_energy=0.50, exit_energy=0.80, min_dwell=4, cooldown=8
+    ).run(features)
+    without_band = StateMachine(
+        enter_energy=0.50, exit_energy=0.51, min_dwell=4, cooldown=8
+    ).run(features)
+
+    assert MarketState.RESET not in set(with_band), "a dead-band bar knocked the setup back"
+    assert with_band.iloc[-1] is MarketState.RIDING
+    assert without_band.iloc[10] is MarketState.RESET, (
+        "setup failed: the collapsed thresholds were supposed to fail on the spike"
+    )
+    assert MarketState.RIDING not in set(without_band)
+
+
+def test_an_unmeasurable_bar_is_a_failure_in_the_energy_first_mode_too():
+    """``energy > exit_energy`` is False on a NaN, so ``~measurable`` has to fire.
+
+    The mirror of ``test_an_unmeasurable_bar_is_treated_as_a_failure_not_as_no
+    _news`` on the new axis, and the one place the inverted inequality could
+    have quietly changed behaviour: on the strength axis the failure predicate
+    is ``<`` and on this one it is ``>``, but NaN compares False to both, so
+    neither is what catches a blind bar.
+    """
+    machine = StateMachine(enter_energy=0.50, exit_energy=0.80, min_dwell=4, cooldown=0)
+    energy = [0.10] * 40 + [np.nan] * 10
+    states = machine.run(quiet(50, direction=[0.8] * 50, energy=energy))
+    assert states.iloc[39] is MarketState.RIDING, "setup failed: never reached RIDING"
+    assert states.iloc[40] is MarketState.RESET
+
+
 def test_every_transition_taken_is_legal():
     """The lifecycle is a cycle; the machine must not jump COMPRESSION -> EXHAUSTION."""
     n = 4000
@@ -274,6 +535,7 @@ def test_every_transition_taken_is_legal():
             strength=wandering(n, seed=6),
             stability=wandering(n, seed=7),
             crowding=wandering(n, seed=8),
+            energy=wandering(n, seed=9),
         )
     )
     assert states.nunique() == len(MarketState), (
@@ -286,19 +548,46 @@ def test_every_transition_taken_is_legal():
 
 # Feature readings that between them trip every predicate the machine has:
 # NaN (unmeasurable), each strength band, both sides of the direction floor,
-# a stability collapse and an extreme carry.
+# a stability collapse, an extreme carry, and both sides of an energy ceiling.
 DIRECTIONS = (-0.9, -0.05, 0.0, 0.05, 0.9, np.nan)
 STRENGTHS = (0.05, 0.34, 0.5, 0.95, np.nan)
 STABILITIES = (0.02, 0.95)
 CROWDINGS = (0.5, 0.99)
+# Two values, not three: a NaN energy is unmeasurable exactly as a NaN strength
+# is, and ``DIRECTIONS``/``STRENGTHS`` already carry that case into every
+# combination below. What NaN would add here is runtime, not coverage.
+ENERGIES = (0.10, 0.90)
 
-CONSTANT_TAILS = [
+BASE_TAILS = [
     dict(direction=d, strength=s, stability=st, crowding=c)
     for d in DIRECTIONS
     for s in STRENGTHS
     for st in STABILITIES
     for c in CROWDINGS
 ]
+
+
+def constant_tails(machine: StateMachine) -> list[dict]:
+    """``BASE_TAILS`` with an energy reading, crossed only where one can bite.
+
+    A ceiling of 1.0 admits every measurable percentile, so crossing
+    ``ENERGIES`` against a machine carrying the default doubles the tail set and
+    cannot move a single state. Measured rather than argued: crossing all four
+    parametrizations below against the full 240 tails passes, in **122 s**
+    against this file's **52 s**, with identical verdicts. The saving is the
+    duplicate half, not coverage.
+
+    An energy-first machine reads the column on *both* sides of the lifecycle,
+    so it always gets the full cross regardless of its ceiling -- the two
+    readings straddle its entry threshold and its failure threshold, which is
+    the whole of what its walk turns on.
+    """
+    bites = machine.energy_ceiling < 1.0 or machine.energy_first
+    energies = ENERGIES if bites else ENERGIES[:1]
+    return [tail | {"energy": energy} for tail in BASE_TAILS for energy in energies]
+
+
+CONSTANT_TAILS = constant_tails(StateMachine())
 
 
 def rows_to_frame(rows: list[dict]) -> pd.DataFrame:
@@ -309,13 +598,14 @@ def rows_to_frame(rows: list[dict]) -> pd.DataFrame:
 # age within each: a strong block long enough to reach RIDING, then a second
 # constant block of every length up to the bound. ``test_every_state_is_reached
 # _by_some_lead`` is what keeps that claim honest rather than assumed.
-STRONG = dict(direction=0.9, strength=0.95, stability=0.95, crowding=0.5)
+STRONG = dict(direction=0.9, strength=0.95, stability=0.95, crowding=0.5, energy=0.10)
 
 
 def leads_for(machine: StateMachine) -> list[list[dict]]:
     climb = [STRONG] * (3 * machine.min_dwell + 2)
     spans = range(1, machine.convergence_bars + 3)
-    second_blocks = CONSTANT_TAILS[:: max(1, len(CONSTANT_TAILS) // 8)]
+    tails = constant_tails(machine)
+    second_blocks = tails[:: max(1, len(tails) // 8)]
     # Truncations of the climb walk the machine up the lifecycle one bar at a
     # time; a full climb followed by a second constant block of every length
     # reaches the states below RIDING and every age within them. Anything past
@@ -331,8 +621,10 @@ def leads_for(machine: StateMachine) -> list[list[dict]]:
         StateMachine(),
         StateMachine(enter_strength=0.80, exit_strength=1.0 / 3.0, min_dwell=2, cooldown=16),
         StateMachine(min_dwell=1, cooldown=0, exhaustion_dwell=1),
+        StateMachine(energy_ceiling=0.50),
+        StateMachine(enter_energy=0.50, exit_energy=0.80, min_dwell=4, cooldown=4),
     ],
-    ids=["default", "trained", "fastest-legal"],
+    ids=["default", "trained", "fastest-legal", "energy-gated", "energy-first"],
 )
 def test_a_constant_tail_converges_from_any_start(machine):
     """**The invariant a live process rests on.** No finite prefix survives.
@@ -349,13 +641,24 @@ def test_a_constant_tail_converges_from_any_start(machine):
     Every start is exercised by prefixing, which is the only way in from
     outside; the internal counters are not reachable any other way and a test
     that set them would be testing its own copy of the transition table.
+
+    The ``energy-gated`` machine is here because ``energy_ceiling`` adds a third
+    way for ``advancing`` to go false, and a bounded-exit invariant proved only
+    where a predicate is inert is not proof about a machine that switches it on.
+    The ``energy-first`` one is here because it re-derives *both* predicates
+    from a different column, and it is the configuration R7c actually trades:
+    ``warmup_bars`` is ``convergence_bars`` times a constant, so if this
+    invariant does not hold in that mode then the number R7c's SOL run warms up
+    by is not measuring anything. Those two are also the only parametrizations
+    whose tail set carries both energy readings -- see ``constant_tails`` for
+    why the other three would be paying for a duplicate.
     """
     bound = machine.convergence_bars
     tail_bars = bound + 20
     leads = leads_for(machine)
 
     worst = 0
-    for reading in CONSTANT_TAILS:
+    for reading in constant_tails(machine):
         cold = machine.run(rows_to_frame([reading] * tail_bars)).to_numpy()
         for lead in leads:
             warm = machine.run(rows_to_frame(lead + [reading] * tail_bars)).to_numpy()[
@@ -390,7 +693,7 @@ def test_the_mid_band_tail_does_not_split_a_cold_run_from_a_warm_one():
     fade band, so the two runs disagreed about a *live short* rather than about
     a bookkeeping detail.
     """
-    reading = dict(direction=0.8, strength=0.5, stability=0.9, crowding=0.5)
+    reading = dict(direction=0.8, strength=0.5, stability=0.9, crowding=0.5, energy=0.10)
     machine = StateMachine()
     tail_bars = machine.convergence_bars + 20
 
@@ -404,14 +707,31 @@ def test_the_mid_band_tail_does_not_split_a_cold_run_from_a_warm_one():
 # Bars a cold start may take to agree with a run that has seen the whole history
 # on *realistic* input. The bound proved above covers constant tails only, and
 # real features drift rather than holding still, so this is the independent
-# measurement rather than a restatement: over the 38 frames below the worst lag
-# is 74 and 25 of them agree immediately, against a proven constant-tail bound
+# measurement rather than a restatement: over the 114 frames below the worst lag
+# is 74 and 82 of them agree immediately, against a proven constant-tail bound
 # of 34. The limit is set at roughly twice the worst rather than at it.
+#
+# Re-measured as each machine was added, because 38 seeds x N machines is a
+# different population each time: R7b's ceiling took 38 frames to 76 without
+# moving the worst off 74, and R7c's energy-first lifecycle takes it to 114,
+# still 74. Per machine the worst is 74 / 74 / 42 -- the energy-first one has
+# the *shortest* memory of the three, which fits the argument that more reasons
+# to leave a state cannot lengthen it, and is why the argument is not enough on
+# its own: these are the numbers.
 MAX_CONVERGENCE_LAG = 150
 
 
+@pytest.mark.parametrize(
+    "machine",
+    [
+        StateMachine(),
+        StateMachine(energy_ceiling=0.50),
+        StateMachine(enter_energy=0.50, exit_energy=0.80, min_dwell=4, cooldown=4),
+    ],
+    ids=["default", "energy-gated", "energy-first"],
+)
 @pytest.mark.parametrize("seed", range(10, 200, 5))
-def test_the_machine_forgets_where_it_started(seed):
+def test_the_machine_forgets_where_it_started(seed, machine):
     """Saturating counters make this a finite automaton, not an endless recursion.
 
     A live process starts cold in COMPRESSION while a backtest reaches the same
@@ -426,10 +746,11 @@ def test_the_machine_forgets_where_it_started(seed):
         strength=wandering(n, seed=seed + 1),
         stability=wandering(n, seed=seed + 2),
         crowding=wandering(n, seed=seed + 3),
+        energy=wandering(n, seed=seed + 4),
     )
     split = n // 2
-    whole = StateMachine().run(features).to_numpy()[split:]
-    late = StateMachine().run(features.iloc[split:]).to_numpy()
+    whole = machine.run(features).to_numpy()[split:]
+    late = machine.run(features.iloc[split:]).to_numpy()
 
     disagreements = np.flatnonzero(whole != late)
     lag = int(disagreements[-1]) + 1 if len(disagreements) else 0

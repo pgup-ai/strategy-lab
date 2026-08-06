@@ -59,6 +59,11 @@ from strategy_lab.strategies.state_machine_core import (  # noqa: E402
 )
 
 OUT = Path(os.environ.get("R7_OUT", Path(tempfile.gettempdir()) / "strategy-lab-r7"))
+# The docstring above says this must never be ``reports/``; that is a guard
+# rather than a comment, because a report directory is the reproducibility
+# record of a run someone chose to publish and none of these are.
+if OUT.resolve() == REPO.resolve() or REPO.resolve() in OUT.resolve().parents:
+    raise SystemExit(f"R7_OUT must point outside the repository, not {OUT}")
 
 # Declared in the pre-registration, before anything ran. 1 bar is dropped from
 # R4's set because ER over one bar is 1 by construction.

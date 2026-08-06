@@ -11,7 +11,8 @@ from strategy_lab.features.registry import get_feature
 from strategy_lab.state.machine import MarketState, StateMachine
 from strategy_lab.state.policy import STATE_TARGET_RISK
 from strategy_lab.strategies.registry import get_strategy, list_strategies
-from strategy_lab.strategies.state_machine_v1 import RANKED_FEATURES
+from strategy_lab.strategies.state_machine_v1 import RANKED_FEATURES, StateMachineV1
+from strategy_lab.strategies.state_machine_v2 import StateMachineV2
 from tests.conftest import synthetic_ohlcv, synthetic_ohlcv_with_funding
 
 NAME = "state_machine_v1"
@@ -146,6 +147,30 @@ def test_disabling_shorts_leaves_the_long_side_untouched():
     assert restricted.long_entries.sum() > 0
 
 
+def test_energy_never_unmeasures_a_bar_the_other_inputs_had_measured():
+    """The second half of R7b's no-op, and the half that is about warmups.
+
+    ``StateMachine.run`` treats any missing input as a failure, so joining
+    ``energy`` to ``measurable`` could in principle knock the machine to
+    ``RESET`` on bars it used to walk -- which would move the published figures
+    while ``energy_ceiling`` sat at its inert 1.0. It cannot, because ``Energy``
+    costs 503 warmup bars against ``Direction``'s 1920 and neither has interior
+    gaps, so ``energy``'s NaN prefix is strictly inside the frame's. Asserted on
+    the adapter's own pipeline rather than on the arithmetic, because the
+    arithmetic is what a future feature change would quietly invalidate.
+    """
+    strategy = get_strategy(NAME)
+    features, _ = strategy.feature_frame(probe_frame(strategy))
+    others = [name for name in strategy.features if name != "energy"]
+    measurable = features[others].notna().all(axis=1)
+    blinded = measurable & features["energy"].isna()
+    assert not blinded.any(), (
+        f"energy is the only unmeasurable input on {int(blinded.sum())} bars, so "
+        "adding it to the machine's measurable set changed which bars it walks"
+    )
+    assert measurable.any(), "setup failed: no bar was measurable at all"
+
+
 def test_the_machine_and_the_policy_are_reachable_from_the_adapter():
     """A state the adapter can never produce is a rule nobody can trade."""
     strategy = get_strategy(NAME)
@@ -264,3 +289,43 @@ def test_it_runs_on_the_stored_perp_history_with_real_funding():
     )
     assert fired >= 20, f"only {fired} signals over {len(df)} real bars"
     assert signals.position_size.between(0.0, 1.0).all()
+
+
+@pytest.mark.parametrize(
+    "machine",
+    [
+        StateMachine(energy_ceiling=0.50),
+        StateMachine(enter_energy=0.50, exit_energy=0.80),
+    ],
+    ids=["energy-gated", "energy-first"],
+)
+def test_an_energy_threshold_refuses_a_rank_window_it_is_not_ranked_over(machine):
+    """``enter_strength`` and the energy thresholds must share a window.
+
+    ``enter_strength`` is a threshold on a rank over ``rank_window``; the energy
+    thresholds are thresholds on ``Energy``'s own ``percentile_window``. They
+    coincide at the defaults, which is the only reason the two have ever been
+    comparable -- and ``rank_window`` is a live field, so nothing else stops
+    them drifting. Measured on the R5 frame, ``strength >= 0.80`` admits 23.8% /
+    21.6% / 20.9% of bars at ``rank_window`` 240 / 480 / 960 while
+    ``energy <= 0.35`` stays at 37.1%, so the *relative* selectivity of two
+    gates moves with a parameter only one reads. That is M29, and it is refused
+    rather than documented.
+    """
+    window = get_feature("energy").percentile_window
+    for adapter in (StateMachineV1, StateMachineV2):
+        with pytest.raises(ValueError, match="not comparable"):
+            adapter(rank_window=window // 2, machine=machine)
+        adapter(rank_window=window, machine=machine)  # the matched window is fine
+
+
+def test_a_rank_window_change_is_still_allowed_without_an_energy_threshold():
+    """The guard is about comparability, so it must not fire where nothing compares.
+
+    Both energy thresholds are inert by default, and a ``rank_window`` sweep
+    that never sets one is a legitimate experiment the guard has no business
+    refusing.
+    """
+    window = get_feature("energy").percentile_window
+    for adapter in (StateMachineV1, StateMachineV2):
+        assert adapter(rank_window=window // 2).rank_window == window // 2

@@ -5,9 +5,10 @@ about its behavior. Update this file whenever strategy logic, parameters, or eng
 behavior changes — the README only carries quick-start commands.
 
 Last reviewed: 2026-08-06 — MDE R9 audited the R5 selection (hold the cell, don't re-fit
-it), then R7 scored the state machine's states as chop detectors and they clear nothing:
-its entry gate is one feature, and the feature that does carry chop information is one the
-machine does not read.
+it), R7 scored the state machine's states as chop detectors and they clear nothing, and R7b
+gave the machine the `energy` axis it was missing and R7c put the whole lifecycle on it.
+Neither cleared its bar, but read M29 before concluding the axis is dead: R7c's grid was
+never selectivity-matched to the gate it replaced.
 
 ## At a glance
 
@@ -270,9 +271,33 @@ a rule on, but it is not what the gate passed on.
   +0.1314 (halves +0.1953 / +0.0621). Unconditional is +0.0385. A "trade when strength is
   high" threshold discards the band with the larger absolute IC.
 - **Inputs**: `direction` raw, `strength` and `stability` as trailing ranks over
-  `rank_window=480`, `crowding` raw. The ranks are why the thresholds are tercile
+  `rank_window=480`, `crowding` raw, and `energy` — already a rolling percentile over its
+  **own** `percentile_window`, so it needs no ranking. That window equals `rank_window` at
+  the defaults and only there: `rank_window` is a live field and `Energy`'s is not, so
+  setting an energy threshold with a mismatched `rank_window` is **refused** rather than
+  silently ranked over two different windows (M29). The ranks are why the thresholds are tercile
   boundaries: R4's conditioning was measured by tercile, and on the stored history the raw
   boundaries move 0.067/0.156 → 0.059/0.139 between halves.
+- **`energy_ceiling` defaults to 1.0, which is inert, and R7b is why it exists and why it
+  stays inert.** The entry gate can also require `energy ≤ energy_ceiling`, the second axis
+  of [§2.1](docs/research/2026-08-03-market-dynamics-engine.md#21-the-state-vector)'s
+  `Strength = 20, Energy = 95 → violent two-way chop`. R7b measured it against a bar
+  declared in advance and it **did not clear** — 0/4 on BTC, 0/4 on ETH — so the default
+  ships as the no-op and every published v1/v2 figure is bit-identical to the version
+  before it existed. Do not raise it expecting an improvement: what R7b found was that
+  `energy` adds to `strength` while `strength` adds nothing to `energy`, which is an
+  argument for a differently-shaped machine rather than for a tighter ceiling on this one.
+- **`enter_energy`/`exit_energy` switch the whole lifecycle onto `energy`, and both are
+  `None` by default.** Set together (the constructor refuses half a lifecycle), they replace
+  `advancing` *and* `failing` so the hysteresis stays on one feature, with
+  `exit_energy > enter_energy` mirroring `enter_strength > exit_strength`. R7c measured this
+  and **it did not produce a tradeable book** — every cell of its grid traded 250–385 round
+  trips against R5's 77, best Sharpe +0.1845 against +1.3778, and −48% to −86% at 3× costs.
+  **But read M29 before concluding the idea is dead**: that grid was declared in `energy`
+  units against a gate declared in `strength` rank units, and its tightest cell still
+  advanced on 37.9% of bars where `strength ≥ 0.80` advances on 21.1% — a matched threshold
+  is ≈0.155, well below anything tested. The mode ships because the axis is worth having
+  wired; the numbers above are not a verdict on it at matched selectivity.
 - **`crowding` needs a `funding_rate` column, and only two of the three paths can supply
   one.** `backtest` and `sweep` attach it on a perp; `replay` cannot — `core.types.Bar`
   carries no funding and `BarBuffer` materializes OHLCV only — so **a replay of a perp

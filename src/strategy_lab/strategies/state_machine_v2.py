@@ -9,7 +9,7 @@ computed and thrown away.
 
 So this is v1 with that truncation removed, and nothing else. Same machine, same
 policy, same ``state.policy.STATE_TARGET_RISK`` (0.00 / 0.35 / 0.70 / 1.00 /
-0.55 / 0.00 -- R5's published numbers), same four features, same warmup
+0.55 / 0.00 -- R5's published numbers), the same features, same warmup
 derivation, and **no parameter of its own**. That is deliberate and it is what
 makes the comparison against v1 legible: v1's results are already on the record,
 so any degree of freedom introduced here would quietly turn "what does the
@@ -38,6 +38,7 @@ from strategy_lab.strategies.base import require_positive_span, validate_ohlcv
 from strategy_lab.strategies.exposure import TargetExposure
 from strategy_lab.strategies.state_machine_core import (
     DEFAULT_FEATURES,
+    require_comparable_windows,
     build_feature_frame,
     derive_warmup_bars,
     signed_target,
@@ -58,6 +59,9 @@ class StateMachineV2:
 
     def __post_init__(self) -> None:
         require_positive_span(self.name, "rank_window", self.rank_window)
+        require_comparable_windows(
+            self.name, machine=self.machine, rank_window=self.rank_window
+        )
         object.__setattr__(self, "warmup_bars", self._warmup_bars())
 
     def _warmup_bars(self) -> int:
@@ -95,7 +99,7 @@ class StateMachineV2:
         )
 
     def feature_frame(self, df: pd.DataFrame) -> tuple[pd.DataFrame, bool]:
-        """The four columns the machine reads, and whether crowding is real.
+        """The columns the machine reads, and whether crowding is real.
 
         Byte-for-byte v1's accessor, because it is v1's pipeline. It exists so a
         reader can see *why* a target moved rather than only that it did; it

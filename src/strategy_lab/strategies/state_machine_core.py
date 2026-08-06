@@ -1,7 +1,7 @@
 """The feature-and-target pipeline both state-machine adapters run.
 
 ``state_machine_v1`` and ``state_machine_v2`` are the same machine, the same
-policy and the same four features, differing only in what they do with the
+policy and the same features, differing only in what they do with the
 signed target at the end: v1 collapses it to entry/exit booleans plus an
 entry-only size, v2 hands it over whole. That collapse is the *only* difference
 R6 sets out to measure, so the two must not each own a pipeline -- a second copy
@@ -16,12 +16,26 @@ import this module: a module-level ``from strategy_lab.features.flow import ...`
 closes that loop and fails with a partially-initialized-module ``ImportError``
 whenever the first import of the process happens to be a ``features`` one.
 
-**Two of the four inputs are trailing ranks, not raw features.** ``strength``
+**Two of the five inputs are trailing ranks, not raw features.** ``strength``
 and ``stability`` are fed to the machine as ``rolling_percentile`` over
 ``rank_window`` bars, because R4's conditioning was measured by tercile and a
 tercile is a rank. ``direction`` stays raw -- ranking it would destroy the sign
-that is its entire content -- and ``crowding`` is already a 0..1 axis with a
-meaningful neutral at 0.5, which a rank would move.
+that is its entire content -- ``crowding`` is already a 0..1 axis with a
+meaningful neutral at 0.5, which a rank would move, and ``energy`` is already a
+rolling percentile -- over its **own** ``percentile_window``, which equals
+``rank_window`` at the defaults and is held equal to it by
+``require_comparable_windows`` whenever an energy threshold is live.
+
+**``energy`` is the fifth, added by R7b, and it changes nothing until a machine
+asks it to.** R7 measured it as the one registered feature carrying chop
+information and ``DEFAULT_FEATURES`` as the four that exclude it. Three things
+read it and all three are inert by default: ``StateMachine.energy_ceiling``
+(R7b), which defaults to 1.0, and ``enter_energy``/``exit_energy`` (R7c's
+energy-first lifecycle), which default to ``None``. It also joins the
+``measurable`` predicate unconditionally, which is what the warmup sentence
+below defends -- an input the machine requires on every bar had better not
+deepen the cold start. It does not: ``Energy`` costs 503 bars against
+``Direction``'s 1920, and ``derive_warmup_bars`` takes the deepest.
 
 ``crowding`` is the one input that can be genuinely unavailable: it needs a
 ``funding_rate`` column, which only perp frames carry. Rather than refuse every
@@ -39,10 +53,47 @@ import pandas as pd
 from strategy_lab.state.machine import StateMachine
 from strategy_lab.state.policy import target_risk_series
 
-DEFAULT_FEATURES = ("direction", "strength", "stability", "crowding")
+DEFAULT_FEATURES = ("direction", "strength", "stability", "crowding", "energy")
 
 # Features whose value is read as a trailing rank rather than as a level.
+# ``energy`` is deliberately absent: ``features.volatility.Energy`` is *already*
+# a rolling percentile, so ranking it would be a percentile of a percentile, a
+# different statistic under the same name and one whose thresholds mean
+# something else. It carries its **own** window though, and
+# ``require_comparable_windows`` below is what keeps that from drifting away
+# from ``rank_window`` unnoticed.
 RANKED_FEATURES = ("strength", "stability")
+
+
+def require_comparable_windows(
+    name: str, *, machine: StateMachine, rank_window: int
+) -> None:
+    """Refuse a machine whose energy threshold is ranked over a different window.
+
+    ``enter_strength`` is a threshold on a rank over ``rank_window``, while
+    ``energy_ceiling`` and ``enter_energy`` are thresholds on ``Energy``'s own
+    ``percentile_window``. They coincide at the defaults, which is the only
+    reason "the same rank space" has ever been true -- and ``rank_window`` is a
+    live field on both adapters, so nothing but this stops the two drifting.
+
+    Measured on the R5 frame, ``strength >= 0.80`` admits 23.8% / 21.6% / 20.9%
+    of bars at ``rank_window`` 240 / 480 / 960 while ``energy <= 0.35`` stays
+    pinned at 37.1%: the *relative* selectivity of two gates moves with a parameter
+    only one of them reads. That is M29's failure -- comparability assumed from
+    similar units rather than measured -- so it is refused rather than
+    documented, and only when an energy threshold is actually live.
+    """
+    from strategy_lab.features.registry import get_feature
+
+    if machine.energy_ceiling >= 1.0 and machine.enter_energy is None:
+        return
+    window = get_feature("energy").percentile_window
+    if window != rank_window:
+        raise ValueError(
+            f"{name} sets an energy threshold with rank_window={rank_window} but "
+            f"Energy percentiles over {window} bars; the two thresholds would be "
+            "ranked over different windows and their coverages are not comparable"
+        )
 
 # Neutral reading for a frame that carries no funding at all. 0.5 is the middle
 # of Crowding's own axis, so it damps nothing -- which is the honest behaviour
