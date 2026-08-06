@@ -842,7 +842,9 @@ the continuous targets agreeing to 1.7e-12. Where a run's frame began does not s
    nowhere in the repo as a constant. It was recovered from four converging pieces of
    evidence — the stored 15m sweep's committed grid shape, this charter's "swept
    `entry_span` up to 160", every cell the charter names being in it, and its "5 of 16 are
-   exact duplicates" reproducing exactly. Strong, but circumstantial.
+   exact duplicates" reproducing exactly. Strong, but circumstantial. *(— closed, see
+   follow-up 1 below: the reconstruction is now pinned as `R0_DONCHIAN_GRID`. It is what
+   was reconstructed here, so this remains how the grid was recovered.)*
 2. **The selection scalar is diluted by each cell's own warmup.** R5 scores the whole
    window including the leading flat run, and each cell is masked by its own `warmup_bars` within the surface's common frame.
    Measured here: ETH's donchian 40/40 and 40/80 are **provably the same book** — identical
@@ -886,13 +888,22 @@ step with it. It also explains §9.3's own entry-count note — 71/152 rather th
 which was that check run without the column. Recorded as a known defect (M20), **not fixed
 here**: a branch that changes the engine cannot also be the branch that measures it.
 
-**Follow-ups, recorded and not done** — this branch changes no code:
+**Follow-ups, recorded and not done** — this branch changes no code. Two have since been
+closed by later ones and are marked rather than deleted, because what a replication left
+open, and what eventually closed it, is part of the record:
 
 1. Pin the R0 4h donchian grid as a constant, so a surface is cited rather than
-   reconstructed.
+   reconstructed. — **Done** on `research/r9-robustness`: `R0_DONCHIAN_GRID` in
+   `tests/test_sweep.py`, with caveat 3 above *derived* from it rather than stated — the
+   16 cells are built, grouped by the position each would have held, and have to collapse
+   to the 13 books and the two duplicate groups measured here. The R5 gate's baseline cell
+   is checked against the same constant.
 2. Attach `funding_rate` in the `backtest` CLI the way `features` does, so the canonical
-   command reproduces the published state-machine figures.
-3. Score a selection scalar over tradeable bars only (M21).
+   command reproduces the published state-machine figures. — **Done**, PR #13 (`0bea797`),
+   merged. That closes M20's *defect*; M20's reading — that the published figures are the
+   correct ones and the CLI was what disagreed with them — stands unchanged.
+3. Score a selection scalar over tradeable bars only (M21). — **Open**, and R9's to
+   implement.
 
 ---
 
