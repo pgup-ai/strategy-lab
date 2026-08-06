@@ -4,9 +4,10 @@ Source of truth for what each strategy does, how it is meant to be run, and what
 about its behavior. Update this file whenever strategy logic, parameters, or engine exit
 behavior changes — the README only carries quick-start commands.
 
-Last reviewed: 2026-08-06 — MDE R9 audited the R5 selection: the cell survives out of
-sample, re-deriving it on a schedule does not, and `enter_strength` is a ridge whose
-neighbour looks identical on return alone.
+Last reviewed: 2026-08-06 — MDE R9 audited the R5 selection (hold the cell, don't re-fit
+it), then R7 scored the state machine's states as chop detectors and they clear nothing:
+its entry gate is one feature, and the feature that does carry chop information is one the
+machine does not read.
 
 ## At a glance
 
@@ -370,6 +371,24 @@ a rule on, but it is not what the gate passed on.
   tables in
   [the charter §9.5](docs/research/2026-08-03-market-dynamics-engine.md#95-r9-walk-forward-and-robustness--btcusdt-perp-4h);
   the harness is `scripts/r9/`.
+- **R7 scored the machine's states as chop detectors, and they are not.** Against
+  thresholds declared before the data was seen, `COMPRESSION` clears **0/6** on BTC and
+  **0/9** on ETH — best deficit −1.79 pp against a −10 pp bar, and the inside-vs-outside
+  separation flips sign between halves. Two consequences for anyone reading or changing
+  this strategy. (1) **The entry gate is one feature, not two.** The composite
+  `strength ≥ enter_strength AND |direction| ≥ direction_floor` beats the `strength` gate
+  alone by **+0.00 pp** on the test half at every horizon, because `direction_floor = 0.10`
+  admits 82% of bars — and R5 never swept it, so its "trained" value is just the dataclass
+  default. (2) **`energy`/`compression` carries the chop information and this strategy does
+  not read it**: `DEFAULT_FEATURES` is `(direction, strength, stability, crowding)`, while
+  `energy` scores −0.0906 on BTC and **−0.1521 on ETH** against the forward efficiency
+  ratio, both halves agreeing. Beware the naming — the *state* `COMPRESSION` and the
+  *feature* `compression` are unrelated, and the chop side is **high `energy`**, not high
+  `compression`. Separately, `enter_strength = 0.80` is confirmed an **interior** optimum:
+  extending to {0.85, 0.90, 0.95} gives +0.5002 / +0.5577 / −0.7497 against +1.3974. Full
+  tables in
+  [the charter §9.6](docs/research/2026-08-03-market-dynamics-engine.md#96-r7-choptrend-state-diagnosis--btcusdt-perp-4h-replicated-on-eth);
+  the harness is `scripts/r7/`.
 
 ---
 

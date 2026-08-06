@@ -2,9 +2,9 @@
 
 Run from this directory, in order -- each step reads the previous one's JSON::
 
-    cd scripts/r7 && for step in step0_control step1_incumbent step2_features \\
-        step3_composite step4_enter_strength step5_persistence step6_leakage_audit; \\
-        do python "$step.py"; done
+    cd scripts/r7 && for step in step0_control step1_label step2_incumbent \\
+        step3_features step4_composite step5_enter_strength step6_persistence \\
+        step7_outcome step8_eth_replication; do python "$step.py"; done
 
 ``R7_OUT`` chooses where the intermediate JSON and the transient report
 directories go; it defaults to a temp directory and must never be ``reports/``.
