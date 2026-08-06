@@ -63,6 +63,11 @@ import r7lib as R7  # noqa: E402
 from strategy_lab.state.machine import StateMachine  # noqa: E402
 
 OUT = Path(os.environ.get("R7B_OUT", Path(tempfile.gettempdir()) / "strategy-lab-r7b"))
+# The docstring above says this must never be ``reports/``; that is a guard
+# rather than a comment, because a report directory is the reproducibility
+# record of a run someone chose to publish and none of these are.
+if OUT.resolve() == REPO.resolve() or REPO.resolve() in OUT.resolve().parents:
+    raise SystemExit(f"R7B_OUT must point outside the repository, not {OUT}")
 
 # The declared grid: four values, of which 1.00 is the control that reproduces
 # R5 exactly, so the search is three live trials. Written out here rather than

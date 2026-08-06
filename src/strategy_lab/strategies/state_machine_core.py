@@ -26,11 +26,14 @@ rolling percentile over the same window ``rank_window`` names.
 
 **``energy`` is the fifth, added by R7b, and it changes nothing until a machine
 asks it to.** R7 measured it as the one registered feature carrying chop
-information and ``DEFAULT_FEATURES`` as the four that exclude it; it is read
-only by ``StateMachine.energy_ceiling``, which defaults to the inert 1.0. Adding
-it here does not move any strategy's ``warmup_bars`` either: ``Energy`` costs
-503 bars against ``Direction``'s 1920, and ``derive_warmup_bars`` takes the
-deepest.
+information and ``DEFAULT_FEATURES`` as the four that exclude it. Three things
+read it and all three are inert by default: ``StateMachine.energy_ceiling``
+(R7b), which defaults to 1.0, and ``enter_energy``/``exit_energy`` (R7c's
+energy-first lifecycle), which default to ``None``. It also joins the
+``measurable`` predicate unconditionally, which is what the warmup sentence
+below defends -- an input the machine requires on every bar had better not
+deepen the cold start. It does not: ``Energy`` costs 503 bars against
+``Direction``'s 1920, and ``derive_warmup_bars`` takes the deepest.
 
 ``crowding`` is the one input that can be genuinely unavailable: it needs a
 ``funding_rate`` column, which only perp frames carry. Rather than refuse every

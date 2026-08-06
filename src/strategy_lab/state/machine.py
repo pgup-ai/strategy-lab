@@ -48,7 +48,7 @@ abstract.
 **R7c adds a second lifecycle, driven by ``energy`` instead of ``strength``,
 and it is off unless both of its thresholds are set.** R7b measured the axis
 this machine was built on: at H=30, ``strength >= 0.80`` lifts the trend rate
-**−7.63 / +3.32** on BTC and **−1.26 / −2.52** on ETH — negative in three of
+**-7.63 / +3.32** on BTC and **-1.26 / -2.52** on ETH — negative in three of
 four instrument-halves, including the one R5 selected it on — while
 ``energy <= 0.50``, which the lifecycle does not read, lifts **+3.51 / +5.10**
 and **+4.49 / +6.61**, positive in all four (M27). So the hysteresis, the dwell

@@ -194,8 +194,15 @@ def main() -> None:
         "published_runs": rows,
         "baseline": baseline,
     })
-    verdicts = [control_1, control_2]
-    print(f"\n{'ALL CONTROLS PASS' if all(verdicts) else 'A CONTROL FAILED -- STOP'}")
+    # A control that never ran is not a control that failed, and a phase report
+    # must not be able to record the second as the first.
+    if control_2 is None:
+        print("\nCONTROL 2 NOT RUN -- capture the baseline on main before reading "
+              "any R7b number")
+    elif not all([control_1, control_2]):
+        print("\nA CONTROL FAILED -- STOP")
+    else:
+        print("\nALL CONTROLS PASS")
     print(f"elapsed {time.time() - started:.1f}s")
 
 

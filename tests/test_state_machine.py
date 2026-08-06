@@ -707,15 +707,17 @@ def test_the_mid_band_tail_does_not_split_a_cold_run_from_a_warm_one():
 # Bars a cold start may take to agree with a run that has seen the whole history
 # on *realistic* input. The bound proved above covers constant tails only, and
 # real features drift rather than holding still, so this is the independent
-# measurement rather than a restatement: over the 76 frames below the worst lag
-# is 74 and 58 of them agree immediately, against a proven constant-tail bound
+# measurement rather than a restatement: over the 114 frames below the worst lag
+# is 74 and 82 of them agree immediately, against a proven constant-tail bound
 # of 34. The limit is set at roughly twice the worst rather than at it.
 #
-# R7b re-measured it after adding the ``energy`` column and a second, gated
-# machine: 38 frames became 76 and the worst lag did not move off 74. A ceiling
-# that bites gives the machine a further reason to leave a state, so it was
-# never likely to *lengthen* the memory -- but that is an argument, and this
-# number is the measurement.
+# Re-measured as each machine was added, because 38 seeds x N machines is a
+# different population each time: R7b's ceiling took 38 frames to 76 without
+# moving the worst off 74, and R7c's energy-first lifecycle takes it to 114,
+# still 74. Per machine the worst is 74 / 74 / 42 -- the energy-first one has
+# the *shortest* memory of the three, which fits the argument that more reasons
+# to leave a state cannot lengthen it, and is why the argument is not enough on
+# its own: these are the numbers.
 MAX_CONVERGENCE_LAG = 150
 
 

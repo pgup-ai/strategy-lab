@@ -79,6 +79,11 @@ import r7lib as R7  # noqa: E402
 from strategy_lab.state.machine import StateMachine  # noqa: E402
 
 OUT = Path(os.environ.get("R7C_OUT", Path(tempfile.gettempdir()) / "strategy-lab-r7c"))
+# The docstring above says this must never be ``reports/``; that is a guard
+# rather than a comment, because a report directory is the reproducibility
+# record of a run someone chose to publish and none of these are.
+if OUT.resolve() == REPO.resolve() or REPO.resolve() in OUT.resolve().parents:
+    raise SystemExit(f"R7C_OUT must point outside the repository, not {OUT}")
 
 # --- the declared grid, written out rather than described ---------------------
 #

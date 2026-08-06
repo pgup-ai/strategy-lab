@@ -98,9 +98,13 @@ def main() -> None:
     assert scored, "no candidate cell produced a Sharpe at all"
     winner = max(scored, key=lambda label: scored[label]["sharpe_tradeable"])
     enter_energy, exit_energy = by_label[winner]
-    runner_up = sorted(row["sharpe_tradeable"] for row in scored.values())[-2]
+    # A grid tight enough to leave one cell scoring has no runner-up, and a
+    # selection with nothing to rank against is worth saying rather than
+    # indexing past.
+    ranked = sorted(row["sharpe_tradeable"] for row in scored.values())
+    runner_up = f"{ranked[-2]:+.4f}" if len(ranked) > 1 else "none -- only one cell scored"
     print(f"\nSELECTED  {winner}  Sharpe {scored[winner]['sharpe_tradeable']:+.4f} "
-          f"(runner-up {runner_up:+.4f})")
+          f"(runner-up {runner_up})")
 
     reference = rows[reference_label]
     print(f"\nR5's trained cell over the identical bars: {reference['trades']} round "
