@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import dataclasses
+import itertools
 
 import numpy as np
 import pandas as pd
@@ -16,6 +17,30 @@ from strategy_lab.backtests.sweep import (
 from strategy_lab.strategies.base import SignalSet
 from strategy_lab.strategies.registry import get_strategy
 from tests.conftest import synthetic_ohlcv
+
+# The R0 4h gate's donchian surface, 4 x 4 = 16 cells. Written out here for the
+# reason ``test_state_machine_gate.py`` gives for its own 54-cell grid -- a grid
+# stated only in a progress log cannot be checked -- and because this one had
+# already gone missing: the ETH replication could not cite it, and had to
+# *reconstruct* it from four converging pieces of circumstantial evidence (the
+# stored 15m sweep's committed grid shape, the charter's "swept ``entry_span`` up
+# to 160", every cell the charter names falling inside it, and its "5 of 16 are
+# exact duplicates" reproducing exactly) before it could re-run the surface on a
+# second asset. Every published R0 and R2 donchian figure is a reduction of this
+# grid, and `test_state_machine_gate.py`'s baseline is its best training cell.
+R0_DONCHIAN_GRID = {"entry_span": (20, 40, 80, 160), "exit_span": (10, 20, 40, 80)}
+R0_DONCHIAN_CELLS = 16
+# ...but 13 books, because ``exit_span`` is inert once it is no narrower than
+# ``entry_span``: five cells fall into two duplicate groups, so three of the
+# sixteen are redundant and the surface's breadth along that axis is partly
+# fictional. Quote "16/16 positive" and you are quoting 13 books with three
+# counted twice. Derived from the grid by the degeneracy test below.
+R0_DONCHIAN_BOOKS = 13
+
+
+def r0_donchian_cells() -> list[dict[str, int]]:
+    keys = tuple(R0_DONCHIAN_GRID)
+    return [dict(zip(keys, values)) for values in itertools.product(*R0_DONCHIAN_GRID.values())]
 
 
 def test_sweep_returns_one_point_per_parameter_combination():
@@ -391,18 +416,24 @@ def test_the_sweep_position_matches_the_engine():
 
 
 def test_the_sweep_matches_the_engine_on_the_grid_cells_that_reverse():
-    """The three published R0 cells where ``exit_span > entry_span``.
+    """The published R0 cells where ``exit_span > entry_span``.
 
     On those the exit channel is wider than the entry channel, so a short entry
     fires strictly before the long exit that would otherwise have closed the
     position -- the live configuration that made the two-book model score flat
     where the engine is short.
+
+    Read off ``R0_DONCHIAN_GRID`` rather than listed, so that a grid edited
+    without this test in mind cannot leave it checking cells the surface no
+    longer holds.
     """
     df = synthetic_ohlcv(n=900)
-    for entry_span, exit_span in ((20, 40), (20, 80), (40, 80)):
-        strategy = dataclasses.replace(
-            get_strategy("donchian"), entry_span=entry_span, exit_span=exit_span
-        )
+    reversing = [cell for cell in r0_donchian_cells() if cell["exit_span"] > cell["entry_span"]]
+    assert len(reversing) == 3, f"the R0 grid holds {len(reversing)} reversing cells, not 3"
+
+    for cell in reversing:
+        entry_span, exit_span = cell["entry_span"], cell["exit_span"]
+        strategy = dataclasses.replace(get_strategy("donchian"), **cell)
         signals = strategy.generate_signals(df)
         ours = positions_from_signals(signals)
         theirs = _engine_position(signals, df["close"])
@@ -548,11 +579,12 @@ def test_donchians_exit_channel_is_inert_once_it_is_no_narrower_than_the_entry()
     beside it, and the positions for ``exit_span`` 20, 40 and 80 are identical
     at ``entry_span=20``. This test reproduces the degeneracy on a synthetic
     frame at ``entry_span=48`` with ``exit_span`` 48/96/192 -- same relation,
-    spans chosen to fit the 900-bar fixture rather than the gate's grid.
+    spans chosen away from the gate's own grid, which
+    :func:`test_the_r0_grid_holds_thirteen_books_rather_than_sixteen` covers
+    instead.
 
-    So 5 of the gate's 16 cells are exact duplicates of another cell. The
-    degeneracy needs shorts: with ``allow_shorts=False`` there is no reversal to
-    outrank the exit and the channel is live again, which is what this asserts
+    The degeneracy needs shorts: with ``allow_shorts=False`` there is no reversal
+    to outrank the exit and the channel is live again, which is what this asserts
     second so the first half cannot pass for a trivial reason.
     """
     df = synthetic_ohlcv(n=900)
@@ -587,3 +619,62 @@ def test_donchians_exit_channel_is_inert_once_it_is_no_narrower_than_the_entry()
         "exit channel must matter again; if it does not, this frame simply never "
         "exits and the assertions above prove nothing"
     )
+
+
+def test_the_r0_grid_holds_thirteen_books_rather_than_sixteen():
+    """What the pinned grid is *for*: the surface's breadth, derived from it.
+
+    A constant nothing derives anything from is prose in a tuple. So every cell
+    of ``R0_DONCHIAN_GRID`` is built here and grouped by the position it would
+    have held, and the collapse has to be the one the charter measured on the
+    real 4h frames: ``entry=20`` with ``exit`` 20/40/80 is one book and
+    ``entry=40`` with ``exit`` 40/80 is another, five cells into two, leaving
+    ``R0_DONCHIAN_BOOKS`` distinct books out of ``R0_DONCHIAN_CELLS``.
+
+    The groups are pinned rather than only counted, because a count alone is
+    also satisfied by a frame on which some *other* pair happens to agree. Each
+    side of the diagonal is asserted for the mechanism as well: at or above it a
+    long exit never fires without the reversal that outranks it, below it one
+    always does -- otherwise this frame cannot tell an inert channel from a live
+    one and the grouping below means nothing.
+    """
+    cells = r0_donchian_cells()
+    assert len({tuple(cell.items()) for cell in cells}) == len(cells) == R0_DONCHIAN_CELLS
+
+    df = synthetic_ohlcv(n=900)
+    template = get_strategy("donchian")
+    books: dict[tuple[float, ...], list[tuple[int, int]]] = {}
+    for cell in cells:
+        entry_span, exit_span = cell["entry_span"], cell["exit_span"]
+        signals = dataclasses.replace(template, **cell).generate_signals(df)
+        lone_exits = int((signals.long_exits & ~signals.short_entries).sum())
+        if exit_span >= entry_span:
+            assert lone_exits == 0, (
+                f"donchian {entry_span}/{exit_span}: {lone_exits} long exits fired "
+                f"with no reversal beside them, so the wider channel is not inert"
+            )
+        else:
+            assert lone_exits > 0, (
+                f"donchian {entry_span}/{exit_span}: the narrower exit channel never "
+                f"fired on its own, so this frame cannot show it is live"
+            )
+
+        position = positions_from_signals(signals)
+        # A cell that never traded is flat everywhere and collapses into every
+        # other such cell, which would shrink the book count without any
+        # degeneracy at all. The first comparison is against NaN and always
+        # counts, hence > 1 rather than > 0.
+        assert int((position != position.shift(1)).sum()) > 1, (
+            f"donchian {entry_span}/{exit_span} never changed position on this frame"
+        )
+        books.setdefault(tuple(position.to_numpy().tolist()), []).append((entry_span, exit_span))
+
+    assert sum(len(group) for group in books.values()) == R0_DONCHIAN_CELLS
+    assert len(books) == R0_DONCHIAN_BOOKS, (
+        f"the grid produced {len(books)} distinct books, not {R0_DONCHIAN_BOOKS}: "
+        f"{sorted(books.values())}"
+    )
+    assert sorted(group for group in books.values() if len(group) > 1) == [
+        [(20, 20), (20, 40), (20, 80)],
+        [(40, 40), (40, 80)],
+    ]

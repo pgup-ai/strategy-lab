@@ -205,6 +205,10 @@ rather than round-tripped.
   modelled on — is a live parameter. With `--no-allow-shorts` there is no reversal to
   outrank the exit and the channel matters again. Pinned by
   `tests/test_sweep.py::test_donchians_exit_channel_is_inert_once_it_is_no_narrower_than_the_entry`.
+  What it costs the published R0 surface is pinned beside it, off that file's
+  `R0_DONCHIAN_GRID`: five of the gate's sixteen cells fall into two duplicate groups, so
+  it holds **13 distinct books** and "16/16 cells positive" counts three of them twice.
+  Sweep only the lower triangle.
 
 ## multi_horizon
 
