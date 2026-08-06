@@ -1,7 +1,7 @@
 """The feature-and-target pipeline both state-machine adapters run.
 
 ``state_machine_v1`` and ``state_machine_v2`` are the same machine, the same
-policy and the same four features, differing only in what they do with the
+policy and the same features, differing only in what they do with the
 signed target at the end: v1 collapses it to entry/exit booleans plus an
 entry-only size, v2 hands it over whole. That collapse is the *only* difference
 R6 sets out to measure, so the two must not each own a pipeline -- a second copy
@@ -16,12 +16,21 @@ import this module: a module-level ``from strategy_lab.features.flow import ...`
 closes that loop and fails with a partially-initialized-module ``ImportError``
 whenever the first import of the process happens to be a ``features`` one.
 
-**Two of the four inputs are trailing ranks, not raw features.** ``strength``
+**Two of the five inputs are trailing ranks, not raw features.** ``strength``
 and ``stability`` are fed to the machine as ``rolling_percentile`` over
 ``rank_window`` bars, because R4's conditioning was measured by tercile and a
 tercile is a rank. ``direction`` stays raw -- ranking it would destroy the sign
-that is its entire content -- and ``crowding`` is already a 0..1 axis with a
-meaningful neutral at 0.5, which a rank would move.
+that is its entire content -- ``crowding`` is already a 0..1 axis with a
+meaningful neutral at 0.5, which a rank would move, and ``energy`` is already a
+rolling percentile over the same window ``rank_window`` names.
+
+**``energy`` is the fifth, added by R7b, and it changes nothing until a machine
+asks it to.** R7 measured it as the one registered feature carrying chop
+information and ``DEFAULT_FEATURES`` as the four that exclude it; it is read
+only by ``StateMachine.energy_ceiling``, which defaults to the inert 1.0. Adding
+it here does not move any strategy's ``warmup_bars`` either: ``Energy`` costs
+503 bars against ``Direction``'s 1920, and ``derive_warmup_bars`` takes the
+deepest.
 
 ``crowding`` is the one input that can be genuinely unavailable: it needs a
 ``funding_rate`` column, which only perp frames carry. Rather than refuse every
@@ -39,9 +48,13 @@ import pandas as pd
 from strategy_lab.state.machine import StateMachine
 from strategy_lab.state.policy import target_risk_series
 
-DEFAULT_FEATURES = ("direction", "strength", "stability", "crowding")
+DEFAULT_FEATURES = ("direction", "strength", "stability", "crowding", "energy")
 
 # Features whose value is read as a trailing rank rather than as a level.
+# ``energy`` is deliberately absent: ``features.volatility.Energy`` is *already*
+# a rolling percentile over 480 bars -- the same window ``rank_window`` applies
+# here -- so ranking it would be a percentile of a percentile, a different
+# statistic under the same name and one whose thresholds mean something else.
 RANKED_FEATURES = ("strength", "stability")
 
 # Neutral reading for a frame that carries no funding at all. 0.5 is the middle

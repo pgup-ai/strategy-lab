@@ -18,7 +18,32 @@ threshold written in feature units is therefore a differently sized bucket in
 each era, which is the argument ``features.volatility.Energy`` already makes
 for being a percentile rather than a level. ``direction`` is the exception and
 stays raw: its sign is the information, and ranking a signed series destroys
-it.
+it. ``energy`` is already a percentile over that same 480-bar window, so it
+arrives in the same 0..1 space without a second transformation -- ranking a rank
+would be a different statistic wearing the same name.
+
+**The entry gate has three terms, and R7b added the third.** ``advancing`` is
+``strength >= enter_strength AND |direction| >= direction_floor AND energy <=
+energy_ceiling``. R7 measured the first two as one gate rather than two --
+``direction_floor = 0.10`` admits 82% of bars and beats ``strength`` alone by
+**+0.00 pp** on the test half at every horizon -- and measured ``energy`` as the
+only registered feature carrying chop information (IC vs forward efficiency
+-0.0906 on BTC, -0.1521 on ETH, same sign in both halves of both).
+``direction_floor`` was **joined, not replaced**: it has a second job in the
+reversal test (``flipped`` below), so dropping it would change when a position
+flips side, which is a different question.
+
+**``energy_ceiling`` defaults to 1.0 and that default is inert by
+construction**, which is what lets ``state_machine_v1``/``v2`` keep their
+published figures rather than have them re-checked. Two facts make it so, and
+both are properties of the code rather than of a particular frame:
+``features.base.rolling_percentile`` is a rank over its own window, so a
+measurable ``energy`` lies in ``(0, 1]`` and can never exceed a ceiling of 1.0;
+and ``energy`` costs 503 warmup bars against ``direction``'s 1920, so adding it
+to ``measurable`` cannot unmeasure a bar the other four had already measured.
+``tests/test_state_machine.py`` pins both, and the second is pinned on a real
+frame in ``tests/test_state_machine_strategy.py`` rather than only in the
+abstract.
 
 Three mechanisms the R5 gate names, and what each one prevents:
 
@@ -89,7 +114,7 @@ from enum import Enum
 import numpy as np
 import pandas as pd
 
-REQUIRED_COLUMNS = ("direction", "strength", "stability", "crowding")
+REQUIRED_COLUMNS = ("direction", "strength", "stability", "crowding", "energy")
 
 
 class MarketState(Enum):
@@ -142,6 +167,22 @@ class StateMachine:
     # A lean this small has no usable sign, so it neither starts a move nor
     # counts as having flipped against one.
     direction_floor: float = 0.10
+    # Rank space over the same 480-bar window the other conditioners are ranked
+    # in, so this is "how hot is realized vol against its own recent history".
+    # It gates *entry to the lifecycle* -- see ``advancing`` in ``run`` -- and
+    # 1.0 admits every bar, which is why it is the default: a machine that has
+    # not chosen a ceiling behaves exactly as the one R5 published.
+    #
+    # The direction of the inequality is the one thing here that reads
+    # backwards from the name. R7 measured IC(`energy`, forward efficiency) at
+    # -0.0906 on BTC and -0.1521 on ETH, same sign in both halves of both: high
+    # energy precedes *less* efficient forward movement, so the chop side of the
+    # axis is the top of it and a ceiling is what excludes chop. §2.1's own
+    # worked example is the same statement -- `Strength = 20, Energy = 95` is
+    # "violent two-way chop" -- and the feature named `compression` is `1 -
+    # energy`, so the state called COMPRESSION and the feature called
+    # compression remain unrelated.
+    energy_ceiling: float = 1.0
     # Rank space, so this is the bottom 15% of trailing stability -- a collapse
     # relative to how cleanly this instrument usually tracks its own trend line,
     # rather than an absolute residual that means different things per market.
@@ -169,6 +210,7 @@ class StateMachine:
             "direction_floor",
             "stability_floor",
             "crowding_extreme",
+            "energy_ceiling",
         ):
             value = getattr(self, name)
             if not 0.0 <= float(value) <= 1.0:
@@ -227,17 +269,21 @@ class StateMachine:
         strength = features["strength"].to_numpy(dtype="float64")
         stability = features["stability"].to_numpy(dtype="float64")
         crowding = features["crowding"].to_numpy(dtype="float64")
+        energy = features["energy"].to_numpy(dtype="float64")
 
         measurable = (
             np.isfinite(direction)
             & np.isfinite(strength)
             & np.isfinite(stability)
             & np.isfinite(crowding)
+            & np.isfinite(energy)
         )
         # NaN compares False to everything, so each predicate is already False
         # on an unmeasurable bar; only ``failing`` wants the opposite.
-        advancing = (strength >= self.enter_strength) & (
-            np.abs(direction) >= self.direction_floor
+        advancing = (
+            (strength >= self.enter_strength)
+            & (np.abs(direction) >= self.direction_floor)
+            & (energy <= self.energy_ceiling)
         )
         failing = ~measurable | (strength < self.exit_strength)
         unstable = stability < self.stability_floor

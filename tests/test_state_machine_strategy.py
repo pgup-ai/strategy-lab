@@ -146,6 +146,30 @@ def test_disabling_shorts_leaves_the_long_side_untouched():
     assert restricted.long_entries.sum() > 0
 
 
+def test_energy_never_unmeasures_a_bar_the_other_inputs_had_measured():
+    """The second half of R7b's no-op, and the half that is about warmups.
+
+    ``StateMachine.run`` treats any missing input as a failure, so joining
+    ``energy`` to ``measurable`` could in principle knock the machine to
+    ``RESET`` on bars it used to walk -- which would move the published figures
+    while ``energy_ceiling`` sat at its inert 1.0. It cannot, because ``Energy``
+    costs 503 warmup bars against ``Direction``'s 1920 and neither has interior
+    gaps, so ``energy``'s NaN prefix is strictly inside the frame's. Asserted on
+    the adapter's own pipeline rather than on the arithmetic, because the
+    arithmetic is what a future feature change would quietly invalidate.
+    """
+    strategy = get_strategy(NAME)
+    features, _ = strategy.feature_frame(probe_frame(strategy))
+    others = [name for name in strategy.features if name != "energy"]
+    measurable = features[others].notna().all(axis=1)
+    blinded = measurable & features["energy"].isna()
+    assert not blinded.any(), (
+        f"energy is the only unmeasurable input on {int(blinded.sum())} bars, so "
+        "adding it to the machine's measurable set changed which bars it walks"
+    )
+    assert measurable.any(), "setup failed: no bar was measurable at all"
+
+
 def test_the_machine_and_the_policy_are_reachable_from_the_adapter():
     """A state the adapter can never produce is a rule nobody can trade."""
     strategy = get_strategy(NAME)

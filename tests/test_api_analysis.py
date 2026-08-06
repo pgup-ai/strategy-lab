@@ -28,6 +28,7 @@ from strategy_lab.backtests import ExitMode, run_backtest
 from strategy_lab.db.funding import funding_span
 from strategy_lab.features.flow import FUNDING_COLUMN
 from strategy_lab.market_data.base import MarketDataIdentity
+from strategy_lab.state.machine import REQUIRED_COLUMNS
 from tests.conftest import synthetic_ohlcv, synthetic_ohlcv_with_funding
 
 _PERP = MarketDataIdentity(
@@ -415,7 +416,7 @@ def test_the_why_layer_carries_the_state_and_the_features_behind_it(
     )
 
     assert payload.why is not None
-    assert set(payload.why.features) == {"direction", "strength", "stability", "crowding"}
+    assert set(payload.why.features) == set(REQUIRED_COLUMNS)
     assert len(payload.why.states) == _MACHINE_BARS
     for values in payload.why.features.values():
         assert len(values) == _MACHINE_BARS

@@ -91,7 +91,7 @@ class StateMachineV1:
         )
 
     def feature_frame(self, df: pd.DataFrame) -> tuple[pd.DataFrame, bool]:
-        """The four columns the machine reads, and whether crowding is real."""
+        """The columns the machine reads, and whether crowding is real."""
         return build_feature_frame(df, features=self.features, rank_window=self.rank_window)
 
     def _signals(self, target: pd.Series, *, metadata: dict) -> SignalSet:
