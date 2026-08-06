@@ -271,8 +271,11 @@ a rule on, but it is not what the gate passed on.
   +0.1314 (halves +0.1953 / +0.0621). Unconditional is +0.0385. A "trade when strength is
   high" threshold discards the band with the larger absolute IC.
 - **Inputs**: `direction` raw, `strength` and `stability` as trailing ranks over
-  `rank_window=480`, `crowding` raw, and `energy` — already a rolling percentile over the
-  same 480-bar window, so it needs no ranking. The ranks are why the thresholds are tercile
+  `rank_window=480`, `crowding` raw, and `energy` — already a rolling percentile over its
+  **own** `percentile_window`, so it needs no ranking. That window equals `rank_window` at
+  the defaults and only there: `rank_window` is a live field and `Energy`'s is not, so
+  setting an energy threshold with a mismatched `rank_window` is **refused** rather than
+  silently ranked over two different windows (M29). The ranks are why the thresholds are tercile
   boundaries: R4's conditioning was measured by tercile, and on the stored history the raw
   boundaries move 0.067/0.156 → 0.059/0.139 between halves.
 - **`energy_ceiling` defaults to 1.0, which is inert, and R7b is why it exists and why it

@@ -22,7 +22,9 @@ and ``stability`` are fed to the machine as ``rolling_percentile`` over
 tercile is a rank. ``direction`` stays raw -- ranking it would destroy the sign
 that is its entire content -- ``crowding`` is already a 0..1 axis with a
 meaningful neutral at 0.5, which a rank would move, and ``energy`` is already a
-rolling percentile over the same window ``rank_window`` names.
+rolling percentile -- over its **own** ``percentile_window``, which equals
+``rank_window`` at the defaults and is held equal to it by
+``require_comparable_windows`` whenever an energy threshold is live.
 
 **``energy`` is the fifth, added by R7b, and it changes nothing until a machine
 asks it to.** R7 measured it as the one registered feature carrying chop
@@ -55,10 +57,43 @@ DEFAULT_FEATURES = ("direction", "strength", "stability", "crowding", "energy")
 
 # Features whose value is read as a trailing rank rather than as a level.
 # ``energy`` is deliberately absent: ``features.volatility.Energy`` is *already*
-# a rolling percentile over 480 bars -- the same window ``rank_window`` applies
-# here -- so ranking it would be a percentile of a percentile, a different
-# statistic under the same name and one whose thresholds mean something else.
+# a rolling percentile, so ranking it would be a percentile of a percentile, a
+# different statistic under the same name and one whose thresholds mean
+# something else. It carries its **own** window though, and
+# ``require_comparable_windows`` below is what keeps that from drifting away
+# from ``rank_window`` unnoticed.
 RANKED_FEATURES = ("strength", "stability")
+
+
+def require_comparable_windows(
+    name: str, *, machine: StateMachine, rank_window: int
+) -> None:
+    """Refuse a machine whose energy threshold is ranked over a different window.
+
+    ``enter_strength`` is a threshold on a rank over ``rank_window``, while
+    ``energy_ceiling`` and ``enter_energy`` are thresholds on ``Energy``'s own
+    ``percentile_window``. They coincide at the defaults, which is the only
+    reason "the same rank space" has ever been true -- and ``rank_window`` is a
+    live field on both adapters, so nothing but this stops the two drifting.
+
+    Measured on the R5 frame, ``strength >= 0.80`` admits 23.8% / 21.6% / 20.9%
+    of bars at ``rank_window`` 240 / 480 / 960 while ``energy <= 0.35`` stays
+    pinned at 37.1%: the *relative* selectivity of two gates moves with a parameter
+    only one of them reads. That is M29's failure -- comparability assumed from
+    similar units rather than measured -- so it is refused rather than
+    documented, and only when an energy threshold is actually live.
+    """
+    from strategy_lab.features.registry import get_feature
+
+    if machine.energy_ceiling >= 1.0 and machine.enter_energy is None:
+        return
+    window = get_feature("energy").percentile_window
+    if window != rank_window:
+        raise ValueError(
+            f"{name} sets an energy threshold with rank_window={rank_window} but "
+            f"Energy percentiles over {window} bars; the two thresholds would be "
+            "ranked over different windows and their coverages are not comparable"
+        )
 
 # Neutral reading for a frame that carries no funding at all. 0.5 is the middle
 # of Crowding's own axis, so it damps nothing -- which is the honest behaviour

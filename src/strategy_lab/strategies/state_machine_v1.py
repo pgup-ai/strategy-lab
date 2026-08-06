@@ -35,6 +35,7 @@ from strategy_lab.state.machine import StateMachine
 from strategy_lab.strategies.base import SignalSet, require_positive_span, validate_ohlcv
 from strategy_lab.strategies.state_machine_core import (
     DEFAULT_FEATURES,
+    require_comparable_windows,
     RANKED_FEATURES,
     build_feature_frame,
     derive_warmup_bars,
@@ -61,6 +62,9 @@ class StateMachineV1:
 
     def __post_init__(self) -> None:
         require_positive_span(self.name, "rank_window", self.rank_window)
+        require_comparable_windows(
+            self.name, machine=self.machine, rank_window=self.rank_window
+        )
         object.__setattr__(self, "warmup_bars", self._warmup_bars())
 
     def _warmup_bars(self) -> int:
