@@ -112,16 +112,21 @@ def main() -> None:
           f"{ {label: rows[label]['trades'] for label in cells} }")
     print(f"  inside the band: { {label: ok for label, ok in inside.items()} }")
 
-    # The first switch's verdict at the *selected* target, which is the form the
-    # plan's threshold table states it in ("at the selected coverage target").
-    # Step 1 read it at every target and all three cleared, so this can only
-    # confirm -- but a phase that reports the switch only in the form that is
-    # easiest to pass is not reporting it.
+    # The plan states the first switch "at the selected coverage target", so it is
+    # the selected one that has to clear -- step 1's `any_target_clears` is the
+    # weaker condition and only decides whether there is anything to select from.
+    # All three cleared here, so this can only confirm; it stops the phase anyway,
+    # because a switch that reports a failure instead of acting on it is not a
+    # switch, and step 3 spends the holdout.
     target = cells[winner]["enter"]["target_coverage"]
     first_switch = derivation["verdicts"][f"{target:.2f} H={R.HORIZON}"]
     print(f"\nthe first switch at the selected target ({target:.0%}): "
           f"mean {first_switch['mean_pp']:+.2f} pp, all four positive "
           f"{first_switch['all_positive']}  {R.mark(first_switch['clears'])}")
+    assert first_switch["clears"], (
+        f"the selected target ({target:.0%}) does not clear the first kill switch; "
+        "the phase stops here and the SOL holdout is not spent"
+    )
 
     R.write("step2_selection.json", {
         "split_at": str(df.index[split]),
