@@ -5,9 +5,9 @@ about its behavior. Update this file whenever strategy logic, parameters, or eng
 behavior changes — the README only carries quick-start commands.
 
 Last reviewed: 2026-08-06 — MDE R9 audited the R5 selection (hold the cell, don't re-fit
-it), then R7 scored the state machine's states as chop detectors and they clear nothing:
-its entry gate is one feature, and the feature that does carry chop information is one the
-machine does not read.
+it), R7 scored the state machine's states as chop detectors and they clear nothing, and R7b
+gave the machine the `energy` axis it was missing: the gate still fails its declared bar,
+and the reason is that `strength` adds nothing to `energy` rather than the reverse.
 
 ## At a glance
 
@@ -270,9 +270,19 @@ a rule on, but it is not what the gate passed on.
   +0.1314 (halves +0.1953 / +0.0621). Unconditional is +0.0385. A "trade when strength is
   high" threshold discards the band with the larger absolute IC.
 - **Inputs**: `direction` raw, `strength` and `stability` as trailing ranks over
-  `rank_window=480`, `crowding` raw. The ranks are why the thresholds are tercile
+  `rank_window=480`, `crowding` raw, and `energy` — already a rolling percentile over the
+  same 480-bar window, so it needs no ranking. The ranks are why the thresholds are tercile
   boundaries: R4's conditioning was measured by tercile, and on the stored history the raw
   boundaries move 0.067/0.156 → 0.059/0.139 between halves.
+- **`energy_ceiling` defaults to 1.0, which is inert, and R7b is why it exists and why it
+  stays inert.** The entry gate can also require `energy ≤ energy_ceiling`, the second axis
+  of [§2.1](docs/research/2026-08-03-market-dynamics-engine.md#21-the-state-vector)'s
+  `Strength = 20, Energy = 95 → violent two-way chop`. R7b measured it against a bar
+  declared in advance and it **did not clear** — 0/4 on BTC, 0/4 on ETH — so the default
+  ships as the no-op and every published v1/v2 figure is bit-identical to the version
+  before it existed. Do not raise it expecting an improvement: what R7b found was that
+  `energy` adds to `strength` while `strength` adds nothing to `energy`, which is an
+  argument for a differently-shaped machine rather than for a tighter ceiling on this one.
 - **`crowding` needs a `funding_rate` column, and only two of the three paths can supply
   one.** `backtest` and `sweep` attach it on a perp; `replay` cannot — `core.types.Bar`
   carries no funding and `BarBuffer` materializes OHLCV only — so **a replay of a perp
