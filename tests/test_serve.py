@@ -232,10 +232,15 @@ def test_a_perp_on_another_venue_files_no_funding_and_still_refreshes(refresh):
     perp displayed fine and then 502'd on every refresh click -- in ``serve``'s
     live-update button as much as the browser's.
     """
-    payload, _ = refresh(identity=replace(_PERP, exchange="bybit"))
+    payload, calls = refresh(identity=replace(_PERP, exchange="bybit"))
 
     assert payload["candles_upserted"] >= 0
     assert payload["funding_upserted"] is None, "settlements were sought on a venue with no client"
+    # The response value alone would also be satisfied by fetching Binance
+    # settlements for a bybit symbol and discarding them, which is the mis-filing
+    # this branch exists to prevent -- one request reaching the client is the
+    # failure, whatever happens to its answer.
+    assert calls == [], f"the funding client was called for an unsupported venue: {calls}"
 
 
 def test_the_lookback_is_the_timeframe_rather_than_a_fixed_span(refresh):
@@ -279,3 +284,37 @@ def test_a_funding_outage_leaves_the_candles_where_they_were(monkeypatch):
         server.refresh_candles(_PERP, after=None)
 
     assert written == [], f"a failed funding fetch still wrote {written}"
+
+
+def test_a_failed_candle_write_leaves_funding_ahead_rather_than_behind(monkeypatch):
+    """The two upserts cannot share a transaction, so the order decides the wreck.
+
+    ``upsert_candles`` and ``upsert_funding`` each open their own connection, and
+    threading one through both is a signature change in ``db.candles`` and
+    ``db.funding``. What is available instead is choosing which half survives a
+    half-failure. Measured on a 60-bar window: settlements running five days
+    *ahead* of the candles give ``funding_coverage_gaps`` 0 gaps, because
+    settlements outside the window are not counted; two days *behind* give the
+    refusal. So funding goes first, and the surviving state is the harmless one.
+    """
+    written: list[str] = []
+    monkeypatch.setattr(server, "_fetch_recent", lambda identity, start: _frame())
+    monkeypatch.setattr(server, "_fetch_funding", lambda identity, start: [{"row": 1}])
+    monkeypatch.setattr(
+        "strategy_lab.db.funding.upsert_funding",
+        lambda rows: written.append("funding") or 1,
+    )
+
+    def broken(frame):
+        written.append("candles")
+        raise RuntimeError("candle write failed")
+
+    monkeypatch.setattr(server, "upsert_candles", broken)
+
+    with pytest.raises(RuntimeError, match="candle write failed"):
+        server.refresh_candles(_PERP, after=None)
+
+    assert written == ["funding", "candles"], (
+        "candles were written before settlements, so a half-failure leaves the "
+        "candle window past the last settlement -- the state the guard refuses"
+    )

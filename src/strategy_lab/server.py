@@ -74,6 +74,24 @@ def refresh_candles(identity: MarketDataIdentity, after: int | None) -> dict:
     fetched = _fetch_recent(identity, lookback_start)
     pending_funding = _fetch_funding(identity, lookback_start)
 
+    # Settlements before bars, which makes the remaining failure a harmless one.
+    # The two upserts cannot share a transaction without threading a connection
+    # through `db.candles` and `db.funding`, so one of them can still fail after
+    # the other committed -- but only one of the two orders leaves a state the
+    # coverage guard refuses. Measured on a 60-bar window: funding running five
+    # days *ahead* of the candles yields 0 gaps, because settlements outside the
+    # window are simply not counted; funding two days *behind* yields the
+    # refusal. So a failed candle write leaves funding ahead and harmless, where
+    # a failed funding write used to leave candles ahead and the dataset unusable.
+    settlements = None
+    if pending_funding is not None:
+        # Imported at the call site, as `_fetch_funding` imports its own client:
+        # binding it at module scope moves the name out from under the tests that
+        # patch it, and the first thing that happens then is a live insert.
+        from strategy_lab.db.funding import upsert_funding
+
+        settlements = upsert_funding(pending_funding)
+
     candles = 0
     if not fetched.empty:
         source = "yahoo" if _is_equity(identity) else identity.exchange
@@ -87,15 +105,6 @@ def refresh_candles(identity: MarketDataIdentity, after: int | None) -> dict:
                 source=source,
             )
         )
-
-    settlements = None
-    if pending_funding is not None:
-        # Imported at the call site, as `_fetch_funding` imports its own client:
-        # binding it at module scope moves the name out from under the tests that
-        # patch it, and the first thing that happens then is a live insert.
-        from strategy_lab.db.funding import upsert_funding
-
-        settlements = upsert_funding(pending_funding)
 
     if after is not None:
         start = datetime.fromtimestamp(after, UTC).isoformat()
@@ -119,11 +128,9 @@ def _fetch_funding(identity: MarketDataIdentity, lookback_start: datetime):
     """Settlements to store for a perp, unwritten. ``None`` on anything else.
 
     Fetching and writing are separate so the caller can get both networks out of
-    the way before it commits either result. The residual window is a database
-    failure *between* the two upserts, which is narrower than a venue outage by
-    enough to be worth the split; closing it entirely needs one transaction
-    across ``db.candles`` and ``db.funding``, which is a signature change in
-    both and is not done here.
+    the way before it commits either result, and the caller writes settlements
+    before bars so that the one failure it cannot make atomic leaves funding
+    ahead of the candles rather than behind them -- see ``refresh_candles``.
 
     ``None`` rather than 0: nothing was sought for a spot pair or an equity, and
     a zero there would read as a contract that settled nothing.

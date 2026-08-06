@@ -15,9 +15,14 @@ Proposed 2026-08-02 · Base commit: `55a7c0f`
 >   JSON number" — is not followed by the browser's API, deliberately. That rule
 >   protects the *storage* boundary, where a value arrives from the venue as an
 >   exact decimal string and lands in `NUMERIC(38,18)`. Everything on this wire
->   is already float64 and past that boundary: bars come from the float64 frame,
->   markers from vectorbt's own `trades.csv`, and none of it is ever written
->   back. Serialising them as strings and parsing them into JS numbers would
+>   is already float64 and past that boundary: bars come from the float64 frame
+>   and markers from the in-memory `pf.trades.records_readable` of the browser's
+>   own `from_signals` call — nothing is read from a stored `trades.csv`, which
+>   is what `report.py` writes and what the parity test compares against. **No
+>   analysis payload is ever written back**; the one write in the app is
+>   `/api/refresh`, which upserts candles and funding through the existing fetch
+>   path and touches none of this. Serialising them as strings and parsing them
+>   into JS numbers would
 >   round-trip through the same 53-bit mantissa and preserve nothing. Where the
 >   rule does apply it is followed — `storage/signals.py` binds
 >   `Decimal(str(float(x)))` for `target_exposure`, which does cross into a
