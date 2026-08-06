@@ -45,6 +45,45 @@ to ``measurable`` cannot unmeasure a bar the other four had already measured.
 frame in ``tests/test_state_machine_strategy.py`` rather than only in the
 abstract.
 
+**R7c adds a second lifecycle, driven by ``energy`` instead of ``strength``,
+and it is off unless both of its thresholds are set.** R7b measured the axis
+this machine was built on: at H=30, ``strength >= 0.80`` lifts the trend rate
+**−7.63 / +3.32** on BTC and **−1.26 / −2.52** on ETH — negative in three of
+four instrument-halves, including the one R5 selected it on — while
+``energy <= 0.50``, which the lifecycle does not read, lifts **+3.51 / +5.10**
+and **+4.49 / +6.61**, positive in all four (M27). So the hysteresis, the dwell
+and all six states sit on the weaker of the two axes. Setting ``enter_energy``
+and ``exit_energy`` moves them onto the stronger one::
+
+    advancing = (energy <= enter_energy) & (|direction| >= direction_floor)
+    failing   = ~measurable | (energy > exit_energy)
+
+Four things about that, each of which was a choice:
+
+- **Both sides move together, or neither does.** Setting one alone is refused
+  by the constructor. Leaving ``failing`` on ``strength`` would put the
+  hysteresis across two features — the dead band would then be a region of a
+  *plane* with no ordering between its edges, and the "one constant compared
+  twice" argument below would no longer even be expressible.
+- **``exit_energy > enter_energy``, the mirror of ``enter_strength >
+  exit_strength``**, and enforced the same way. The inequality flips because
+  the axis does: entry wants energy *low*, so the failure threshold sits
+  *above* the entry one and the dead band lies between them.
+- **The direction is counterintuitive and is not a sign error.** The machine
+  advances on *quiet* bars. That is §2.1's own worked example — ``Strength =
+  20, Energy = 95`` is "violent two-way chop" — and it reads as *the trend
+  worth riding is the orderly one*.
+- **``direction`` stays and ``strength`` leaves the lifecycle only.**
+  ``direction`` decides side, which energy cannot, and still runs the reversal
+  test. ``strength`` is still read by ``state.policy``, which conditions the
+  target on it; it is the six-state walk it no longer drives.
+
+``energy_ceiling`` keeps its meaning in either mode — it is a further ``AND``
+on ``advancing``, so a machine that sets both thresholds gets their
+intersection rather than one of them silently winning. At the 1.0 default it is
+inert, which is why the energy-first ``advancing`` above is exactly the two
+terms written there.
+
 Three mechanisms the R5 gate names, and what each one prevents:
 
 - **Hysteresis.** ``enter_strength`` gates every step *up* the lifecycle and
@@ -183,6 +222,13 @@ class StateMachine:
     # energy`, so the state called COMPRESSION and the feature called
     # compression remain unrelated.
     energy_ceiling: float = 1.0
+    # R7c's energy-first lifecycle, in the same rank space. ``None`` on both is
+    # the strength-driven machine every published figure was produced by, and
+    # is the only configuration in which ``energy`` does not drive the walk --
+    # which is what makes the default provably inert rather than inert by
+    # inspection. Setting exactly one is refused: see the module docstring.
+    enter_energy: float | None = None
+    exit_energy: float | None = None
     # Rank space, so this is the bottom 15% of trailing stability -- a collapse
     # relative to how cleanly this instrument usually tracks its own trend line,
     # rather than an absolute residual that means different things per market.
@@ -221,6 +267,27 @@ class StateMachine:
                 f"exit_strength ({self.exit_strength}); one constant compared twice "
                 "is exactly the no-dead-band case hysteresis exists to avoid"
             )
+        if (self.enter_energy is None) != (self.exit_energy is None):
+            raise ValueError(
+                "StateMachine enter_energy and exit_energy must be set together "
+                f"or not at all, got {self.enter_energy!r} and {self.exit_energy!r}; "
+                "one side on energy and the other on strength puts the hysteresis "
+                "across two features, which is not a dead band"
+            )
+        if self.energy_first:
+            for name in ("enter_energy", "exit_energy"):
+                value = getattr(self, name)
+                if not 0.0 <= float(value) <= 1.0:
+                    raise ValueError(
+                        f"StateMachine {name} must lie in 0..1, got {value!r}"
+                    )
+            if self.exit_energy <= self.enter_energy:
+                raise ValueError(
+                    f"StateMachine exit_energy ({self.exit_energy}) must exceed "
+                    f"enter_energy ({self.enter_energy}); the inequality is the "
+                    "mirror of enter_strength > exit_strength because the axis is "
+                    "inverted -- entry wants energy low, so failure sits above it"
+                )
         _require_bar_count("min_dwell", self.min_dwell, minimum=1)
         # Zero is a legal cooldown: it means RESET lasts its own single bar.
         _require_bar_count("cooldown", self.cooldown, minimum=0)
@@ -230,6 +297,17 @@ class StateMachine:
         # while ``exhaustion_dwell=0`` reads as an EXHAUSTION that never happens,
         # which is not what it would do.
         _require_bar_count("exhaustion_dwell", self.exhaustion_dwell, minimum=1)
+
+    @property
+    def energy_first(self) -> bool:
+        """Whether ``energy`` drives the lifecycle in place of ``strength``.
+
+        Derived from the thresholds rather than carried as a separate flag, so
+        there is no state in which a machine claims one mode and is configured
+        for the other. ``__post_init__`` has already refused the half-set case
+        by the time anything reads this.
+        """
+        return self.enter_energy is not None
 
     @property
     def convergence_bars(self) -> int:
@@ -279,13 +357,21 @@ class StateMachine:
             & np.isfinite(energy)
         )
         # NaN compares False to everything, so each predicate is already False
-        # on an unmeasurable bar; only ``failing`` wants the opposite.
+        # on an unmeasurable bar; only ``failing`` wants the opposite. That
+        # holds on both axes: ``energy > exit_energy`` is False on a NaN energy
+        # exactly as ``strength < exit_strength`` is on a NaN strength, and
+        # ``~measurable`` is what turns either into a failure.
+        if self.energy_first:
+            entering, leaving = energy <= self.enter_energy, energy > self.exit_energy
+        else:
+            entering = strength >= self.enter_strength
+            leaving = strength < self.exit_strength
         advancing = (
-            (strength >= self.enter_strength)
+            entering
             & (np.abs(direction) >= self.direction_floor)
             & (energy <= self.energy_ceiling)
         )
-        failing = ~measurable | (strength < self.exit_strength)
+        failing = ~measurable | leaving
         unstable = stability < self.stability_floor
         crowded = np.abs(crowding - 0.5) >= self.crowding_extreme
 
