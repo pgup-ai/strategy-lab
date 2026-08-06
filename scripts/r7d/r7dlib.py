@@ -108,18 +108,16 @@ KILL_SWITCH_MIN = R7C.KILL_SWITCH_MIN
 KILL_SWITCH_MAX = R7C.KILL_SWITCH_MAX
 R5_TRAINING_TRADES = R7C.R5_TRAINING_TRADES
 
-# --- the declared grid, in coverage (M29) -------------------------------------
-#
-# Written out here rather than described in prose because a grid stated only in
+# The declared grid, in coverage rather than in feature units (M29). Written out
+# here rather than described in prose because a grid stated only in
 # a progress log cannot be checked against the verdict it produced. Three cells,
 # not six: R9 priced a 54-cell search at DSR 0.70 and the discount scales with
 # the search, so the exit target is tied to the enter target rather than swept.
 ENTER_COVERAGE_TARGETS: tuple[float, ...] = (0.15, 0.21, 0.30)
 EXIT_COVERAGE_MULTIPLE = 2.0
 
-# --- the declared thresholds, as numbers (M23) --------------------------------
-#
-# The verdict horizon, and the two horizons that are declared context and not
+# The declared thresholds, as numbers (M23). The verdict horizon first, then the
+# two horizons that are declared context and not
 # part of any verdict. At H=90 an IC bar would sit inside R7's own noise band;
 # the rate metric is not an IC, but the horizons were declared this way in R7
 # and R7b and moving them now would make the three phases incomparable.
@@ -143,19 +141,18 @@ REFERENCE_LIFTS_PP = {
 }
 REFERENCE_MEAN_PP = 4.93
 
-# M29's own measurement of the gate this phase is matching selectivity against
-# and of R7c's tightest cell: 21.1% and 37.9% of BTC's measurable training bars,
-# which is where the 21% target comes from. Both are re-measured in ``step1``
-# rather than copied out of a document, and both come back different -- 21.76%
-# and 37.22% -- with the direction and size of M29's finding unchanged. See
-# ``step1_lift``'s module docstring.
+# M29's own measurement of the gate this phase matches selectivity against and of
+# R7c's tightest cell: 21.1% / 37.9% of BTC's training bars, which is where the
+# 21% target comes from. Both are re-measured in ``step1`` rather than copied out
+# of a document, and come back 21.76% / 37.22% -- the same bars under the joint
+# ``measurable`` predicate the machine walks rather than a per-column dropna.
+# M29's finding is unchanged in direction and size; see ``step1_lift``'s docstring.
 R5_GATE_COVERAGE = 0.211
 M29_ENERGY_COVERAGE = 0.379
 
 
-# --- the holdout frame ---------------------------------------------------------
-#
-# SOL/USDT perp 4h, whole frame, no split, declared in the plan **as a bar
+# The holdout frame: SOL/USDT perp 4h, whole frame, no split, declared in the
+# plan **as a bar
 # count** so that a refresh which grew the table would fail here rather than
 # quietly evaluate the hypothesis on a different instrument-window than the one
 # pre-registered. The window is pinned by timestamp for the same reason

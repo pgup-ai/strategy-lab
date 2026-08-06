@@ -33,19 +33,22 @@ Four things are fixed here rather than after the fact.
   published lifts, at H=30, on both frames, before any tightened number is read.
 
 **The gate this phase matches selectivity against is re-measured rather than
-copied**, and the re-measurement disagrees with the digits M29 prints. On BTC's
-own 7,150 measurable training bars -- the frame and the set M29 names --
-`strength >= 0.80` covers **21.76%** and `energy <= 0.35` covers **37.22%**,
-against M29's 21.1% and 37.9%. Three things about that, none of which moves an
-R7c or R7d verdict.
+copied**, and it lands on different digits from the ones M29 prints. On BTC's
+own 7,150 measurable training bars, `strength >= 0.80` covers **21.76%** and
+`energy <= 0.35` covers **37.22%**, against M29's 21.1% and 37.9%. Three things
+about that, none of which moves an R7c or R7d verdict.
 
 - The measurement here is the one `require_comparable_windows`' own docstring
   makes: its published 23.8% / 21.6% / 20.9% at `rank_window` 240 / 480 / 960,
   with the energy gate pinned at 37.1%, reproduces here **exactly**, on BTC's
   full measurable frame.
-- M29's pair reproduces on **ETH's** full measurable frame (21.12% / 37.99%),
-  not on BTC's training half, so the likeliest reading is a transcription across
-  frames rather than a moved measurement.
+- M29's pair is BTC's training half after all, under a **different denominator**:
+  dropping each column's own NaNs rather than requiring every input finite gives
+  **21.07% / 37.92%**, which is M29's figures to two decimals. ETH's full
+  measurable frame lands at 21.12% / 37.99%, close enough to look like the
+  source and isn't. The right denominator is the joint one, since that is the
+  set the machine walks -- so the charter carries the correction and this is the
+  measurement it carries.
 - **The direction and the size of M29's finding are unchanged**: the energy grid
   R7c declared was about 1.7x less selective than the gate it replaced (37.2%
   against 21.8%), and 21% remains the coverage of R5's own gate to within a
@@ -90,7 +93,7 @@ def measure(name: str, df, halves) -> dict:
           f"measurable in the frame")
 
     # The gate this phase is matching selectivity against, measured rather than
-    # copied out of M29 -- see the module docstring for where the two disagree.
+    # copied out of M29 -- the docstring says which denominator each figure uses.
     strength_gate = (strength >= R7.TRAINED.enter_strength).to_numpy()
     strength_coverage = R.coverage_of(strength_gate, train)
     r7c_tightest = R.coverage_of((energy <= 0.35).to_numpy(), train)
@@ -173,8 +176,8 @@ def control(frames: dict) -> dict:
     This is the control that gates the phase: the tightened numbers are only
     comparable with the loose one if the loose one reproduces here. The
     selectivity of the gate being replaced is reported beside it as context --
-    see the module docstring for where that disagrees with M29's digits and why
-    it decides nothing.
+    see the module docstring for which denominator M29's digits used and why the
+    difference decides nothing.
     """
     print(f"\n{'-' * 78}\nCONTROL -- before any tightened number is read")
     reference = f"energy <= {R.REFERENCE_CEILING:.2f} (R7b, reference)"

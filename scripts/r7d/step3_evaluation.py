@@ -119,7 +119,6 @@ def main() -> None:
     payload: dict = {"selected_target_coverage": target, "frames": {}}
     root = R.OUT / "evaluation"
 
-    # --- burned frame 1: BTC's test half --------------------------------------
     btc = R7.load_frame()
     df, _ = btc
     split = R7.split_index(df)
@@ -150,7 +149,6 @@ def main() -> None:
         "rows": {label: R.slim(row) for label, row in btc_rows.items()},
     }
 
-    # --- burned frame 2: ETH's full frame --------------------------------------
     eth = R7.load_eth_frame()
     eth_df, _ = eth
     eth_frame, eth_defined = R.machine_inputs(eth_df)
@@ -172,7 +170,6 @@ def main() -> None:
         "rows": {label: R.slim(row) for label, row in eth_rows.items()},
     }
 
-    # --- the holdout -----------------------------------------------------------
     sol = R.load_sol_frame()
     sol_df, _ = sol
     sol_frame, sol_defined = R.machine_inputs(sol_df)
