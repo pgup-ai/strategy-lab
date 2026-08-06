@@ -6,8 +6,9 @@ behavior changes — the README only carries quick-start commands.
 
 Last reviewed: 2026-08-06 — MDE R9 audited the R5 selection (hold the cell, don't re-fit
 it), R7 scored the state machine's states as chop detectors and they clear nothing, and R7b
-gave the machine the `energy` axis it was missing: the gate still fails its declared bar,
-and the reason is that `strength` adds nothing to `energy` rather than the reverse.
+gave the machine the `energy` axis it was missing and R7c put the whole lifecycle on it.
+Neither cleared its bar, but read M29 before concluding the axis is dead: R7c's grid was
+never selectivity-matched to the gate it replaced.
 
 ## At a glance
 
@@ -283,6 +284,17 @@ a rule on, but it is not what the gate passed on.
   before it existed. Do not raise it expecting an improvement: what R7b found was that
   `energy` adds to `strength` while `strength` adds nothing to `energy`, which is an
   argument for a differently-shaped machine rather than for a tighter ceiling on this one.
+- **`enter_energy`/`exit_energy` switch the whole lifecycle onto `energy`, and both are
+  `None` by default.** Set together (the constructor refuses half a lifecycle), they replace
+  `advancing` *and* `failing` so the hysteresis stays on one feature, with
+  `exit_energy > enter_energy` mirroring `enter_strength > exit_strength`. R7c measured this
+  and **it did not produce a tradeable book** — every cell of its grid traded 250–385 round
+  trips against R5's 77, best Sharpe +0.1845 against +1.3778, and −48% to −86% at 3× costs.
+  **But read M29 before concluding the idea is dead**: that grid was declared in `energy`
+  units against a gate declared in `strength` rank units, and its tightest cell still
+  advanced on 37.9% of bars where `strength ≥ 0.80` advances on 21.1% — a matched threshold
+  is ≈0.155, well below anything tested. The mode ships because the axis is worth having
+  wired; the numbers above are not a verdict on it at matched selectivity.
 - **`crowding` needs a `funding_rate` column, and only two of the three paths can supply
   one.** `backtest` and `sweep` attach it on a perp; `replay` cannot — `core.types.Bar`
   carries no funding and `BarBuffer` materializes OHLCV only — so **a replay of a perp
