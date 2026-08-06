@@ -1,7 +1,49 @@
 # Real-time crypto trading framework — Phase 0 design
 
-Status: **proposed, awaiting approval**. No implementation has started.
-Date: 2026-08-02 · Base commit: `55a7c0f`
+Status: **approved. Phase 1a shipped; Phase 1b and Phase 3 have not started.**
+Proposed 2026-08-02 · Base commit: `55a7c0f`
+
+> **This document is the proposal as written, and is not rewritten as work lands.**
+> What actually happened is the charter's §9 progress log. Two parts of the body
+> below have been overtaken by the research and should be read against the
+> charter's 2026-08-05 state-of-play entry before being used as a spec:
+>
+> - **§1's inventory** predates R1's perp backfill and R4–R6; the stored-data
+>   counts, the strategy count, and "`SignalSet` / `Strategy` protocol" as *the*
+>   contract are all stale — there are two contracts now.
+> - **§6's wire convention** — "every price and quantity is a JSON string, not a
+>   JSON number" — is not followed by the browser's API, deliberately. That rule
+>   protects the *storage* boundary, where a value arrives from the venue as an
+>   exact decimal string and lands in `NUMERIC(38,18)`. Everything on this wire
+>   is already float64 and past that boundary: bars come from the float64 frame
+>   and markers from the in-memory `pf.trades.records_readable` of the browser's
+>   own `from_signals` call — nothing is read from a stored `trades.csv`, which
+>   is what `report.py` writes and what the parity test compares against. **No
+>   analysis payload is ever written back**; the one write in the app is
+>   `/api/refresh`, which upserts candles and funding through the existing fetch
+>   path and touches none of this. Serialising them as strings and parsing them
+>   into JS numbers would
+>   round-trip through the same 53-bit mantissa and preserve nothing. Where the
+>   rule does apply it is followed — `storage/signals.py` binds
+>   `Decimal(str(float(x)))` for `target_exposure`, which does cross into a
+>   `NUMERIC` column.
+> - **§3's dependency rule** — "`api` may not import `strategies` or `engine`" —
+>   is not what got built, and could not be. The browser's whole design is to
+>   recompute through the strategy layer so it cannot disagree with a backtest,
+>   which means importing both, including five private engine helpers rather
+>   than repeating the `from_signals` call they wrap. The rule was written for
+>   an API that reads stored results; this one computes them. Deliberate, and
+>   recorded here rather than left to look like drift.
+> - **§2's replay-cost figures contradict this document's own correction.** The
+>   body still reads "5.9 ms versus 6 minutes is a 60,000×"; the quoted
+>   correction above it measured **0.39 s** over the whole history and **~43
+>   minutes** per-bar, so the ratio is **~6,600×**. The conclusion the section
+>   draws is unchanged and correct — replay is for windows, backtest takes the
+>   bulk path — but quote the corrected numbers, not the headline ones.
+> - **§10's Phase 3 dashboard** assumes a chart whose vocabulary is entry and
+>   exit markers. `TargetExposure` emits a continuous level that markers cannot
+>   draw, and the per-bar state and feature values that make the dashboard worth
+>   building are computed on every bar and persisted nowhere.
 
 ---
 

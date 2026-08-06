@@ -87,6 +87,16 @@ def _invoke(tmp_path, *args):
     )
 
 
+def _echoed(result) -> str:
+    """The message typer printed, with its error box taken back off.
+
+    Click wraps a refusal to the terminal width inside ``│`` rules, so a sentence
+    long enough to matter is never contiguous in ``result.output`` and an
+    assertion on it silently degrades to asserting fragments.
+    """
+    return " ".join(result.output.replace("│", " ").split())
+
+
 def _machine(tmp_path, *args):
     return runner.invoke(
         cli.app,
@@ -140,26 +150,46 @@ def test_a_perp_run_charges_funding_by_default(candles, funding, tmp_path):
     assert (report_dir / "funding.csv").exists()
 
 
-def test_a_partial_funding_history_is_refused_by_name(candles, monkeypatch, tmp_path):
-    """One stored settlement satisfies "some funding exists" while charging zero
-    for every other one, so the run would report a net-of-funding number that is
-    almost entirely gross of carry."""
+@pytest.fixture
+def partial_funding(candles, monkeypatch):
+    """Twenty settlements where the window needs hundreds, and the span behind them."""
     index = pd.date_range(
         candles.index[0], candles.index[-1], freq="8h", tz="UTC", name="timestamp"
     )
     stored = pd.DataFrame({"funding_rate": 0.0001}, index=index).iloc[:20]
     monkeypatch.setattr(cli, "load_candles", lambda **kwargs: candles)
+    monkeypatch.setattr("strategy_lab.db.funding.load_funding", lambda **kwargs: stored)
     monkeypatch.setattr(
-        "strategy_lab.db.funding.load_funding", lambda **kwargs: stored
+        "strategy_lab.db.funding.funding_span",
+        lambda **kwargs: (stored.index[0], stored.index[-1]),
     )
+    return stored
 
+
+def test_a_partial_funding_history_is_refused_by_name(partial_funding, tmp_path):
+    """One stored settlement satisfies "some funding exists" while charging zero
+    for every other one, so the run would report a net-of-funding number that is
+    almost entirely gross of carry."""
     result = _invoke(tmp_path, *_PERP)
 
     assert result.exit_code == 2, result.output
-    echoed = " ".join(result.output.split())
+    echoed = _echoed(result)
     assert "does not cover" in echoed
     assert "fetch-funding" in echoed
-    assert str(index[19].date()) in echoed
+    assert str(partial_funding.index[-1].date()) in echoed
+
+
+def test_the_refusal_names_the_window_that_would_work(partial_funding, tmp_path):
+    """The stretches that fail are not enough to act on. BTC's leading funding gap
+    is permanent, so the whole frame is refused and the fix is a start date the
+    message never named -- which is how a reader ends up guessing dates at a
+    chart that will not load."""
+    echoed = _echoed(_invoke(tmp_path, *_PERP))
+
+    assert (
+        f"Stored funding covers {partial_funding.index[0]} -> "
+        f"{partial_funding.index[-1]}." in echoed
+    )
 
 
 def test_no_funding_opts_out_explicitly(candles, funding, tmp_path):

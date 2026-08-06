@@ -17,6 +17,7 @@ from sqlalchemy import text
 from strategy_lab.db.candles import get_engine
 from strategy_lab.db.funding import (
     MAX_FUNDING_ROWS_PER_INSERT,
+    funding_span,
     funding_table,
     load_funding,
     load_open_interest,
@@ -210,6 +211,36 @@ def test_start_and_end_bound_the_returned_window():
     assert len(windowed) == 3
     assert windowed.index.min() == first + pd.Timedelta(hours=8)
     assert windowed.index.max() == first + pd.Timedelta(hours=24)
+
+
+def test_the_span_is_the_edges_of_what_is_stored():
+    start_ms = 1_795_000_000_000
+    upsert_funding(_rows(4, start_ms=start_ms))
+
+    span = funding_span(**IDENTITY)
+
+    first = pd.Timestamp(start_ms, unit="ms", tz="UTC")
+    assert span == (first, first + pd.Timedelta(hours=24))
+
+
+def test_the_span_of_a_contract_with_no_settlements_is_absent_rather_than_empty():
+    """``None`` and "covers nothing" are different claims, and only the first is
+    true of a contract nobody has fetched. A caller that read an empty span as a
+    window would bound a frame to a point in time."""
+    assert funding_span(**{**IDENTITY, "symbol": "TESTNOTHING/USDT"}) is None
+
+
+def test_the_span_is_per_contract_rather_than_per_venue():
+    upsert_funding(_rows(2, start_ms=1_796_000_000_000))
+    upsert_funding(
+        [
+            {**IDENTITY, "symbol": "TESTOTHER/USDT",
+             "funding_time_ms": 1_500_000_000_000,
+             "funding_rate": Decimal("0.0001"), "mark_price": Decimal("60000.5")}
+        ]
+    )
+
+    assert funding_span(**IDENTITY)[0] == pd.Timestamp(1_796_000_000_000, unit="ms", tz="UTC")
 
 
 def test_a_write_larger_than_one_statement_is_chunked():

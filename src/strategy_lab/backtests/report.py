@@ -9,10 +9,54 @@ import pandas as pd
 _ASSET_DIR = Path(__file__).resolve().parent / "assets"
 _LIB_FILENAME = "lightweight-charts-5.2.0.standalone.production.js"
 
-_UP = "#26a69a"
-_DOWN = "#ef5350"
-_UP_DIM = "rgba(38, 166, 154, 0.45)"
-_DOWN_DIM = "rgba(239, 83, 80, 0.45)"
+UP = "#26a69a"
+DOWN = "#ef5350"
+UP_DIM = "rgba(38, 166, 154, 0.45)"
+DOWN_DIM = "rgba(239, 83, 80, 0.45)"
+
+# Palette, reset, header and the chip component: everything that decides what a
+# strategy-lab page *looks* like, as opposed to what this particular page lays
+# out. The research browser inlines it too, so the frozen report and the live
+# view cannot drift into looking like two products. Read the template below for
+# the layout rules that stay here because only the report has that layout.
+SHELL_CSS = """  :root {
+    --bg: #131722; --panel: #1e222d; --border: #2a2e39; --border-soft: #232733;
+    --ink: #d1d4dc; --ink-dim: #787b86; --up: #26a69a; --down: #ef5350;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--bg); color: var(--ink); min-height: 100vh;
+    font: 13px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    font-variant-numeric: tabular-nums;
+  }
+  header {
+    display: flex; align-items: baseline; gap: 14px; flex-wrap: wrap;
+    padding: 14px 20px 10px; border-bottom: 1px solid var(--border);
+  }
+  h1 { font-size: 20px; font-weight: 700; letter-spacing: 0.2px; }
+  .meta { color: var(--ink-dim); font-size: 12px; }
+  .range { margin-left: auto; color: var(--ink-dim); font-size: 12px; }
+  .chips { display: flex; gap: 10px; flex-wrap: wrap; padding: 12px 20px; }
+  .chip {
+    background: var(--panel); border: 1px solid var(--border-soft); border-radius: 6px;
+    padding: 7px 12px; display: flex; flex-direction: column; gap: 2px; min-width: 96px;
+  }
+  .chip-label { color: var(--ink-dim); font-size: 10px; text-transform: uppercase;
+    letter-spacing: 0.7px; }
+  .chip-value { font-size: 15px; font-weight: 600; }
+  .chips .chip.key { border-color: #4a5163; background: #232733; }
+  .up { color: var(--up); } .down { color: var(--down); }"""
+
+
+def chart_library_source() -> str:
+    """The vendored Lightweight Charts build, for any page that inlines it.
+
+    One copy on disk and one reader for it. A second page that shipped its own
+    would be free to drift onto another version, and the whole point of
+    vendoring was that the chart a report draws today it draws in five years.
+    """
+    return (_ASSET_DIR / _LIB_FILENAME).read_text(encoding="utf-8")
+
 
 # A funded run stores no bare path statistic -- each names its curve -- so
 # exactly one of the first two rows renders: the gross key on a funded run, the
@@ -243,7 +287,7 @@ def _build_payload(
         for t, o, h, lo, c in zip(times, opens, highs, lows, closes)
     ]
     volume = [
-        {"time": t, "value": v, "color": _UP_DIM if c >= o else _DOWN_DIM}
+        {"time": t, "value": v, "color": UP_DIM if c >= o else DOWN_DIM}
         for t, v, o, c in zip(times, volumes, opens, closes)
     ]
     equity_points = [
@@ -260,7 +304,7 @@ def _build_payload(
             {
                 "time": entry_time,
                 "position": "belowBar" if is_long else "aboveBar",
-                "color": _UP if is_long else _DOWN,
+                "color": UP if is_long else DOWN,
                 "shape": "arrowUp" if is_long else "arrowDown",
                 "text": f"{entry_side} {_fmt_price(float(trade['Avg Entry Price']))}",
                 "seq": order * 2,
@@ -274,7 +318,7 @@ def _build_payload(
                 {
                     "time": exit_time,
                     "position": "aboveBar" if is_long else "belowBar",
-                    "color": _DOWN if is_long else _UP,
+                    "color": DOWN if is_long else UP,
                     "shape": "arrowDown" if is_long else "arrowUp",
                     "text": f"{exit_side} {_fmt_price(float(trade['Avg Exit Price']))}",
                     "seq": order * 2 + 1,
@@ -303,7 +347,7 @@ def _build_payload(
             "symbol": str(identity.get("symbol", "")),
             "timeframe": str(identity.get("timeframe", "")),
         },
-        "colors": {"upDim": _UP_DIM, "downDim": _DOWN_DIM},
+        "colors": {"upDim": UP_DIM, "downDim": DOWN_DIM},
     }
 
 
@@ -405,12 +449,13 @@ def render_report_html(
         allow_nan=False,
     ).replace("</", "<\\/")
 
-    lib_source = (_ASSET_DIR / _LIB_FILENAME).read_text(encoding="utf-8")
+    lib_source = chart_library_source()
 
     page = (
         _TEMPLATE.replace("__SYMBOL__", escape(symbol))
         .replace("__META__", escape(" · ".join(str(b) for b in meta_bits if b)))
         .replace("__RANGE__", escape(date_range))
+        .replace("__SHELL_CSS__", SHELL_CSS)
         .replace("__CHIPS__", _stat_chips(stats))
         .replace("__COSTS__", _cost_section(costs, stats))
         .replace("__ROWS__", _trade_rows(trades))
@@ -426,33 +471,7 @@ _TEMPLATE = """<!DOCTYPE html>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>__SYMBOL__ · strategy-lab</title>
 <style>
-  :root {
-    --bg: #131722; --panel: #1e222d; --border: #2a2e39; --border-soft: #232733;
-    --ink: #d1d4dc; --ink-dim: #787b86; --up: #26a69a; --down: #ef5350;
-  }
-  * { box-sizing: border-box; margin: 0; padding: 0; }
-  body {
-    background: var(--bg); color: var(--ink); min-height: 100vh;
-    font: 13px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-    font-variant-numeric: tabular-nums;
-  }
-  header {
-    display: flex; align-items: baseline; gap: 14px; flex-wrap: wrap;
-    padding: 14px 20px 10px; border-bottom: 1px solid var(--border);
-  }
-  h1 { font-size: 20px; font-weight: 700; letter-spacing: 0.2px; }
-  .meta { color: var(--ink-dim); font-size: 12px; }
-  .range { margin-left: auto; color: var(--ink-dim); font-size: 12px; }
-  .chips { display: flex; gap: 10px; flex-wrap: wrap; padding: 12px 20px; }
-  .chip {
-    background: var(--panel); border: 1px solid var(--border-soft); border-radius: 6px;
-    padding: 7px 12px; display: flex; flex-direction: column; gap: 2px; min-width: 96px;
-  }
-  .chip-label { color: var(--ink-dim); font-size: 10px; text-transform: uppercase;
-    letter-spacing: 0.7px; }
-  .chip-value { font-size: 15px; font-weight: 600; }
-  .chips .chip.key { border-color: #4a5163; background: #232733; }
-  .up { color: var(--up); } .down { color: var(--down); }
+__SHELL_CSS__
   .charts { padding: 0 20px; }
   .pane {
     position: relative; border: 1px solid var(--border-soft); border-radius: 8px;

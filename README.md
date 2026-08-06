@@ -29,6 +29,8 @@ strategy-lab/
     feeds/           # MarketDataFeed protocol and the Postgres replay feed
     engine/          # event-driven runners, bar buffers, market clock
     features/        # cross-sectional reads over a market snapshot
+    api/             # the research browser's read-only endpoints
+    browser/         # the research browser's one page
     cli.py
 ```
 
@@ -446,20 +448,59 @@ inside `strength`'s top tercile. See
 [§9.1 of the charter](docs/research/2026-08-03-market-dynamics-engine.md#91-r4-feature-diagnostics--btcusdt-perp-4h)
 for the full table and the keep/cut calls.
 
-## Live Report Serving
+## Two ways to look at a strategy
 
-Reports are static files, but `strategy-lab serve` adds a delayed live feed:
+They are different things and the difference is the point.
+
+**`serve` — the frozen record.** A backtest wrote a dated directory under
+`reports/`; its `plot.html` re-renders byte-identically from the run that froze
+it. That is the reproducibility boundary for comparing strategy changes, and
+`serve` is how you read one:
 
 ```bash
 strategy-lab serve --port 8750
 ```
 
-Open a report through the server (`http://127.0.0.1:8750/<report-dir>/plot.html`) and a
-"delayed" pill appears in the header: the page polls `/api/candles` every 60 seconds,
-which re-fetches the latest bars from the upstream source (Yahoo Finance or ccxt),
-upserts them into Postgres, and streams them onto the chart — including the current
-forming bar. Click the pill to refresh immediately. The same file opened directly from
-disk stays fully static.
+Reports are static files, but the server adds a delayed live feed. Open one
+through it (`http://127.0.0.1:8750/<report-dir>/plot.html`) and a "delayed" pill
+appears in the header: the page polls `/api/candles` every 60 seconds, which
+re-fetches the latest bars from the upstream source (Yahoo Finance or ccxt),
+upserts them into Postgres, and streams them onto the chart — including the
+current forming bar. On a perp it fetches the funding settlements over the same
+window too, so the candle history cannot outrun the funding history into a
+coverage refusal. Click the pill to refresh immediately. The same file opened
+directly from disk stays fully static.
+
+**`browse` — the live view.** Any registered strategy over any stored candle set,
+recomputed per request and **persisted nowhere**:
+
+```bash
+strategy-lab browse --port 8760      # loopback only; a routable host is refused
+```
+
+Signals are computed by the same whole-history `generate_signals(df)` call
+`run_backtest` makes over the same stored candles — never read from the `signals`
+table and never from the event path — so the browser cannot disagree with a
+backtest. What it draws depends on the contract: a `SignalSet` strategy gets
+candlesticks and arrows at every **fill** (not every signal — `from_signals`
+ignores a repeated same-direction entry, so signals would mark bars no backtest
+traded), and a `TargetExposure` strategy gets a baseline pane carrying the signed
+−1…+1 target, which no arrow can express.
+
+Hover or click any bar and the panel below shows the state and feature values
+behind it; a strategy with no feature frame says so rather than showing an empty
+one. A provenance strip is on screen at all times — `crowding_measured`, the exit
+mode, warmup, the cost model, the strategy version and the frame's bounds —
+because a perp whose funding column went missing is a different run from one
+whose did not, and that is exactly how a published figure moved once without
+anyone noticing.
+
+Nothing on this path writes to `reports/` or to `signals`; the only writes it can
+make are behind the refresh button, which is `serve`'s existing fetch path called
+rather than copied — candles for the identity, plus the funding settlements on a
+perp. The response reports both counts, because a refresh that moved three
+candles and no settlements is the drift that ends with the coverage guard
+refusing the dataset you were just looking at.
 
 ## Strategies
 
