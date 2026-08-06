@@ -66,7 +66,14 @@ def refresh_candles(identity: MarketDataIdentity, after: int | None) -> dict:
         milliseconds=bar_ms * REFRESH_LOOKBACK_BARS
     )
 
+    # Both fetches before either write. Storing candles first and then fetching
+    # funding meant a venue outage on the funding call left the bars committed
+    # and the settlements behind them -- the exact drift the invariant above
+    # exists to prevent, reported as a 502 rather than avoided by it. Failing
+    # before anything is written leaves the pair where it was.
     fetched = _fetch_recent(identity, lookback_start)
+    pending_funding = _fetch_funding(identity, lookback_start)
+
     candles = 0
     if not fetched.empty:
         source = "yahoo" if _is_equity(identity) else identity.exchange
@@ -81,7 +88,14 @@ def refresh_candles(identity: MarketDataIdentity, after: int | None) -> dict:
             )
         )
 
-    settlements = _refresh_funding(identity, lookback_start)
+    settlements = None
+    if pending_funding is not None:
+        # Imported at the call site, as `_fetch_funding` imports its own client:
+        # binding it at module scope moves the name out from under the tests that
+        # patch it, and the first thing that happens then is a live insert.
+        from strategy_lab.db.funding import upsert_funding
+
+        settlements = upsert_funding(pending_funding)
 
     if after is not None:
         start = datetime.fromtimestamp(after, UTC).isoformat()
@@ -101,8 +115,15 @@ def refresh_candles(identity: MarketDataIdentity, after: int | None) -> dict:
     }
 
 
-def _refresh_funding(identity: MarketDataIdentity, lookback_start: datetime) -> int | None:
-    """Top up stored funding for a perp. ``None`` on anything else.
+def _fetch_funding(identity: MarketDataIdentity, lookback_start: datetime):
+    """Settlements to store for a perp, unwritten. ``None`` on anything else.
+
+    Fetching and writing are separate so the caller can get both networks out of
+    the way before it commits either result. The residual window is a database
+    failure *between* the two upserts, which is narrower than a venue outage by
+    enough to be worth the split; closing it entirely needs one transaction
+    across ``db.candles`` and ``db.funding``, which is a signature change in
+    both and is not done here.
 
     ``None`` rather than 0: nothing was sought for a spot pair or an equity, and
     a zero there would read as a contract that settled nothing.
@@ -128,7 +149,7 @@ def _refresh_funding(identity: MarketDataIdentity, lookback_start: datetime) -> 
     if identity.market_type != "perp":
         return None
 
-    from strategy_lab.db.funding import funding_span, upsert_funding
+    from strategy_lab.db.funding import funding_span
     from strategy_lab.market_data.binance_futures import (
         SUPPORTED_PERP_EXCHANGES,
         BinanceFuturesClient,
@@ -152,7 +173,7 @@ def _refresh_funding(identity: MarketDataIdentity, lookback_start: datetime) -> 
     )
     since = lookback_start if span is None else min(lookback_start, span[1].to_pydatetime())
     client = BinanceFuturesClient(exchange=identity.exchange, market_type=identity.market_type)
-    return upsert_funding(client.fetch_funding(identity.symbol, since=since.isoformat()))
+    return client.fetch_funding(identity.symbol, since=since.isoformat())
 
 
 def _is_equity(identity: MarketDataIdentity) -> bool:

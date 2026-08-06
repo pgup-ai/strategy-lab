@@ -16,6 +16,7 @@ import pandas as pd
 import pytest
 
 from strategy_lab.market_data.base import MarketDataIdentity
+from strategy_lab import server
 from strategy_lab.server import build_candles_payload, parse_identity, refresh_candles
 
 _PERP = MarketDataIdentity(
@@ -246,3 +247,35 @@ def test_the_lookback_is_the_timeframe_rather_than_a_fixed_span(refresh):
 
     since = datetime.fromisoformat(calls[-1]["since"])
     assert since < datetime.now(UTC) - timedelta(days=28)
+
+
+def test_a_funding_outage_leaves_the_candles_where_they_were(monkeypatch):
+    """The invariant is that the pair moves together, not that a 502 reports it.
+
+    Candles were upserted before funding was even fetched, so a venue outage on
+    the funding call committed the bars and left the settlements behind -- the
+    exact drift ``CLAUDE.md`` says a refresh exists to prevent, arrived at
+    through the code that prevents it. Both fetches now precede both writes, so
+    the failure lands before anything is stored.
+    """
+    written: list[str] = []
+    monkeypatch.setattr(
+        server, "_fetch_recent", lambda identity, start: _frame()
+    )
+    monkeypatch.setattr(
+        server, "upsert_candles", lambda frame: written.append("candles") or 1
+    )
+    monkeypatch.setattr(
+        "strategy_lab.db.funding.upsert_funding",
+        lambda frame: written.append("funding") or 1,
+    )
+
+    def outage(identity, lookback_start):
+        raise RuntimeError("funding endpoint is down")
+
+    monkeypatch.setattr(server, "_fetch_funding", outage)
+
+    with pytest.raises(RuntimeError, match="funding endpoint is down"):
+        server.refresh_candles(_PERP, after=None)
+
+    assert written == [], f"a failed funding fetch still wrote {written}"

@@ -11,6 +11,17 @@ Proposed 2026-08-02 · Base commit: `55a7c0f`
 > - **§1's inventory** predates R1's perp backfill and R4–R6; the stored-data
 >   counts, the strategy count, and "`SignalSet` / `Strategy` protocol" as *the*
 >   contract are all stale — there are two contracts now.
+> - **§6's wire convention** — "every price and quantity is a JSON string, not a
+>   JSON number" — is not followed by the browser's API, deliberately. That rule
+>   protects the *storage* boundary, where a value arrives from the venue as an
+>   exact decimal string and lands in `NUMERIC(38,18)`. Everything on this wire
+>   is already float64 and past that boundary: bars come from the float64 frame,
+>   markers from vectorbt's own `trades.csv`, and none of it is ever written
+>   back. Serialising them as strings and parsing them into JS numbers would
+>   round-trip through the same 53-bit mantissa and preserve nothing. Where the
+>   rule does apply it is followed — `storage/signals.py` binds
+>   `Decimal(str(float(x)))` for `target_exposure`, which does cross into a
+>   `NUMERIC` column.
 > - **§3's dependency rule** — "`api` may not import `strategies` or `engine`" —
 >   is not what got built, and could not be. The browser's whole design is to
 >   recompute through the strategy layer so it cannot disagree with a backtest,
