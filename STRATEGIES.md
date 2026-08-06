@@ -4,8 +4,9 @@ Source of truth for what each strategy does, how it is meant to be run, and what
 about its behavior. Update this file whenever strategy logic, parameters, or engine exit
 behavior changes — the README only carries quick-start commands.
 
-Last reviewed: 2026-08-05 — the ETH replication of the MDE R5/R6 protocol, then the fix that
-made `backtest` and `sweep` attach the `funding_rate` column their perp runs already load.
+Last reviewed: 2026-08-06 — MDE R9 audited the R5 selection: the cell survives out of
+sample, re-deriving it on a schedule does not, and `enter_strength` is a ridge whose
+neighbour looks identical on return alone.
 
 ## At a glance
 
@@ -19,7 +20,7 @@ made `backtest` and `sweep` attach the `funding_rate` column their perp runs alr
 | `ema_cross` | long + short | any (MDE R0 baseline) | EMA48 vs EMA192 | none | engine | flat | R0 baseline |
 | `donchian` | long + short | any (MDE R0 baseline) | close breaks the 96-bar channel | none | strategy (48-bar reverse channel) | flat | R0 baseline |
 | `multi_horizon` | long + short | any (MDE R0 baseline) | sign of a 24/48/96/192 vol-normalized blend | none | engine | flat | R0 baseline |
-| `state_machine_v1` | long + short | crypto perp 4h (MDE R5) | side of the state machine's target risk | the state machine itself | strategy (target side change) | per-state target, entry only | R5 gate passed out of sample |
+| `state_machine_v1` | long + short | crypto perp 4h (MDE R5) | side of the state machine's target risk | the state machine itself | strategy (target side change) | per-state target, entry only | R5 gate passed out of sample; R9-audited — hold the cell, don't re-fit it |
 | `state_machine_v2` | long + short | crypto perp 4h (MDE R6) | the state machine's target risk itself, as a level | the state machine itself | strategy (the target reaching 0.0) | per-state target, **every bar** | R6 — the continuous contract, measured against v1 |
 
 \* Status is inferred from report history — correct these labels as research priorities change.
@@ -354,6 +355,21 @@ a rule on, but it is not what the gate passed on.
   `enter_strength` and `exit_strength` and disagrees on both timing axes (`min_dwell` and
   `cooldown` 4 → 8). Full tables in
   [the charter §9.4](docs/research/2026-08-03-market-dynamics-engine.md#94-eth-replication-of-the-r5r6-protocol--ethusdt-perp-4h).
+- **R9 audited the R5 selection, and three of its findings change how this strategy is
+  run.** (1) **Do not re-fit the cell on a schedule.** Nine walk-forward folds re-deriving
+  the winner from the same 54 scored 6/9 positive and +18.39% compounded, against **7/9 and
+  +31.38%** for the pinned R5 cell held unchanged — and re-derivation lost in **all five**
+  folds where it picked a different book. `enter_strength=0.80` won all nine folds; the
+  other three axes moved and cost money by moving. (2) **`enter_strength` is a ridge, and
+  net return will not tell you.** One step down to ⅔ lands on the same test-half return to
+  two decimals (+15.4489% against +15.4543%) at **1.8× the drawdown, 2.3× the turnover, and
+  −8.59% at 3× costs against +6.41%**. Read the cost-stress row, not the headline. (3)
+  **`direction` and `strength` are structural gates**: neutralise either and `advancing`
+  never fires, so the machine sits in `COMPRESSION` for the whole frame and trades **zero**
+  times. `stability` is the only component that looks *worse* in sample than out. Full
+  tables in
+  [the charter §9.5](docs/research/2026-08-03-market-dynamics-engine.md#95-r9-walk-forward-and-robustness--btcusdt-perp-4h);
+  the harness is `scripts/r9/`.
 
 ---
 
