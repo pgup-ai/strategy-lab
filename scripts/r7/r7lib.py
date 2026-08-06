@@ -304,6 +304,13 @@ def persistence_row(verdict: pd.Series, halves: Halves, which: str) -> dict:
     mask = halves.mask(verdict.index, which)
     sliced = verdict[mask]
     lengths = run_lengths(sliced)
+    # Over the bars that carry a verdict, never over the whole slice. A warmup
+    # bar is NaN here, and counting it as "not in this state" put the trained
+    # machine's training-half COMPRESSION share at 63.5% against the 83.3%
+    # ``rate_table`` measures on the same bars -- the warmup is a fifth of that
+    # half. ``rate_table`` already pairs on defined rows, which is why the two
+    # disagreed and why its number is the one the charter quotes.
+    defined = sliced.dropna()
     return {
         "runs": int(len(lengths)),
         "median_run": float(np.median(lengths)) if len(lengths) else float("nan"),
@@ -311,7 +318,8 @@ def persistence_row(verdict: pd.Series, halves: Halves, which: str) -> dict:
         "p25_run": float(np.percentile(lengths, 25)) if len(lengths) else float("nan"),
         "p75_run": float(np.percentile(lengths, 75)) if len(lengths) else float("nan"),
         "max_run": float(lengths.max()) if len(lengths) else float("nan"),
-        "share_of_bars": float(sliced.fillna(0.0).mean()),
+        "share_of_bars": float(defined.mean()) if len(defined) else float("nan"),
+        "measurable_bars": len(defined),
         "ac1": lag1_autocorrelation(sliced),
     }
 

@@ -257,9 +257,14 @@ def main() -> None:
           "sigma is; measured:")
     print(f"{'sigma':>8} " + " ".join(f"{f'median ER H={h}':>17}" for h in R.HORIZONS))
     scale_rows = {}
-    for sigma in (0.002, 0.01, 0.05):
+    # An independent path per sigma, not one path rescaled. Reusing a single
+    # draw holds the walk's own shape fixed and leaves the spread measuring only
+    # the exponential's residual -- 0.0015 against the 0.0048 three independent
+    # walks give. Both clear the bar, so the conclusion is unchanged; this is the
+    # version that supports the sentence printed above it.
+    for index, sigma in enumerate((0.002, 0.01, 0.05)):
         walk = pd.Series(100.0 * np.exp(np.cumsum(
-            np.random.default_rng(99).normal(0.0, sigma, 60_000)
+            np.random.default_rng(99 + index).normal(0.0, sigma, 60_000)
         )))
         medians = [float(R.forward_er(walk, horizon=h).median()) for h in R.HORIZONS]
         scale_rows[sigma] = medians

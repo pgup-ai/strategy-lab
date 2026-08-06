@@ -84,19 +84,33 @@ def main() -> None:
     composite_clears = any(composite["verdicts"].values())
     extension_clears = any(extension["verdicts"].values())
 
+    # Row 1 is declared as "something clears AND beats COMPRESSION", so a
+    # clearing feature is not on its own enough for it. The table states no row
+    # for a feature clearing while COMPRESSION also clears, and declares no way
+    # to compare an IC against a lift in pp -- so that case gets no row rather
+    # than being folded into the nearest one, which is M23's gap again. It
+    # cannot arise here: nothing cleared either threshold.
     if any_feature and incumbent_clears and composite_clears:
         row = 4
-    elif any_feature:
+    elif any_feature and not incumbent_clears:
         row = 1
+    elif any_feature:
+        row = None
     elif incumbent_clears:
         row = 2
     else:
         row = 3
 
     print("\n" + "=" * 78)
-    title, reading = OUTCOMES[row]
-    print(f"OUTCOME ROW {row}: {title}")
-    print(f"  {reading}")
+    if row is None:
+        print("NO DECLARED ROW: a feature and COMPRESSION both clear")
+        print("  the outcome table does not cover this, and declares no "
+              "commensurable comparison")
+        print("  between an IC and a lift in pp. Reported, not resolved.")
+    else:
+        title, reading = OUTCOMES[row]
+        print(f"OUTCOME ROW {row}: {title}")
+        print(f"  {reading}")
     print("=" * 78)
     print("\nThe extension result is separate from the outcome table -- the plan "
           "declares it as its")

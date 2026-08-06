@@ -80,10 +80,13 @@ def main() -> None:
               f"{row['trades']:>7} {stress:>+11.2f}")
     shutil.rmtree(root, ignore_errors=True)
 
-    control = rows[0]
+    control_sharpe = rows[0]["sharpe_tradeable"]
     print(f"\nCONTROL: the trained cell's M21 scalar is "
-          f"{control['sharpe_tradeable']:+.4f}; R9 published +{R.ENTER_STRENGTH_BAR:.4f}")
-    control_ok = abs(control["sharpe_tradeable"] - R.ENTER_STRENGTH_BAR) <= 5e-4
+          f"{_sharpe(control_sharpe)}; R9 published +{R.ENTER_STRENGTH_BAR:.4f}")
+    control_ok = (
+        control_sharpe is not None
+        and abs(control_sharpe - R.ENTER_STRENGTH_BAR) <= 5e-4
+    )
     print(f"  {R.mark(control_ok)}  the extension is scored on the same rule R9 "
           f"scored the incumbent on")
 
