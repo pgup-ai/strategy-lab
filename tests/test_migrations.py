@@ -171,6 +171,10 @@ def test_rerunning_migrations_does_not_block_a_writer_of_signals():
         # LOCK rather than a real INSERT: `signals` is append-only and the row
         # would outlive the test. The lock is what an INSERT would hold anyway.
         writer.execute(text("LOCK TABLE signals IN ROW EXCLUSIVE MODE"))
+        # Returning is the assertion, and it is a claim about the whole list
+        # rather than about how far the run got. Measured by reverting both
+        # guards to the bare statement: LockNotAvailable, naming
+        # `ix_signals_lookup` as the one that waited.
         run_migrations(impatient)
 
 
