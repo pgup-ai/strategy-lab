@@ -50,6 +50,7 @@ from strategy_lab.market_data.base import MarketDataIdentity
 from strategy_lab.state.machine import StateMachine
 from strategy_lab.strategies.donchian import Donchian
 from strategy_lab.strategies.registry import get_strategy
+from tests.test_sweep import R0_DONCHIAN_GRID
 
 pytestmark = pytest.mark.db
 
@@ -88,9 +89,11 @@ TRAINED_MACHINE = StateMachine(
 # existed. One hypothesis, zero search, and therefore the version of the claim
 # that carries no selection discount.
 DEFAULT_MACHINE = StateMachine()
-# The best cell of the R0 gate's 16-cell donchian surface on that same first
-# 60%, at Sharpe +1.462 -- so the baseline is not being handed a configuration
-# the machine's own selection rule would have rejected.
+# The best cell of the R0 gate's donchian surface on that same first 60%, at
+# Sharpe +1.462 -- so the baseline is not being handed a configuration the
+# machine's own selection rule would have rejected. That surface is pinned as
+# ``R0_DONCHIAN_GRID`` and this cell is checked against it below; which cell of
+# it wins on the training half is not re-derived here, unlike the machine's own.
 BASELINE = Donchian(entry_span=40, exit_span=10)
 
 
@@ -273,6 +276,22 @@ def test_the_pinned_machine_is_what_the_training_half_selects(training_surface):
     )
     runner_up = sorted(run["sharpe"] for _, run in training_surface)[-2]
     assert best["sharpe"] > runner_up, "the top two cells tie, so the selection is arbitrary"
+
+
+def test_the_baseline_is_a_cell_of_the_pinned_r0_surface():
+    """"Beats the R0 baseline" is a claim about a cell of a specific grid.
+
+    A ``BASELINE`` outside that grid would still run, still lose to the machine,
+    and still read as a passing gate -- while the sentence the gate is named for
+    had quietly stopped being true. Membership is the half of the claim that is
+    cheap to check; which cell of the grid wins the training half is not
+    re-derived here.
+    """
+    assert BASELINE.entry_span in R0_DONCHIAN_GRID["entry_span"]
+    assert BASELINE.exit_span in R0_DONCHIAN_GRID["exit_span"]
+    # The Turtle configuration: above the diagonal `exit_span` is inert, so a
+    # baseline there would be one of the surface's duplicate books.
+    assert BASELINE.exit_span < BASELINE.entry_span
 
 
 def test_both_sides_trade_the_same_out_of_sample_bars(machine_run, default_run, baseline_run):

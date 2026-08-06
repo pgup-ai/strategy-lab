@@ -4,8 +4,10 @@ Source of truth for what each strategy does, how it is meant to be run, and what
 about its behavior. Update this file whenever strategy logic, parameters, or engine exit
 behavior changes — the README only carries quick-start commands.
 
-Last reviewed: 2026-08-05 — the ETH replication of the MDE R5/R6 protocol, then the fix that
-made `backtest` and `sweep` attach the `funding_rate` column their perp runs already load.
+Last reviewed: 2026-08-06 — MDE R9 audited the R5 selection (hold the cell, don't re-fit
+it), then R7 scored the state machine's states as chop detectors and they clear nothing:
+its entry gate is one feature, and the feature that does carry chop information is one the
+machine does not read.
 
 ## At a glance
 
@@ -19,7 +21,7 @@ made `backtest` and `sweep` attach the `funding_rate` column their perp runs alr
 | `ema_cross` | long + short | any (MDE R0 baseline) | EMA48 vs EMA192 | none | engine | flat | R0 baseline |
 | `donchian` | long + short | any (MDE R0 baseline) | close breaks the 96-bar channel | none | strategy (48-bar reverse channel) | flat | R0 baseline |
 | `multi_horizon` | long + short | any (MDE R0 baseline) | sign of a 24/48/96/192 vol-normalized blend | none | engine | flat | R0 baseline |
-| `state_machine_v1` | long + short | crypto perp 4h (MDE R5) | side of the state machine's target risk | the state machine itself | strategy (target side change) | per-state target, entry only | R5 gate passed out of sample |
+| `state_machine_v1` | long + short | crypto perp 4h (MDE R5) | side of the state machine's target risk | the state machine itself | strategy (target side change) | per-state target, entry only | R5 gate passed out of sample; R9-audited — hold the cell, don't re-fit it |
 | `state_machine_v2` | long + short | crypto perp 4h (MDE R6) | the state machine's target risk itself, as a level | the state machine itself | strategy (the target reaching 0.0) | per-state target, **every bar** | R6 — the continuous contract, measured against v1 |
 
 \* Status is inferred from report history — correct these labels as research priorities change.
@@ -205,6 +207,10 @@ rather than round-tripped.
   modelled on — is a live parameter. With `--no-allow-shorts` there is no reversal to
   outrank the exit and the channel matters again. Pinned by
   `tests/test_sweep.py::test_donchians_exit_channel_is_inert_once_it_is_no_narrower_than_the_entry`.
+  What it costs the published R0 surface is pinned beside it, off that file's
+  `R0_DONCHIAN_GRID`: five of the gate's sixteen cells fall into two duplicate groups, so
+  it holds **13 distinct books** and "16/16 cells positive" counts three of them twice.
+  Sweep only the lower triangle.
 
 ## multi_horizon
 
@@ -350,6 +356,39 @@ a rule on, but it is not what the gate passed on.
   `enter_strength` and `exit_strength` and disagrees on both timing axes (`min_dwell` and
   `cooldown` 4 → 8). Full tables in
   [the charter §9.4](docs/research/2026-08-03-market-dynamics-engine.md#94-eth-replication-of-the-r5r6-protocol--ethusdt-perp-4h).
+- **R9 audited the R5 selection, and three of its findings change how this strategy is
+  run.** (1) **Do not re-fit the cell on a schedule.** Nine walk-forward folds re-deriving
+  the winner from the same 54 scored 6/9 positive and +18.39% compounded, against **7/9 and
+  +31.38%** for the pinned R5 cell held unchanged — and re-derivation lost in **all five**
+  folds where it picked a different book. `enter_strength=0.80` won all nine folds; the
+  other three axes moved and cost money by moving. (2) **`enter_strength` is a ridge, and
+  net return will not tell you.** One step down to ⅔ lands on the same test-half return to
+  two decimals (+15.4489% against +15.4543%) at **1.8× the drawdown, 2.3× the turnover, and
+  −8.59% at 3× costs against +6.41%**. Read the cost-stress row, not the headline. (3)
+  **`direction` and `strength` are structural gates**: neutralise either and `advancing`
+  never fires, so the machine sits in `COMPRESSION` for the whole frame and trades **zero**
+  times. `stability` is the only component that looks *worse* in sample than out. Full
+  tables in
+  [the charter §9.5](docs/research/2026-08-03-market-dynamics-engine.md#95-r9-walk-forward-and-robustness--btcusdt-perp-4h);
+  the harness is `scripts/r9/`.
+- **R7 scored the machine's states as chop detectors, and they are not.** Against
+  thresholds declared before the data was seen, `COMPRESSION` clears **0/6** on BTC and
+  **0/9** on ETH — best deficit −1.79 pp against a −10 pp bar, and the inside-vs-outside
+  separation flips sign between halves. Two consequences for anyone reading or changing
+  this strategy. (1) **The entry gate is one feature, not two.** The composite
+  `strength ≥ enter_strength AND |direction| ≥ direction_floor` beats the `strength` gate
+  alone by **+0.00 pp** on the test half at every horizon, because `direction_floor = 0.10`
+  admits 82% of bars — and R5 never swept it, so its "trained" value is just the dataclass
+  default. (2) **`energy`/`compression` carries the chop information and this strategy does
+  not read it**: `DEFAULT_FEATURES` is `(direction, strength, stability, crowding)`, while
+  `energy` scores −0.0906 on BTC and **−0.1521 on ETH** against the forward efficiency
+  ratio, both halves agreeing. Beware the naming — the *state* `COMPRESSION` and the
+  *feature* `compression` are unrelated, and the chop side is **high `energy`**, not high
+  `compression`. Separately, `enter_strength = 0.80` is confirmed an **interior** optimum:
+  extending to {0.85, 0.90, 0.95} gives +0.5002 / +0.5577 / −0.7497 against +1.3974. Full
+  tables in
+  [the charter §9.6](docs/research/2026-08-03-market-dynamics-engine.md#96-r7-choptrend-state-diagnosis--btcusdt-perp-4h-replicated-on-eth);
+  the harness is `scripts/r7/`.
 
 ---
 
