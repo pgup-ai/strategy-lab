@@ -158,6 +158,43 @@ def forward_return(close: pd.Series, *, horizon: int) -> pd.Series:
     return exit_price / entry - 1.0
 
 
+def forward_efficiency_ratio(close: pd.Series, *, horizon: int) -> pd.Series:
+    """How *directional* the next ``horizon`` bars are, 0..1, from bar ``t+1``.
+
+    Net displacement over the window divided by the distance price travelled to
+    achieve it::
+
+        ER[t, H] = |close[t+1+H] - close[t+1]| / sum(|close[i] - close[i-1]|)
+
+    over ``i`` in ``(t+1, t+1+H]``. Near 1 is a clean one-way move; near 0 is a
+    long path to nowhere, which is what "chop" names. It is the forward twin of
+    :class:`features.trend.Strength`, which is the same ratio over the window
+    that has already happened.
+
+    **Anchored at ``close[t+1]``, exactly as :func:`forward_return` is, and here
+    the anchor matters twice over.** ``close[t]`` appears in neither the
+    numerator nor the path sum, so a feature that is a function of bar *t*'s
+    print -- which every feature in this package is -- cannot be paid by its own
+    target through either term. Anchoring at *t* would put it in both.
+
+    A window over which price never moved has ``0 / 0``: no displacement and no
+    distance is not zero efficiency, it is no measurement, and is ``NaN`` rather
+    than a 0.0 that would read as perfect chop. The last ``horizon + 1`` bars
+    have no complete forward window and are ``NaN`` on the same rule
+    :func:`forward_return` uses.
+    """
+    if horizon < 1:
+        raise ValueError(f"horizon must be at least 1 bar, got {horizon}")
+    entry = close.shift(-1)
+    exit_price = close.shift(-(horizon + 1))
+    # ``rolling(horizon)`` over the absolute steps ends on bar t+1+H and reaches
+    # back to the step into t+2, which is the sum over (t+1, t+1+H] once shifted
+    # onto bar t.
+    path = close.diff().abs().rolling(horizon).sum().shift(-(horizon + 1))
+    ratio = (exit_price - entry).abs() / path
+    return ratio.where(path != 0.0)
+
+
 def information_coefficient(values: pd.Series, forward: pd.Series) -> float:
     """Spearman rank correlation between a feature and a forward return.
 

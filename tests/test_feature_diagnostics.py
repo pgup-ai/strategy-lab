@@ -33,6 +33,7 @@ from strategy_lab.features.diagnostics import (
     FeatureDiagnostic,
     diagnose,
     diagnose_features,
+    forward_efficiency_ratio,
     forward_return,
     information_coefficient,
     to_record,
@@ -151,6 +152,47 @@ def test_forward_return_starts_one_bar_after_the_feature_s_own_bar():
 def test_a_non_positive_horizon_is_refused():
     with pytest.raises(ValueError, match="horizon"):
         forward_return(pd.Series([1.0, 2.0, 3.0]), horizon=0)
+    with pytest.raises(ValueError, match="horizon"):
+        forward_efficiency_ratio(pd.Series([1.0, 2.0, 3.0]), horizon=0)
+
+
+def test_forward_efficiency_ratio_is_net_displacement_over_distance_travelled():
+    close = pd.Series([100.0, 101.0, 103.0, 102.0, 105.0, 104.0, 108.0])
+    # t=0: entry close[1]=101, exit close[4]=105. Path over (t+1, t+1+H] is
+    # |103-101| + |102-103| + |105-102| = 6, and |105-101| = 4.
+    assert forward_efficiency_ratio(close, horizon=3).iloc[0] == pytest.approx(4.0 / 6.0)
+    # t=1: entry 103, exit 104; path 1 + 3 + 1 = 5, displacement 1.
+    assert forward_efficiency_ratio(close, horizon=3).iloc[1] == pytest.approx(1.0 / 5.0)
+
+
+def test_forward_efficiency_ratio_never_reads_the_feature_s_own_bar():
+    """The poison probe, on the target rather than on a feature.
+
+    ``close[t]`` appears in neither the numerator nor the path sum, so replacing
+    every bar at or before *t* must leave ``ER[t]`` bit-identical -- while the
+    anchor bar *t+1* must move it, or the target is reading nothing at all.
+    """
+    close = noisy_price()["close"].reset_index(drop=True)
+    probe = 60
+    baseline = forward_efficiency_ratio(close, horizon=6)
+
+    past = close.copy()
+    past.iloc[: probe + 1] *= 3.7
+    assert forward_efficiency_ratio(past, horizon=6).iloc[probe:].equals(baseline.iloc[probe:])
+
+    future = close.copy()
+    future.iloc[probe + 1] *= 1.05
+    assert forward_efficiency_ratio(future, horizon=6).iloc[probe] != baseline.iloc[probe]
+
+
+def test_a_window_price_never_moved_over_is_unmeasurable_not_zero():
+    """``0 / 0`` is no measurement, and a 0.0 there would read as perfect chop."""
+    flat = forward_efficiency_ratio(pd.Series([7.0] * 10), horizon=3)
+    assert flat.isna().all()
+    # The incomplete tail is NaN on the same rule ``forward_return`` uses.
+    ratio = forward_efficiency_ratio(pd.Series([1.0, 2.0, 4.0, 8.0, 16.0, 32.0]), horizon=2)
+    assert ratio.iloc[-3:].isna().all()
+    assert ratio.iloc[0] == pytest.approx(1.0)  # a one-way move is perfectly efficient
 
 
 def test_a_target_anchored_at_the_feature_s_own_bar_manufactures_an_ic():
