@@ -76,6 +76,18 @@ for entry in (
     if entry not in sys.path:
         sys.path.insert(0, entry)
 
+# This harness states its invariants as ``assert`` -- the pinned holdout bar
+# count, the funding coverage guard, the shared warmup and tradeable-bar checks
+# -- as the rest of the repo's measurement code does. ``python -O`` strips every
+# one of them, which would let a shifted holdout window or an uncovered funding
+# span through in silence. Refusing to run is cheaper than restating twenty
+# asserts, and closes the same hole.
+if not __debug__:
+    raise SystemExit(
+        "run this harness without -O / PYTHONOPTIMIZE: its holdout and funding "
+        "guards are asserts, and optimization removes them"
+    )
+
 OUT = Path(os.environ.get("R7D_OUT", Path(tempfile.gettempdir()) / "strategy-lab-r7d"))
 # The docstring above says this must never be ``reports/``; that is a guard
 # rather than a comment, because a report directory is the reproducibility
@@ -393,7 +405,18 @@ def run_mixed(strategies: dict, frame, root: Path, *, first_tradeable: int, stop
             strategy, frame, root / slug(label), first_tradeable=first_tradeable, stop=stop
         )
         row["label"] = label
-        assert row["crowding_measured"] is not False, f"{label} lost its funding column"
+        # A state machine must *say* it measured crowding, not merely fail to say
+        # it did not: `.get` returns None for absent metadata as well as for a
+        # comparator that reads no funding, and `is not False` would wave both
+        # through. M20 is a defect that showed up as a silently missing column,
+        # so the strategies that read one are held to True and only the others
+        # are allowed to be silent.
+        reads_funding = hasattr(strategy, "machine")
+        assert row["crowding_measured"] is (True if reads_funding else None), (
+            f"{label} reported crowding_measured={row['crowding_measured']!r}; "
+            + ("a state machine must report True -- M20" if reads_funding
+               else "a strategy that reads no funding must report nothing")
+        )
         rows[label] = row
     bars = {row["tradeable_bars"] for row in rows.values()}
     assert len(bars) == 1, f"runs covered different tradeable bars: {sorted(bars)}"
