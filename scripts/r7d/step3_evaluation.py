@@ -77,7 +77,18 @@ def evaluate(name: str, frame, cell, *, stop: int, root, first_tradeable: int | 
     return rows
 
 
-def beats(rows: dict, label: str, other: str) -> bool:
+def beats(rows: dict, label: str, other: str, broken: set[str] = frozenset()) -> bool | None:
+    """Whether ``label`` out-Sharpes ``other``, or ``None`` if neither can be asked.
+
+    A curve that crossed zero has no risk-adjusted return, so a comparison with
+    one on **either** side is incomparable rather than lost -- returning False
+    would enter an artifact into the verdict as though a comparison had been
+    made. It is the challenger's side that makes this more than bookkeeping: a
+    ruined challenger would otherwise "beat" a merely bad comparator on a number
+    that means nothing.
+    """
+    if label in broken or other in broken:
+        return None
     return rows[label]["sharpe_tradeable"] > rows[other]["sharpe_tradeable"]
 
 
@@ -204,17 +215,12 @@ def main() -> None:
         print(f"        Its Sharpe of {row['sharpe_tradeable']:+.4f} is an artifact of "
               f"a percentage return taken across a sign change, not a")
         print("        risk-adjusted return -- see `ruined` in this file.")
-    # A comparator whose equity crossed zero has no risk-adjusted return to beat,
-    # so the declared Sharpe comparison against it is *incomparable* rather than
-    # failed -- recording False would enter an artifact into the verdict as though
-    # a comparison had been made. The holdout still cannot clear, because every
-    # declared condition must hold and one that cannot be evaluated has not.
+    # `clears` requires every condition to be True rather than merely truthy, so
+    # a comparison that could not be evaluated cannot pass as one that was.
+    broken = set(broke)
     verdict = {
-        "beats_r5_trained": beats(sol_rows, challenger, "R5 trained, unmodified"),
-        "beats_donchian": (
-            None if "donchian 40/10" in broke
-            else beats(sol_rows, challenger, "donchian 40/10")
-        ),
+        "beats_r5_trained": beats(sol_rows, challenger, "R5 trained, unmodified", broken),
+        "beats_donchian": beats(sol_rows, challenger, "donchian 40/10", broken),
         "survives_3x_costs": stress > 0.0,
     }
     verdict["clears"] = all(value is True for value in verdict.values())
@@ -222,15 +228,16 @@ def main() -> None:
     print(f"\n{'=' * 78}\nTHE HOLDOUT -- declared: beats BOTH comparators on Sharpe net "
           f"of funding,")
     print(f"AND survives {R.COST_STRESS_MULTIPLE:.0f}x costs with a positive net return.")
-    print(f"  Sharpe: energy-first "
-          f"{sol_rows[challenger]['sharpe_tradeable']:+.4f}  vs R5 trained "
-          f"{sol_rows['R5 trained, unmodified']['sharpe_tradeable']:+.4f}  vs donchian "
-          f"{sol_rows['donchian 40/10']['sharpe_tradeable']:+.4f}")
+    def show(label: str) -> str:
+        value = f"{sol_rows[label]['sharpe_tradeable']:+.4f}"
+        return f"{value} (artifact)" if label in broken else value
+    print(f"  Sharpe: energy-first {show(challenger)}  vs R5 trained "
+          f"{show('R5 trained, unmodified')}  vs donchian {show('donchian 40/10')}")
     print(f"  net at {R.COST_STRESS_MULTIPLE:.0f}x costs: {stress:+.4f}%")
     for claim, ok in verdict.items():
         if claim != "clears":
             print(f"  {'N/A ' if ok is None else R.mark(ok)}  {claim}"
-                  + ("  (comparator reached zero equity; nothing to beat)"
+                  + ("  (a curve reached zero equity; nothing to compare)"
                      if ok is None else ""))
     print(f"\n  {R.mark(verdict['clears'])}  the holdout")
 
@@ -251,13 +258,12 @@ def main() -> None:
             stop=len(sol_df), root=root / "sol_alt",
         )
         alt_stress = alternative_rows[challenger]["net_by_stress"][R.COST_STRESS_MULTIPLE]
-        alt_broke = ruined(alternative_rows)
+        alt_broken = set(ruined(alternative_rows))
         alt_verdict = {
-            "beats_r5_trained": beats(alternative_rows, challenger, "R5 trained, unmodified"),
-            "beats_donchian": (
-                None if "donchian 40/10" in alt_broke
-                else beats(alternative_rows, challenger, "donchian 40/10")
-            ),
+            "beats_r5_trained": beats(
+                alternative_rows, challenger, "R5 trained, unmodified", alt_broken),
+            "beats_donchian": beats(
+                alternative_rows, challenger, "donchian 40/10", alt_broken),
             "survives_3x_costs": alt_stress > 0.0,
         }
         alt_verdict["clears"] = all(value is True for value in alt_verdict.values())
