@@ -1003,7 +1003,23 @@ __SHELL_CSS__
 
   function reloadBoardIfShown() {
     // A refresh started on the board can resolve after the user has left it.
-    return viewSel.value === 'board' ? loadBoard() : Promise.resolve();
+    return onBoard() ? loadBoard() : Promise.resolve();
+  }
+
+  function onBoard() {
+    return viewSel.value === 'board';
+  }
+
+  // A refresh chain outlives the view that started it, and its progress and
+  // failures belong to that view. Written unguarded they land on the
+  // instrument view's status line, and `setError` also dims its provenance
+  // strip -- a board failure reported over a chart it says nothing about.
+  function boardStatus(text) {
+    if (onBoard()) setStatus(text);
+  }
+
+  function boardError(text) {
+    if (onBoard()) setError(text);
   }
 
   function abortBoard() {
@@ -1077,7 +1093,7 @@ __SHELL_CSS__
 
   function refreshOne(identity, button) {
     if (button) button.disabled = true;
-    setStatus('fetching ' + identity.symbol + ' ' + identity.timeframe + ' …');
+    boardStatus('fetching ' + identity.symbol + ' ' + identity.timeframe + ' …');
     return getJSON('/api/refresh?' + new URLSearchParams(identity).toString(),
                    { method: 'POST' })
       .then(function (result) {
@@ -1092,7 +1108,7 @@ __SHELL_CSS__
         // they are looking at.
         return reloadBoardIfShown();
       })
-      .catch(function (error) { setError(error.message); })
+      .catch(function (error) { boardError(error.message); })
       .then(function () { if (button) button.disabled = false; });
   }
 
@@ -1109,8 +1125,8 @@ __SHELL_CSS__
     var chain = Promise.resolve();
     identities.forEach(function (identity, i) {
       chain = chain.then(function () {
-        setStatus('fetching ' + identity.symbol + ' ' + identity.timeframe +
-                  ' (' + (i + 1) + '/' + identities.length + ') …');
+        boardStatus('fetching ' + identity.symbol + ' ' + identity.timeframe +
+                    ' (' + (i + 1) + '/' + identities.length + ') …');
         return getJSON('/api/refresh?' + new URLSearchParams(identity).toString(),
                        { method: 'POST' })
           .then(function (result) {
@@ -1138,8 +1154,8 @@ __SHELL_CSS__
       })
       // After the reload, which clears the banner: a failure the user cannot
       // see is the same as one that did not happen.
-      .then(function () { if (failures.length) setError(failures.join(' · ')); })
-      .catch(function (error) { setError(error.message); })
+      .then(function () { if (failures.length) boardError(failures.join(' · ')); })
+      .catch(function (error) { boardError(error.message); })
       .then(function () { button.disabled = false; });
   }
 
@@ -1312,13 +1328,21 @@ __SHELL_CSS__
       // here it looked identical to a clean refresh.
       .then(function (result) {
         view.refreshed = { view: 'instrument', text: refreshText(result) };
-        // The tile's edges described the frame *before* this fetch. Kept, the
-        // reload would re-request the old `end` and draw no new bars while the
-        // status reported the candles it just took -- and the board, recomputing
-        // against the new funding window, would then show a later bar than the
-        // chart it links to. That is M36's contradiction, arrived at from the
-        // other side.
-        exactBounds = null;
+        // The tile's edges described the frame *before* this fetch. Only the
+        // right one is stale: kept, the reload re-requests the old `end` and
+        // draws no new bars while the status reports the candles it just took,
+        // and the board -- recomputing against the new funding window -- then
+        // shows a later bar than the chart it links to.
+        //
+        // The *head* bound stays. It is what holds the frame off a permanent
+        // leading funding gap, and dropping it falls back to a date rounded up
+        // to the next whole UTC day. Clearing the whole thing was the first fix
+        // here and it was wrong twice over: the date input still held the old
+        // day, so the window merely widened to that day's 23:59:59 -- no newer
+        // bars, and up to a full day past the last settlement, which the
+        // coverage guard tolerates only to one funding cadence.
+        exactBounds = { start: exactBounds && exactBounds.start, end: null };
+        el('end').value = '';
         return load();
       })
       .catch(function (error) { setError(error.message); })

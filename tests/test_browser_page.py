@@ -524,8 +524,9 @@ def test_one_datasets_refresh_failure_does_not_cancel_the_rest(page):
     # The count is reported as "N of M", so a partial batch is not read as a
     # whole one. Matched without the surrounding layout, which is not the claim.
     assert "identities.length - failures.length" in script
-    # After the reload, which clears the banner.
-    assert "if (failures.length) setError(failures.join(' · '));" in script
+    # Shown after the reload, which clears the banner -- and through the
+    # view-guarded writer, since a board failure says nothing about a chart.
+    assert "if (failures.length) boardError(failures.join(' · '));" in script
 
 
 def test_a_superseded_board_is_aborted_rather_than_drained(page):
@@ -594,20 +595,47 @@ def test_opening_a_tile_carries_its_exact_edges_not_a_rounded_day(page):
     assert "exactBounds = null;\n      load();" in script
 
 
-def test_refreshing_the_instrument_drops_the_frame_the_tile_pinned(page):
-    """A refresh moves the frame's right edge, so the tile's edges stop describing it.
+def test_refreshing_the_instrument_moves_only_the_edge_the_fetch_moved(page):
+    """A refresh moves the frame's right edge and nothing else.
 
-    Kept, the reload would re-request the old ``end`` -- ``load_candles`` filters
-    ``timestamp <= end`` -- and draw no new bars while the status reported the
-    candles it had just taken. The board, recomputing against the new funding
-    window, would then show a later bar than the chart it links to.
+    Keeping the old ``end`` draws no new bars -- ``load_candles`` filters
+    ``timestamp <= end`` -- while the status reports the candles just taken, and
+    the board then shows a later bar than the chart it links to. Clearing *both*
+    edges is the other failure: the head bound is what holds the frame off a
+    permanent leading funding gap, and the date input still carries the old day,
+    so the window widens to that day's 23:59:59 -- no newer bars, and up to a
+    full day past the last settlement, which the guard tolerates only to one
+    funding cadence.
     """
     script = _script(page)
 
     body = script[script.index("el('refresh').addEventListener"):]
     body = body[: body.index("});")]
-    assert "exactBounds = null;" in body
-    assert body.index("exactBounds = null;") < body.index("return load();")
+    assert "exactBounds = { start: exactBounds && exactBounds.start, end: null };" in body
+    assert "el('end').value = '';" in body
+    assert body.index("end: null };") < body.index("return load();")
+
+
+def test_a_board_refresh_says_nothing_over_the_instrument_view(page):
+    """A refresh chain outlives the view that started it.
+
+    The reload is guarded; the writes before it were not, so each remaining link
+    wrote its progress over the chart being read -- and a failure banner too,
+    which dims the provenance strip of a view the failure says nothing about.
+    """
+    script = _script(page)
+
+    # The writers are guarded, not merely named -- a helper that forwarded
+    # unconditionally would satisfy the call-site check below and change nothing.
+    for writer, wrapped in (("boardStatus", "setStatus"), ("boardError", "setError")):
+        body = script[script.index("function " + writer + "(text)"):]
+        body = body[: body.index("\n  }")]
+        assert "if (onBoard()) " + wrapped + "(text);" in body, writer
+    for owner in ("function refreshOne(", "function refreshAll("):
+        body = script[script.index(owner):]
+        body = body[: body.index("\n  function ", 1)]
+        assert "setStatus(" not in body, owner
+        assert "setError(" not in body, owner
 
 
 def test_a_refresh_that_outlives_the_board_view_does_not_restart_it(page):
@@ -620,8 +648,10 @@ def test_a_refresh_that_outlives_the_board_view_does_not_restart_it(page):
     """
     script = _script(page)
 
-    assert "function reloadBoardIfShown()" in script
-    assert "viewSel.value === 'board' ? loadBoard() : Promise.resolve();" in script
+    body = script[script.index("function reloadBoardIfShown()"):]
+    body = body[: body.index("\n  }")]
+    assert "onBoard()" in body and "loadBoard()" in body
+    assert "Promise.resolve()" in body
     # Both refresh paths go through it rather than calling loadBoard directly.
     for owner in ("function refreshOne(", "function refreshAll("):
         body = script[script.index(owner):]
