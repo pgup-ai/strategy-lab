@@ -2,13 +2,10 @@
 
 **(c) Size.** ``Signal`` has no size field and ``_extract`` withholds
 ``position_size``, so the census calls size "engine-side" and a live chart unable
-to show how big. The question that decides whether that is a *gap* is whether the
-number is **recomputable**: under M35 what can be recomputed is not persisted, and
-``position_size`` is returned by ``generate_signals`` over the same buffer the
-runner already holds. So this measures the scale at the bars where it is actually
-consumed -- entries, and only entries, because ``from_signals`` defaults to
-``accumulate=False`` and a position never resizes after it opens (R6) -- and
-checks that a cold buffer reproduces it.
+to show how big. Measured at the bars that actually consume it -- entries, and
+only entries, because ``from_signals`` defaults to ``accumulate=False`` and a
+position never resizes after it opens (R6) -- and then for whether a cold buffer
+gets it back, which is what decides whether it is a gap at all.
 
 **(d) Exposure.** ``StrategyRunner`` calls ``generate_signals``, which an
 exposure strategy does not have. The failure is recorded exactly rather than
@@ -38,27 +35,36 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import sys
 import tempfile
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 
-from strategy_lab.core.clock import SimClock
-from strategy_lab.core.types import BarEvent, InstrumentId
-from strategy_lab.engine.runner import StrategyRunner
-from strategy_lab.feeds.replay import _row_to_bar
-from strategy_lab.timeframes import timeframe_to_millis
-from strategy_lab.strategies.exposure_registry import (
+REPO = Path(__file__).resolve().parents[2]
+# The repo root and this directory, so the imports below resolve when the file is
+# run as a script: ``tests.test_exposure_determinism`` holds the exposure driver
+# this reuses rather than copies, and ``exit_modes`` holds the frame item (b) used.
+sys.path[:0] = [str(REPO), str(Path(__file__).parent)]
+
+from exit_modes import frame  # noqa: E402
+from strategy_lab.core.clock import SimClock  # noqa: E402
+from strategy_lab.core.types import BarEvent, InstrumentId  # noqa: E402
+from strategy_lab.engine.runner import StrategyRunner  # noqa: E402
+from strategy_lab.feeds.replay import _row_to_bar  # noqa: E402
+from strategy_lab.strategies.exposure_registry import (  # noqa: E402
     get_exposure_strategy,
     list_exposure_strategies,
 )
-from strategy_lab.strategies.registry import get_strategy, list_strategies
-
-from tests.test_exposure_determinism import streamed_targets, whole_history_targets
+from strategy_lab.strategies.registry import get_strategy, list_strategies  # noqa: E402
+from strategy_lab.timeframes import timeframe_to_millis  # noqa: E402
+from tests.test_exposure_determinism import (  # noqa: E402
+    streamed_targets,
+    whole_history_targets,
+)
 
 OUT = Path(os.environ.get("R10D_OUT", Path(tempfile.gettempdir()) / "strategy-lab-r10d"))
-REPO = Path(__file__).resolve().parents[2]
 if OUT.resolve() == REPO or REPO in OUT.resolve().parents:
     raise SystemExit(f"R10D_OUT must point outside the repository, not {OUT}")
 
@@ -202,18 +208,15 @@ def exposure_streams(df_unfunded: pd.DataFrame, df_funded: pd.DataFrame, *, bars
         out[name] = {
             "warmup_bars": int(strategy.warmup_bars),
             "bars_compared": int(len(neutral)),
-            # The verdict: both sides crowding-neutral, so only a streaming
-            # defect can move it.
+            # The verdict: both sides neutral, so only a streaming defect moves it.
             "streamed_vs_neutral_differing": int(
                 (~np.isclose(aligned.to_numpy(), neutral.to_numpy(), equal_nan=True)).sum()
             ),
-            # Context, not verdict: census item (a) on this contract.
+            # Context, never verdict: census item (a) on this contract.
             "neutral_vs_funded_differing": int(
                 (~np.isclose(neutral.to_numpy(), funded.to_numpy(), equal_nan=True)).sum()
             ),
             "target_moves": int(neutral.round(9).nunique()),
-            "neutral_mean_abs": float(np.abs(neutral.to_numpy()).mean()),
-            "funded_mean_abs": float(np.abs(funded.to_numpy()).mean()),
         }
     return out
 
@@ -224,8 +227,6 @@ def main() -> int:
     parser.add_argument("--stream-bars", type=int, default=400)
     parser.add_argument("--recompute-tail", type=int, default=600)
     args = parser.parse_args()
-
-    from exit_modes import frame  # same funding-bounded frame item (b) used
 
     identity, funded = frame(args.symbol)
     unfunded = funded.drop(columns=["funding_rate"], errors="ignore")

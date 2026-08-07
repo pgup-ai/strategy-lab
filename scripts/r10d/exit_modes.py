@@ -22,17 +22,11 @@ series it stands in for.
 
 **The pre-registered entry control was vacuous, and this is the version that can
 fail.** The protocol said entries must differ on zero bars because
-"``_exit_signals`` passes entries through untouched" -- true, and trivially so:
-it returns exits and never sees an entry, so nothing about that comparison could
-ever have gone red. What *does* touch entries is ``_mask_warmup``, two lines
-further down, which silences both sides until the declared warmup has elapsed.
-So the control that means something compares the engine's masked entries against
-the **runner's own** warmup rule: ``_mask_warmup`` keeps rows at positional index
-``>= warmup``, and ``StrategyRunner.on_event`` emits once ``len(buffer) >
-warmup_bars``, i.e. at index ``>= warmup_bars`` -- designed to agree, never
-measured together. A difference here is the two paths disagreeing about which
-bars exist at all, which would sit underneath every exit-mode number in this
-file.
+``_exit_signals`` passes them through -- true and untestable, since it returns
+exits and never sees an entry. What *does* touch entries is ``_mask_warmup``, two
+lines further down, so the control compares the engine's masked entries against
+the **runner's own** warmup rule. The two are designed to agree and have never
+been measured together, and a difference would sit underneath every number here.
 
 Usage::
 
@@ -91,9 +85,8 @@ CANONICAL: dict[str, ExitMode] = {
     "state_machine_v1": ExitMode.OPPOSITE_SIGNAL_ONLY,
 }
 
-# The modes ``_exit_signals`` returns the strategy's own exits for, unchanged.
-# Named rather than inferred, because whether this set is right is the first
-# reading the protocol declared.
+# The modes ``_exit_signals`` returns the strategy's own exits for, unchanged --
+# so the modes whose replay stream should already be the backtest's.
 PASS_THROUGH = {ExitMode.OPPOSITE_SIGNAL_ONLY, ExitMode.SETUP_INVALIDATION_STOP}
 
 _SIDES: tuple[tuple[str, Side], ...] = (
@@ -130,22 +123,19 @@ def frame(symbol: str) -> tuple[MarketDataIdentity, pd.DataFrame]:
     return identity, df
 
 
-def runner_mask(df: pd.DataFrame, warmup_bars: int) -> np.ndarray:
-    """The bars ``StrategyRunner`` emits on: it withholds until ``len(buffer) >
-    warmup_bars``, and after appending row *i* the buffer holds *i+1*."""
-    return np.arange(len(df)) >= warmup_bars
-
-
 def measure(name: str, df: pd.DataFrame) -> dict:
+    """Every valid mode for one strategy, against what the runner would emit."""
     strategy = get_strategy(name)
     if len(df) <= strategy.warmup_bars:
         return {"refused": f"warmup {strategy.warmup_bars} > {len(df)} bars"}
 
     signals = strategy.generate_signals(df)
     engine_warmup = _warmup_bars(strategy, df, size_mode=SizeMode.FIXED, vol_span=DEFAULT_VOL_SPAN)
-    live = runner_mask(df, strategy.warmup_bars)
+    # The bars the runner emits on: it withholds until ``len(buffer) >
+    # warmup_bars``, and after appending row *i* the buffer holds *i+1*.
+    live = np.arange(len(df)) >= strategy.warmup_bars
 
-    entry = {
+    out = {
         "warmup_bars": int(strategy.warmup_bars),
         "engine_warmup": int(engine_warmup),
         "canonical": CANONICAL[name].value,
@@ -158,17 +148,15 @@ def measure(name: str, df: pd.DataFrame) -> dict:
                 df=df, signals=signals, exit_mode=mode, failure_bars=FAILURE_BARS
             )
         except ValueError as exc:
-            entry["modes"][mode.value] = {"raises": str(exc)}
+            out["modes"][mode.value] = {"raises": str(exc)}
             continue
 
         masked, engine_long, engine_short = _mask_warmup(
             signals, long_exits.fillna(False), short_exits.fillna(False), engine_warmup
         )
-        # What the runner would have emitted: the strategy's own series, silenced
-        # by the runner's own warmup rule and nothing else.
         live_long = signals.long_exits & live
         live_short = signals.short_exits & live
-        entry["modes"][mode.value] = {
+        out["modes"][mode.value] = {
             "raises": None,
             "pass_through": mode in PASS_THROUGH,
             "canonical": mode == CANONICAL[name],
@@ -178,15 +166,14 @@ def measure(name: str, df: pd.DataFrame) -> dict:
             "live_long_exits": int(live_long.sum()),
             "engine_short_exits": int(engine_short.sum()),
             "live_short_exits": int(live_short.sum()),
-            # The control that can fail: the engine's entries after warmup
-            # masking against the runner's, which is where the two paths could
-            # disagree about which bars exist at all.
+            # The control that can fail: whether the two warmup rules agree about
+            # which bars exist at all.
             "entry_diff": int(
                 ((masked.long_entries != (signals.long_entries & live)).sum())
                 + ((masked.short_entries != (signals.short_entries & live)).sum())
             ),
         }
-    return entry
+    return out
 
 
 async def replayed_sides(identity: MarketDataIdentity, strategy, df: pd.DataFrame) -> pd.DataFrame:
@@ -207,22 +194,18 @@ async def replayed_sides(identity: MarketDataIdentity, strategy, df: pd.DataFram
     subscription = Subscription(instrument=instrument, timeframe=identity.timeframe)
     rows: dict[pd.Timestamp, dict[str, bool]] = {}
 
-    def record(signals) -> None:
-        for signal in signals:
+    # No ``flush()``: that belongs to ``MultiAssetRunner``, which withholds a
+    # timestamp until a later event proves it complete.
+    async for event in feed.stream([subscription]):
+        for signal in runner.on_event(event):
             stamp = pd.Timestamp(signal.ts_bar_ms, unit="ms", tz="UTC")
             rows.setdefault(stamp, {})[signal.side.value] = True
 
-    # No ``flush()``: that belongs to ``MultiAssetRunner``, which withholds a
-    # timestamp until a later event proves it complete. A single-instrument
-    # runner emits on every closed bar as it arrives.
-    async for event in feed.stream([subscription]):
-        record(runner.on_event(event))
-
-    # Densified here rather than at the comparison, and it is not cosmetic. A bar
+    # Densified here rather than at the comparison, and it is not cosmetic: a bar
     # that emitted only an exit leaves ``enter_long`` **NaN** rather than absent,
-    # and ``NaN`` casts to ``True``: a control written to reindex-then-cast reads
-    # every such bar as an entry and fails against a correct replay. Every column
-    # exists, so a side no bar emitted is False rather than missing.
+    # and ``NaN`` casts to ``True``. A control written to reindex-then-cast reads
+    # every such bar as an entry and goes red against a correct replay -- which
+    # is what happened here before it was caught.
     dense = pd.DataFrame(rows.values(), index=list(rows))
     return dense.reindex(columns=[side.value for _, side in _SIDES]).fillna(False).astype(bool)
 
@@ -250,7 +233,6 @@ def control_r(identity: MarketDataIdentity, df: pd.DataFrame, *, bars: int) -> d
         mismatches[field] = int((expected != got).sum())
     return {
         "strategy": "donchian",
-        "bars_streamed": int(len(tail)),
         "bars_compared": int(len(emitting)),
         "signal_bars": int(len(streamed)),
         "mismatches": mismatches,
