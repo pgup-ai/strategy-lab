@@ -248,7 +248,7 @@ def test_provenance_is_a_strip_rather_than_a_tooltip(page):
     """M20's lesson: a number displayed without the funding context will
     eventually contradict the charter with no way to see why. Hidden behind a
     hover, it is a field somebody has to think to look for."""
-    assert '<div class="provenance" id="provenance"></div>' in page
+    assert '<div class="provenance instrument-only" id="provenance"></div>' in page
     assert "title=" not in _provenance_block(page)
 
 
@@ -317,13 +317,28 @@ def test_the_page_and_the_report_share_one_stylesheet_shell(client):
 
 
 def test_the_page_writes_nowhere_but_the_existing_refresh_path(page):
-    """Read-only is a property of the page as well as of the API: every fetch it
-    makes is a GET except the one POST that is ``server.refresh_candles``."""
-    posts = re.findall(r"method: '([A-Z]+)'", _script(page))
-    fetched = set(re.findall(r"getJSON\('(/[^'?]+)", _script(page)))
+    """Read-only is a property of the page as well as of the API.
 
-    assert posts == ["POST"]
-    assert fetched == {"/api/analysis", "/api/refresh", "/api/datasets", "/api/strategies"}
+    Every request it makes is a GET except the POSTs, and every POST goes to
+    ``/api/refresh``, which is ``server.refresh_candles``. The board added two
+    more of those -- one per tile and one for every tile -- and no fourth
+    endpoint that writes; asserted on the URL rather than on the count, so
+    another refresh button is fine and another writer is not.
+    """
+    script = _script(page)
+    posts = re.findall(r"getJSON\('(/[^'?]+)[^;]*?method: '([A-Z]+)'", script, flags=re.S)
+    fetched = set(re.findall(r"(?:getJSON|readRows)\('(/[^'?]+)", script))
+
+    assert posts, "no POST found at all; the regex stopped matching"
+    assert {url for url, _ in posts} == {"/api/refresh"}
+    assert {method for _, method in posts} == {"POST"}
+    assert fetched == {
+        "/api/analysis",
+        "/api/board",
+        "/api/refresh",
+        "/api/datasets",
+        "/api/strategies",
+    }
 
 
 def test_serving_and_analysing_leaves_the_report_tree_alone(client, tmp_path, monkeypatch):
@@ -346,8 +361,10 @@ def test_the_switcher_re_requests_rather_than_reloading(page):
     script = _script(page)
 
     assert "location.reload" not in script
-    assert "strategySel.addEventListener('change', function () { syncExitEnabled(); load(); });" \
+    assert (
+        "strategySel.addEventListener('change', function () { syncExitEnabled(); reload(); });"
         in script
+    )
 
 
 def test_a_slower_earlier_request_cannot_overwrite_a_later_one(page):
@@ -381,6 +398,103 @@ def test_the_price_chart_is_the_authority_on_what_range_is_shown(page):
     """
     assert "priceChart.timeScale().getVisibleLogicalRange()" in page
     assert "exposureChart.timeScale().setVisibleLogicalRange(range)" in page
+
+
+# --------------------------------------------------------------------------
+# The board, and the instrument view it did not replace.
+# --------------------------------------------------------------------------
+
+
+def test_the_board_is_read_as_a_stream_rather_than_as_a_response(page):
+    """``response.json()`` here waits for the slowest instrument before drawing
+    the fastest. A row is a whole-history recompute and the cost is serial --
+    four threads over three stored perp frames measured 1.10x -- so the only
+    thing that makes first paint short of the total is reading as it arrives."""
+    script = _script(page)
+
+    assert "response.body.getReader()" in script
+    assert "new TextDecoder()" in script
+    assert "readRows('/api/board?'" in script
+
+
+def test_both_views_are_reachable_and_only_one_is_shown(page):
+    """The board did not replace the instrument view; it is what you open it
+    from. Hidden rather than unmounted, so the price chart keeps its size."""
+    script = _script(page)
+
+    assert "body.board-view .instrument-only" in page
+    assert "body.instrument-view .board-only" in page
+    assert "viewSel.addEventListener('change', function () { setView(viewSel.value); });" in script
+    assert "function openInstrument(row)" in script
+    assert "setView('instrument');" in script
+
+
+def test_a_tile_offers_refresh_for_itself_and_for_the_whole_board(page):
+    """Explicit, both of them. A background poll that fetched from a venue on
+    its own schedule would be a different thing from a page somebody refreshed,
+    and only the second is honest about when it last spoke to the exchange."""
+    script = _script(page)
+
+    assert "function refreshOne(identity, button)" in script
+    assert "function refreshAll()" in script
+    assert "setInterval" not in script, "the board must not poll on a timer"
+    assert "setTimeout" not in script
+
+
+def test_a_row_the_board_could_not_answer_says_why_on_its_own_tile(page):
+    """One instrument's permanent leading funding gap must not blank the rest,
+    so a refusal is drawn as that tile's content rather than as a page error."""
+    script = _script(page)
+
+    assert "if (row.unavailable)" in script
+    assert "refusal.textContent = row.unavailable.split('\\n')[0];" in script
+    assert "refusal.title = row.unavailable;" in script
+
+
+def test_a_tile_whose_frame_ends_behind_the_newest_candle_says_so(page):
+    """A perp frame is bounded by its own stored funding span, so ``as of`` can
+    sit a bar behind the newest stored candle. Silently, that is a board that
+    looks current and is not; said out loud, it is a fact about settlements."""
+    script = _script(page)
+
+    assert "row.as_of === row.dataset_last_bar ? '' : 'lag'" in script
+    assert "tileLine('newest stored bar', stamp(row.dataset_last_bar), 'lag')" in script
+
+
+def test_a_tile_carries_the_provenance_a_figure_cannot_be_read_without(page):
+    """M20 in miniature, sixteen times over: a state and a fill on a tile with
+    no strategy version, exit mode or crowding flag beside them is exactly the
+    number-without-context that moved a published figure."""
+    script = _script(page)
+
+    assert "prov.crowding_measured" in script
+    assert "prov.exit_mode" in script
+    assert "prov.warmup_bars" in script
+    assert "prov.version" in script
+    assert "prov.generated_at" in script
+
+
+def test_the_market_filter_offers_storages_own_vocabulary(page):
+    """Taken from ``models.MarketType``, so a fourth market type is not a filter
+    the API answers 422 to -- and the identity model takes it from there too."""
+    from typing import get_args
+
+    from strategy_lab.api.models import IdentityQuery, MarketType
+    from strategy_lab.browser.page import DEFAULT_MARKET_TYPE, MARKET_TYPES
+
+    assert MARKET_TYPES == get_args(MarketType)
+    assert MARKET_TYPES == get_args(IdentityQuery.model_fields["market_type"].annotation)
+    assert bootstrap_config()["marketTypes"] == list(MARKET_TYPES)
+    assert DEFAULT_MARKET_TYPE in MARKET_TYPES
+
+
+def test_a_continuous_strategy_shows_a_level_on_its_tile_rather_than_no_fills(page):
+    """Markers have no word for "62% long", so a tile that only knew how to draw
+    a latest fill would render the continuous contract as "none"."""
+    script = _script(page)
+
+    assert "} else if (row.target !== null) {" in script
+    assert "tileLine('target', fmt(row.target, 3))" in script
 
 
 def test_the_deepest_candle_set_is_selected_rather_than_the_first(page):

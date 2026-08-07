@@ -123,6 +123,57 @@ def test_an_exit_mode_on_the_continuous_contract_is_refused_at_the_boundary(clie
     assert "no exit mode" in response.text
 
 
+def _board(client, **overrides):
+    return client.get("/api/board", params={"strategies": "donchian", **overrides})
+
+
+def test_an_unregistered_strategy_on_the_board_is_refused_by_name(client):
+    """At the boundary, before a single row is streamed.
+
+    A stream that has already started cannot be turned into a 422, so a
+    misspelled name would arrive as a row-shaped hole in the middle of a board
+    that otherwise looks complete.
+    """
+    response = _board(client, strategies="donchian,no_such_strategy")
+
+    assert response.status_code == 422
+    assert "strategies" in _fields(response)
+
+
+def test_the_same_strategy_twice_on_the_board_is_refused_rather_than_deduplicated(client):
+    """Two identical tiles per instrument, one shadowing the other in the cache."""
+    response = _board(client, strategies="donchian,donchian")
+
+    assert response.status_code == 422
+    assert "duplicate strategy" in response.text
+
+
+def test_a_misspelled_board_parameter_is_refused_rather_than_ignored(client):
+    response = _board(client, market="perp")
+
+    assert response.status_code == 422
+    assert "market" in _fields(response)
+
+
+def test_an_exit_mode_is_refused_when_any_board_strategy_has_no_exit_mode(client):
+    """One mode covers every row, so one continuous strategy refuses it.
+
+    Applying it to the boolean rows and dropping it for the continuous ones
+    would label half a board with a setting that changed nothing there.
+    """
+    response = _board(client, strategies="donchian,state_machine_v2", exit_mode="trend_failure")
+
+    assert response.status_code == 422
+    assert "no exit mode" in response.text
+
+
+def test_a_sparkline_tail_outside_its_range_is_refused_by_name(client):
+    response = _board(client, spark_bars=5_000)
+
+    assert response.status_code == 422
+    assert "spark_bars" in _fields(response)
+
+
 def test_a_negative_refresh_cursor_is_refused_by_name(client):
     response = client.post("/api/refresh", params={**_PERP, "after": -1})
 

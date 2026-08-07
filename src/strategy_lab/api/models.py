@@ -38,6 +38,7 @@ from strategy_lab.api.analysis import (
     Contract,
     resolve_strategy,
 )
+from strategy_lab.api.board import DEFAULT_SPARK_BARS, MAX_SPARK_BARS
 from strategy_lab.backtests import ExitMode
 from strategy_lab.timeframes import timeframe_to_millis
 
@@ -47,6 +48,12 @@ from strategy_lab.timeframes import timeframe_to_millis
 # parameter is a habit rather than a requirement.
 _VENUE_PATTERN = r"^[A-Za-z0-9_.-]+$"
 _SYMBOL_PATTERN = r"^[A-Za-z0-9/:._-]+$"
+
+# Storage keys candles on exactly three market types, and both the identity and
+# the board's filter answer for the same set. Written once so a fourth reaches
+# both or neither -- a filter offering a value the identity refuses is a control
+# whose only outcome is a 422.
+MarketType = Literal["spot", "perp", "equity"]
 
 
 class _Strict(BaseModel):
@@ -68,7 +75,7 @@ class IdentityQuery(_Strict):
     """
 
     exchange: Annotated[str, Field(min_length=1, max_length=32, pattern=_VENUE_PATTERN)]
-    market_type: Literal["spot", "perp", "equity"]
+    market_type: MarketType
     symbol: Annotated[str, Field(min_length=1, max_length=32, pattern=_SYMBOL_PATTERN)]
     timeframe: Annotated[str, Field(min_length=1, max_length=8, pattern=_VENUE_PATTERN)]
 
@@ -160,6 +167,73 @@ class AnalysisQuery(IdentityQuery):
         return self
 
 
+class BoardQuery(_Strict):
+    """Which pairs the board covers. No dataset here: it covers what is stored.
+
+    ``strategies`` is comma-separated, the shape the CLI already uses for
+    ``--symbols`` and ``--horizons``, and every name in it is resolved against
+    the registries at the boundary -- a misspelling is a 422 naming the field
+    rather than a row-shaped hole in the middle of a stream that has already
+    started.
+
+    There is no cost model, no ``allow_shorts`` and no ``failure_bars``: the
+    board runs every row at the engine's defaults, which each row's own
+    provenance states. Widening the query would multiply the cache key by
+    settings a tile cannot show.
+    """
+
+    strategies: Annotated[str, Field(min_length=1, max_length=512)]
+    # ``None`` is "every market", which is a real answer here rather than a
+    # missing filter: the board covers what is stored.
+    market_type: MarketType | None = None
+    exit_mode: ExitMode | None = None
+    # Bounded above by what a cached row holds: asking for more would serve a
+    # shorter tail than the number requested, silently.
+    spark_bars: Annotated[int, Field(ge=2, le=MAX_SPARK_BARS)] = DEFAULT_SPARK_BARS
+
+    @property
+    def names(self) -> tuple[str, ...]:
+        return tuple(part.strip() for part in self.strategies.split(",") if part.strip())
+
+    @field_validator("strategies")
+    @classmethod
+    def _registered(cls, value: str) -> str:
+        names = [part.strip() for part in value.split(",") if part.strip()]
+        if not names:
+            raise ValueError("name at least one strategy")
+        if len(set(names)) != len(names):
+            # Two identical rows per dataset, one of them shadowing the other in
+            # the cache. Refused rather than deduplicated: the caller asked for
+            # something that cannot be drawn, and silently narrowing it is the
+            # habit this whole module exists to break.
+            raise ValueError(f"duplicate strategy in {value!r}")
+        for name in names:
+            resolve_strategy(name)
+        return ",".join(names)
+
+    @model_validator(mode="after")
+    def _exit_mode_belongs_to_every_contract(self) -> BoardQuery:
+        """One exit mode covers every row, so one continuous strategy refuses it.
+
+        Applying it to the boolean rows and dropping it for the continuous ones
+        would label half the board with a setting that changed nothing there,
+        which is exactly what ``AnalysisQuery`` refuses one pair at a time.
+        """
+        if self.exit_mode is None:
+            return self
+        continuous = [
+            name
+            for name in self.names
+            if resolve_strategy(name).contract is Contract.TARGET_EXPOSURE
+        ]
+        if continuous:
+            raise ValueError(
+                f"{', '.join(continuous)} runs on the continuous-exposure contract, "
+                f"which has no exit mode: a target of 0.0 is the exit"
+            )
+        return self
+
+
 class RefreshQuery(IdentityQuery):
     """``after`` is an epoch-second cursor: the caller already has bars up to it.
 
@@ -238,6 +312,32 @@ class AnalysisModel(_Strict):
     provenance: ProvenanceModel
 
 
+class BoardRowModel(_Strict):
+    """One board tile on the wire, forbidding extras for the reason above.
+
+    The board streams, so this model is applied per line rather than by
+    FastAPI's ``response_model`` -- same guarantee, same place a field added to
+    ``BoardRow`` and forgotten here becomes an error instead of a quiet loss.
+
+    ``unavailable`` is the whole of a refused row and ``provenance`` is
+    ``None`` there: nothing was computed, so there is no run to describe, and a
+    provenance block full of defaults would describe one that never happened.
+    """
+
+    identity: dict[str, str]
+    strategy: str
+    contract: str | None
+    state: str | None
+    features: dict[str, float | None] | None
+    latest_fill: MarkerModel | None
+    target: float | None
+    as_of: str | None
+    dataset_last_bar: str
+    closes: list[float]
+    unavailable: str | None
+    provenance: ProvenanceModel | None
+
+
 class RefreshModel(_Strict):
     """The bars, and what the refresh actually wrote to get them.
 
@@ -257,9 +357,12 @@ __all__ = [
     "AnalysisModel",
     "AnalysisQuery",
     "BarModel",
+    "BoardQuery",
+    "BoardRowModel",
     "DatasetModel",
     "IdentityQuery",
     "MarkerModel",
+    "MarketType",
     "ProvenanceModel",
     "RefreshModel",
     "RefreshQuery",
