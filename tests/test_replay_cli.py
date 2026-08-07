@@ -9,7 +9,7 @@ loop, and what reaches storage -- rather than Postgres.
 from __future__ import annotations
 
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import pandas as pd
 import pytest
@@ -17,6 +17,7 @@ from typer.testing import CliRunner
 
 from strategy_lab import cli
 from strategy_lab.core.types import Mode, Side
+from strategy_lab.state.machine import MarketState
 from strategy_lab.feeds.replay import ReplayFeed
 from strategy_lab.strategies.base import SignalSet
 from tests.conftest import synthetic_ohlcv
@@ -48,6 +49,29 @@ class _Silent:
         return SignalSet(flat, flat, flat, flat)
 
 
+class _FakeMachine:
+    """The two-method surface ``_reason_for`` introspects for, and nothing else.
+
+    A stand-in rather than the real ``StateMachine`` because this file's whole
+    point is to test the command's wiring without a database or 2,192 warmup
+    bars; what the machine decides is ``tests/test_state_machine.py``'s subject.
+    """
+
+    def run(self, features: pd.DataFrame) -> pd.Series:
+        return pd.Series([MarketState.COMPRESSION] * len(features), index=features.index)
+
+
+@dataclass(frozen=True)
+class _Explains(_Silent):
+    """Silent, but able to say why -- the case that mints a run without a signal."""
+
+    name: str = "explains"
+    machine: _FakeMachine = field(default_factory=_FakeMachine)
+
+    def feature_frame(self, df: pd.DataFrame) -> tuple[pd.DataFrame, bool]:
+        return pd.DataFrame({"direction": range(len(df))}, index=df.index, dtype="float64"), False
+
+
 @pytest.fixture
 def feed_calls(monkeypatch):
     """Serve 10 synthetic bars for whatever subscription the command builds."""
@@ -65,7 +89,7 @@ def feed_calls(monkeypatch):
 
 @pytest.fixture
 def storage_calls(monkeypatch):
-    calls: dict[str, list] = {"runs": [], "writes": []}
+    calls: dict[str, list] = {"runs": [], "writes": [], "reasons": []}
 
     def fake_create_run(**kwargs):
         calls["runs"].append(kwargs)
@@ -76,8 +100,14 @@ def storage_calls(monkeypatch):
         calls["writes"].append({"run_id": run_id, "mode": mode, "signals": signals})
         return len(signals)
 
+    def fake_write_bar_reasons(run_id, mode, reasons):
+        reasons = list(reasons)
+        calls["reasons"].append({"run_id": run_id, "mode": mode, "reasons": reasons})
+        return len(reasons)
+
     monkeypatch.setattr(cli, "_create_run", fake_create_run)
     monkeypatch.setattr(cli, "_write_signals", fake_write_signals)
+    monkeypatch.setattr(cli, "_write_bar_reasons", fake_write_bar_reasons)
     return calls
 
 
@@ -168,7 +198,86 @@ def test_replay_writes_nothing_when_no_signals_fire(monkeypatch, feed_calls, sto
     assert result.exit_code == 0, result.output
     assert storage_calls["runs"] == []
     assert storage_calls["writes"] == []
+    assert storage_calls["reasons"] == []
     assert result.output.strip() == "Emitted 0 signals over 10 bars (not persisted)."
+
+
+def test_a_strategy_with_no_feature_frame_persists_no_reasons(
+    monkeypatch, feed_calls, storage_calls
+):
+    """Signals are written and the reasons table is not touched at all.
+
+    Not "written empty": an absent explanation and an empty one are different
+    claims, and ``_EveryBar`` -- like the four original strategies -- has no
+    state to explain.
+    """
+    use_strategy(monkeypatch, _EveryBar())
+
+    result = runner.invoke(cli.app, ["replay"])
+
+    assert result.exit_code == 0, result.output
+    assert len(storage_calls["writes"][0]["signals"]) == 7
+    assert storage_calls["reasons"] == []
+    assert "bar reasons" not in result.output
+
+
+def test_reasons_alone_mint_a_run_when_no_signal_fires(monkeypatch, feed_calls, storage_calls):
+    """The case the per-bar table exists for.
+
+    A state machine that never changed side over the range emitted nothing and
+    still saw something on every bar; a run header gated on signals would throw
+    that away, which is the "why did it *not* trade here" question the dashboard
+    mostly needs.
+    """
+    use_strategy(monkeypatch, _Explains())
+
+    result = runner.invoke(cli.app, ["replay"])
+
+    assert result.exit_code == 0, result.output
+    [run] = storage_calls["runs"]
+    [write] = storage_calls["reasons"]
+    assert run["strategy_id"] == "explains"
+    assert write["run_id"] == run["run_id"]
+    assert write["mode"] is Mode.REPLAY
+    # 10 bars, warmup 3 -> bars 4..10 record, one reason each.
+    assert [reason.ts_bar_ms for reason in write["reasons"]] == [
+        bar.ts_open_ms for bar in _bars_of(feed_calls)[3:]
+    ]
+    assert {reason.state for reason in write["reasons"]} == {"compression"}
+    assert storage_calls["writes"] == [
+        {"run_id": run["run_id"], "mode": Mode.REPLAY, "signals": []}
+    ]
+    assert (
+        f"Run {run['run_id']}: emitted 0 signals, wrote 0. "
+        f"Recorded 7 bar reasons, wrote 7." in result.output
+    )
+
+
+def test_reasons_are_reported_but_not_written_under_no_persist(
+    monkeypatch, feed_calls, storage_calls
+):
+    use_strategy(monkeypatch, _Explains())
+
+    result = runner.invoke(cli.app, ["replay", "--no-persist"])
+
+    assert result.exit_code == 0, result.output
+    assert storage_calls["runs"] == []
+    assert storage_calls["reasons"] == []
+    assert result.output.strip() == (
+        "Emitted 0 signals over 10 bars (not persisted). 7 bar reasons not persisted."
+    )
+
+
+def _bars_of(feed_calls):
+    from strategy_lab.feeds.replay import _row_to_bar
+
+    [call] = feed_calls
+    [subscription] = call["subscriptions"]
+    df = synthetic_ohlcv(n=10)
+    return [
+        _row_to_bar(ts, row, subscription.instrument, subscription.timeframe, 15 * 60 * 1000)
+        for ts, row in df.iterrows()
+    ]
 
 
 def test_unknown_strategy_exits_non_zero(feed_calls):

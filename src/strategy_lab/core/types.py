@@ -170,3 +170,41 @@ class Signal:
     take_profit: Decimal | None = None
     strength: Decimal | None = None
     features: dict | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class BarReason:
+    """What a strategy saw on one bar, whether or not it acted on it.
+
+    :class:`Signal` is an *event*; this is the row underneath every bar, whether
+    or not one fired. Measured on R10a's diff window -- ``state_machine_v1`` over
+    6,048 bars of BTC/USDT perp 4h -- that is 325 signals against 6,048 reasons,
+    and 4,124 of those bars were spent in ``COMPRESSION``. The question a
+    dashboard exists to answer is at least as often "why did it **not** trade
+    here" as "why did it trade", and rows on decision bars alone cannot say.
+
+    ``features`` holds ``float``, not ``Decimal``, which is the one place this
+    module departs from its own header rule. That rule is about *prices and
+    quantities*; a feature value is neither. It is float64 out of the pandas
+    indicator layer by construction, so demanding a ``Decimal`` here would only
+    move ``Decimal(str(float(x)))`` out to every call site -- precisely the
+    argument ``storage.signals.ExposureSignal`` makes for a target level, and
+    precisely where the cast gets forgotten. The cast happens once, at the
+    storage bind.
+
+    ``None`` is "not yet measurable", never "measured, and neutral": warmup rows
+    are ``NaN`` by the ``features.base.mask_warmup`` convention and a ``0.0``
+    there would be a different claim about the market. ``state`` has no such
+    hole -- the machine answers on every bar, treating an unmeasurable row as a
+    failure rather than a gap -- so it is a plain label.
+    """
+
+    instrument: InstrumentId
+    timeframe: str
+    strategy_id: str
+    strategy_version: str
+    ts_bar_ms: int
+    ts_emit_ms: int
+    bar_is_closed: bool
+    state: str
+    features: dict[str, float | None]

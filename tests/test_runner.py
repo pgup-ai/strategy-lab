@@ -217,6 +217,111 @@ def test_priming_then_streaming_the_same_bar_does_not_duplicate_it():
     assert runner.buffer.replaced_duplicates == 1
 
 
+def test_a_strategy_with_no_feature_frame_records_no_reasons():
+    """An absent explanation and an empty one are different claims.
+
+    The four original strategies have no state to explain, and a row of nulls for
+    each of their bars would read as "the machine looked and saw nothing" rather
+    than "there is no machine". This is the same rule ``api/analysis._why_layer``
+    follows by returning ``None``.
+    """
+    runner = make_runner(_AlwaysLong())
+    for bar in bars_from(synthetic_ohlcv(n=10)):
+        runner.on_bar(bar)
+
+    assert runner.reasons == ()
+
+
+def test_one_reason_per_bar_past_warmup():
+    """The count is the emitting-bar count, and the boundary is the signal
+    boundary: a reason for a bar the runner suppressed would describe a decision
+    no consumer of this runner ever saw."""
+    strategy = get_strategy("state_machine_v1")
+    df = synthetic_ohlcv(n=strategy.warmup_bars + 20)
+    runner = make_runner(strategy)
+    runner.prime(df.iloc[: strategy.warmup_bars])
+    for bar in bars_from(df.iloc[strategy.warmup_bars :]):
+        runner.on_bar(bar)
+
+    streamed = df.index[strategy.warmup_bars :]
+    assert len(runner.reasons) == len(streamed)
+    assert [r.ts_bar_ms for r in runner.reasons] == [
+        ts.value // 1_000_000 for ts in streamed
+    ]
+    assert {r.strategy_id for r in runner.reasons} == {"state_machine_v1"}
+    assert set(runner.reasons[0].features) == set(strategy.features)
+
+
+def test_a_recorded_reason_matches_the_whole_history_why_layer():
+    """The bar-by-bar reason equals what the research path recomputes for that bar.
+
+    Same claim ``tests/test_replay_determinism.py`` makes for signals, and the
+    same causality it rests on: the machine walks forward, so the last row of a
+    run over the first *t* bars is row *t* of a run over all of them. This is
+    also the harness check behind the live/research diff -- a diff that shows
+    nothing is only good news if this passes, because otherwise both sides are
+    just failing to look.
+    """
+    from strategy_lab.api.analysis import _why_layer
+
+    strategy = get_strategy("state_machine_v1")
+    df = synthetic_ohlcv(n=strategy.warmup_bars + 20)
+    runner = make_runner(strategy)
+    runner.prime(df.iloc[: strategy.warmup_bars])
+    for bar in bars_from(df.iloc[strategy.warmup_bars :]):
+        runner.on_bar(bar)
+
+    why = _why_layer(strategy, df)
+    for offset, reason in enumerate(runner.reasons):
+        row = strategy.warmup_bars + offset
+        assert reason.state == why.states[row]
+        for name, value in reason.features.items():
+            assert value == why.features[name][row], f"{name} at row {row}"
+
+
+def test_a_redelivered_bar_replaces_its_reason_rather_than_adding_one():
+    """``BarBuffer`` takes the corrected copy of a repeated timestamp; the reason
+    for that bar has to follow it, or the stored row describes a bar the strategy
+    no longer holds. One bar, one state -- so unlike ``signals`` this is
+    expressible, and it is what keeps the row count the bar count."""
+    strategy = get_strategy("state_machine_v1")
+    df = synthetic_ohlcv(n=strategy.warmup_bars + 3)
+    runner = make_runner(strategy)
+    runner.prime(df.iloc[: strategy.warmup_bars])
+    bars = bars_from(df.iloc[strategy.warmup_bars :])
+    for bar in bars:
+        runner.on_bar(bar)
+
+    corrected = replace(bars[-1], close=bars[-1].close * Decimal("1.05"))
+    runner.on_bar(corrected)
+
+    assert len(runner.reasons) == len(bars)
+    assert len(runner.buffer) == len(df)
+    assert runner.reasons[-1].ts_bar_ms == corrected.ts_open_ms
+
+
+def test_record_reasons_false_skips_the_second_computation():
+    """The opt-out exists because the reason layer re-runs the feature frame and
+    the state walk the ``SignalSet`` does not carry, which roughly doubles the
+    per-bar cost. Signals are unaffected either way."""
+    strategy = get_strategy("state_machine_v1")
+    df = synthetic_ohlcv(n=strategy.warmup_bars + 5)
+    with_reasons = make_runner(strategy)
+    without = make_runner(strategy, record_reasons=False)
+    emitted = {}
+    for runner in (with_reasons, without):
+        runner.prime(df.iloc[: strategy.warmup_bars])
+        emitted[runner] = [
+            signal
+            for bar in bars_from(df.iloc[strategy.warmup_bars :])
+            for signal in runner.on_bar(bar)
+        ]
+
+    assert without.reasons == ()
+    assert len(with_reasons.reasons) == 5
+    assert emitted[with_reasons] == emitted[without]
+
+
 def test_features_are_json_ready_strings():
     """The JSONB column rejects anything non-serialisable, so metadata is
     stringified -- lossily: booleans and ints come back as text."""
