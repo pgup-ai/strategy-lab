@@ -166,6 +166,20 @@ class StrategyRunner:
         and the last row of each -- and the only alternative is a strategy-side
         return-value change, which would touch every strategy in the repo to
         serve the one path that cannot recompute.
+
+        **A raise here is fatal to the bar, deliberately, and it costs a signal
+        the strategy had already produced.** ``generate_signals`` has returned by
+        the time this runs, so catching would let the decision through and drop
+        only its explanation. It is not caught because this calls the strategy's
+        *own* ``feature_frame`` and ``machine``: for a state machine, a raise
+        means it could not compute the state it trades on, and a book that does
+        not know its own state should stop rather than trade on the half of the
+        computation that happened to succeed. That is the rule ``Crowding``
+        already follows by raising instead of returning a neutral 0.5. A caller
+        that wants signals without explanations has ``record_reasons=False``
+        rather than a swallowed exception. **Worth revisiting when a live feed
+        exists** -- losing a live decision to a diagnostic failure is a different
+        trade-off from losing a replayed one, and this path is replay-only today.
         """
         feature_frame = getattr(self.strategy, "feature_frame", None)
         machine = getattr(self.strategy, "machine", None)

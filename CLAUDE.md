@@ -313,13 +313,16 @@ Key design decisions that span multiple files:
   `Decimal(str(float(x)))`; binding a bare `float` there quietly re-corrupts
   what the migration fixed, on every re-fetch. **The `(38,18)` *scale* is a
   second and independent limit, and no test covers it**: a scale counts decimal
-  *places* where a float64 needs up to 17 *significant digits*, so anything
-  below ~0.1 is truncated. Measured — `1.234567890123456e-05` loses digits in a
-  `NUMERIC(38,18)` column and a BTC-scale price does not, which is why
-  `bar_reasons` stores its 0..1 feature values as unconstrained `NUMERIC`
-  (M34). `market_candles` still carries the scale, so it would bite on an asset
-  priced below roughly 0.1; the repo has never stored one, which is the only
-  reason it has never shown.
+  *places* where a float64 needs up to 17 *significant digits*, so a value whose
+  shortest round-trip decimal runs past **18 fractional places** is truncated.
+  That is a condition on the digits, not on the magnitude: measured, `0.05`,
+  `0.0625` and even `0.0052631578947368418` (18 places, 17 significant) all
+  round-trip, while `1/480` (19 places) and `2.0682314349096398e-05` (21) do
+  not. It therefore needs a small magnitude *and* many significant digits, which
+  is why `bar_reasons` stores its 0..1 feature values as unconstrained `NUMERIC`
+  (M34). `market_candles` still carries the scale, so a sub-0.01 price carrying
+  full float64 precision would lose digits; the repo has never stored one, which
+  is the only reason it has never shown.
 - **Funding and open interest are their own tables, not candle columns.**
   Funding is a cash flow settled on the venue's own schedule and OI is a
   point-in-time snapshot, so `funding_rates` and `open_interest`

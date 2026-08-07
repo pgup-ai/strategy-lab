@@ -207,7 +207,22 @@ def main() -> None:
     OUT.mkdir(parents=True, exist_ok=True)
     run_migrations()
     strategy = get_strategy(STRATEGY)
+
+    # A window at or below warmup produces no reason rows, and the per-feature
+    # shares below then divide by zero. `--bars 0` is worse than useless rather
+    # than merely empty: `iloc[-0:]` is `iloc[0:]`, so it silently replays the
+    # whole history instead of nothing.
+    if args.bars <= strategy.warmup_bars:
+        raise SystemExit(
+            f"--bars must exceed the strategy's warmup of {strategy.warmup_bars}; "
+            f"got {args.bars}, which would compare zero bars"
+        )
     start, end, frame_bars = window(args.bars)
+    if frame_bars <= strategy.warmup_bars:
+        raise SystemExit(
+            f"the stored window resolved to {frame_bars} bars, at or below the "
+            f"warmup of {strategy.warmup_bars}; nothing would be compared"
+        )
     print(f"{STRATEGY} v{strategy.version} on {EXCHANGE}/{MARKET_TYPE}/{SYMBOL}/{TIMEFRAME}")
     print(f"window: {start} -> {end}  ({frame_bars} bars, warmup {strategy.warmup_bars})\n")
 

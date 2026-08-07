@@ -225,10 +225,16 @@ def test_a_strategy_with_no_feature_frame_records_no_reasons():
     than "there is no machine". This is the same rule ``api/analysis._why_layer``
     follows by returning ``None``.
     """
-    runner = make_runner(_AlwaysLong())
-    for bar in bars_from(synthetic_ohlcv(n=10)):
+    strategy = _AlwaysLong()
+    runner = make_runner(strategy)
+    bars = bars_from(synthetic_ohlcv(n=10))
+    for bar in bars:
         runner.on_bar(bar)
 
+    # Bars suppressed by warmup record nothing either, so without this the
+    # assertion below would hold for a strategy that never reached the recording
+    # block at all -- passing for the wrong reason if the warmup ever grew.
+    assert len(bars) > strategy.warmup_bars
     assert runner.reasons == ()
 
 
@@ -292,12 +298,16 @@ def test_a_redelivered_bar_replaces_its_reason_rather_than_adding_one():
     for bar in bars:
         runner.on_bar(bar)
 
+    before = runner.reasons[-1]
     corrected = replace(bars[-1], close=bars[-1].close * Decimal("1.05"))
     runner.on_bar(corrected)
 
     assert len(runner.reasons) == len(bars)
     assert len(runner.buffer) == len(df)
     assert runner.reasons[-1].ts_bar_ms == corrected.ts_open_ms
+    # The timestamp is what the correction leaves alone, so it cannot tell a
+    # replaced reason from a kept one -- the values are what moved.
+    assert runner.reasons[-1].features != before.features
 
 
 def test_record_reasons_false_skips_the_second_computation():
