@@ -5,10 +5,11 @@ about its behavior. Update this file whenever strategy logic, parameters, or eng
 behavior changes — the README only carries quick-start commands.
 
 Last reviewed: 2026-08-06 — MDE R9 audited the R5 selection (hold the cell, don't re-fit
-it), R7 scored the state machine's states as chop detectors and they clear nothing, and R7b
-gave the machine the `energy` axis it was missing and R7c put the whole lifecycle on it.
-Neither cleared its bar, but read M29 before concluding the axis is dead: R7c's grid was
-never selectivity-matched to the gate it replaced.
+it); R7 scored the state machine's states as chop detectors and they clear nothing; R7b
+found the `energy` axis the machine ignores; R7c mis-specified its grid and R7d redid it
+properly. **R7d is the one to read**: `energy`'s chop signal is real and gets *stronger* at
+matched selectivity, and the machine built on it still loses on a clean holdout. The
+estimator works, the book does not (M31).
 
 ## At a glance
 
@@ -297,7 +298,12 @@ a rule on, but it is not what the gate passed on.
   units against a gate declared in `strength` rank units, and its tightest cell still
   advanced on 37.9% of bars where `strength ≥ 0.80` advances on 21.1% — a matched threshold
   is ≈0.155, well below anything tested. The mode ships because the axis is worth having
-  wired; the numbers above are not a verdict on it at matched selectivity.
+  wired; the numbers above are not a verdict on it at matched selectivity. **R7d supplied
+  that verdict**: with the grid declared in coverage rather than in `energy` units, all
+  three cells traded inside the turnover band, and the best still scored −0.3710 in sample
+  and **−0.4800 on the clean SOL holdout, −90.22% at 3× costs**. The chop signal is real —
+  it gets *stronger* when tightened — and the machine cannot trade it (M31). The mode stays
+  wired and stays off.
 - **`crowding` needs a `funding_rate` column, and only two of the three paths can supply
   one.** `backtest` and `sweep` attach it on a perp; `replay` cannot — `core.types.Bar`
   carries no funding and `BarBuffer` materializes OHLCV only — so **a replay of a perp
