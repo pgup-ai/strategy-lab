@@ -160,6 +160,8 @@ class Provenance:
     failure_bars: int | None
     warmup_bars: int
     allow_shorts: bool
+    # A pair. Read either alone and it says the wrong thing -- see ``_provenance``.
+    reads_crowding: bool
     crowding_measured: bool
     funding_attached: bool
     cost_model: dict[str, float] | None
@@ -549,7 +551,20 @@ def _provenance(
     """``crowding_measured`` comes from the strategy's own metadata, not from the
     funding flag: a strategy that reads no funding-derived feature measured no
     crowding however well funded the frame was, and the two facts are reported
-    separately so neither is inferred from the other."""
+    separately so neither is inferred from the other.
+
+    ``reads_crowding`` is what makes that pair legible, and it comes from a
+    **third** source: the strategy's declared features rather than the run's
+    metadata. It is a fact about the *configuration*, true before a bar is
+    computed, so introspecting it follows ``_why_layer`` above -- a strategy that
+    grows a crowding feature is described correctly without anyone remembering to
+    republish a metadata key, which is the failure mode a silent warning has.
+
+    Together they are the only honest predicate for the M20 condition: reads and
+    not measured is a machine running with ``crowding`` pinned to
+    ``NEUTRAL_CROWDING``, while neither is ``donchian``, where nothing is wrong
+    at all. A market-type gate cannot tell those apart.
+    """
     strategy = resolved.strategy
     return Provenance(
         identity={
@@ -565,6 +580,9 @@ def _provenance(
         failure_bars=failure_bars,
         warmup_bars=int(strategy.warmup_bars),
         allow_shorts=allow_shorts,
+        # The literal is ``state_machine_core.build_feature_frame``'s, which is the
+        # code that does the pinning.
+        reads_crowding="crowding" in getattr(strategy, "features", ()),
         crowding_measured=bool(metadata.get("crowding_measured", False)),
         funding_attached=prepared.funding_attached,
         cost_model=cost_model,

@@ -96,6 +96,23 @@ _SPOT = MarketDataIdentity(
     exchange="binance", market_type="spot", symbol="BTC/USDT", timeframe="4h"
 )
 
+_EQUITY = MarketDataIdentity(
+    exchange="yahoo", market_type="equity", symbol="SPY", timeframe="1h"
+)
+
+
+@pytest.fixture
+def equity_frame(monkeypatch):
+    """Long enough for the state machine, on a market that settles nothing.
+
+    ``spot_frame`` is 900 bars and ``state_machine_v1`` warms 2,192, so it
+    refuses before reaching provenance -- and the whole point here is a frame
+    that gets all the way to an answer with one of its features pinned.
+    """
+    df = synthetic_ohlcv(n=_MACHINE_BARS, freq="1h")
+    monkeypatch.setattr("strategy_lab.api.analysis.load_candles", lambda **kwargs: df)
+    return df
+
 
 # --------------------------------------------------------------------------
 # The test that justifies the feature.
@@ -279,6 +296,7 @@ def test_provenance_records_that_crowding_was_measured_on_a_funded_perp(perp_fra
     )
 
     assert payload.provenance.funding_attached is True
+    assert payload.provenance.reads_crowding is True
     assert payload.provenance.crowding_measured is True
     assert payload.provenance.strategy == "state_machine_v1"
     assert payload.provenance.version == "1.0.0"
@@ -312,6 +330,7 @@ def test_declining_funding_is_visible_rather_than_implied(perp_frame):
     )
 
     assert payload.provenance.funding_attached is False
+    assert payload.provenance.reads_crowding is True
     assert payload.provenance.crowding_measured is False
 
 
@@ -319,11 +338,45 @@ def test_a_strategy_that_reads_no_funding_says_so_without_claiming_a_measurement
     perp_frame,
 ):
     """``donchian`` on a funded perp: the column is on the frame and nothing read
-    it. Both facts are reported, so neither is inferred from the other."""
+    it. Both facts are reported, so neither is inferred from the other.
+
+    ``reads_crowding`` is the third, and it is what makes the other two legible:
+    ``crowding_measured`` is false here and nothing is wrong, where it is false
+    for ``state_machine_v1`` above and something is.
+    """
     payload = build_analysis(_PERP, strategy_name="donchian")
 
     assert payload.provenance.funding_attached is True
+    assert payload.provenance.reads_crowding is False
     assert payload.provenance.crowding_measured is False
+
+
+def test_a_market_that_settles_nothing_pins_crowding_and_says_which_strategy_cares(
+    equity_frame,
+):
+    """The case R10c surfaced, and the one a market-type gate cannot express.
+
+    On an equity ``with_funding_column`` returns before it consults ``required``,
+    so a crowding-reading strategy falls back to ``NEUTRAL_CROWDING`` on every bar
+    instead of being refused the way a perp would be -- the M20 condition,
+    permanently. Both strategies below run the same frame of the same market type,
+    so ``market_type`` cannot separate them and the pair can: one is a machine
+    running a feature short, the other is untouched.
+    """
+    machine = build_analysis(
+        _EQUITY, strategy_name="state_machine_v1", exit_mode=ExitMode.OPPOSITE_SIGNAL_ONLY
+    )
+    baseline = build_analysis(_EQUITY, strategy_name="donchian")
+
+    assert machine.provenance.funding_attached is False
+    assert machine.provenance.reads_crowding is True
+    assert machine.provenance.crowding_measured is False
+    assert machine.why is not None
+    assert set(machine.why.features["crowding"]) == {0.5}
+
+    assert baseline.provenance.funding_attached is False
+    assert baseline.provenance.reads_crowding is False
+    assert baseline.provenance.crowding_measured is False
 
 
 def test_the_default_exit_mode_is_named_rather_than_left_blank(perp_frame):

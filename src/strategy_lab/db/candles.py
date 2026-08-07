@@ -226,6 +226,15 @@ def load_candles(
 
 
 def list_candle_sets(database_url: str | None = None) -> pd.DataFrame:
+    """Every stored candle set: how far its bars reach, and when they were written.
+
+    ``last_written`` is ``max(updated_at)``, maintained by ``upsert_candles`` on
+    every conflicting row, and it answers a different question from
+    ``last_timestamp`` only where a history can be *restated* rather than
+    extended -- see ``browser/page.py``'s ``RESTATED_MARKET_TYPE``. One more
+    aggregate over the group-by that already runs, rather than a query per set,
+    because the board asks this of every stored dataset at once.
+    """
     engine = get_engine(database_url)
     query = (
         select(
@@ -236,6 +245,7 @@ def list_candle_sets(database_url: str | None = None) -> pd.DataFrame:
             func.count().label("candles"),
             func.min(candles_table.c.timestamp).label("first_timestamp"),
             func.max(candles_table.c.timestamp).label("last_timestamp"),
+            func.max(candles_table.c.updated_at).label("last_written"),
         )
         .group_by(
             candles_table.c.exchange,

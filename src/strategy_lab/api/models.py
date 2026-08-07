@@ -297,6 +297,7 @@ class ProvenanceModel(_Strict):
     failure_bars: int | None
     warmup_bars: int
     allow_shorts: bool
+    reads_crowding: bool
     crowding_measured: bool
     funding_attached: bool
     cost_model: dict[str, float] | None
@@ -325,6 +326,10 @@ class BoardRowModel(_Strict):
     ``unavailable`` is the whole of a refused row and ``provenance`` is
     ``None`` there: nothing was computed, so there is no run to describe, and a
     provenance block full of defaults would describe one that never happened.
+
+    ``dataset_last_bar`` and ``last_written`` are non-optional and survive a
+    refusal, because both are facts about the stored candles rather than about
+    the run.
     """
 
     identity: dict[str, str]
@@ -336,6 +341,7 @@ class BoardRowModel(_Strict):
     target: float | None
     as_of: str | None
     dataset_last_bar: str
+    last_written: str
     closes: list[float]
     unavailable: str | None
     provenance: ProvenanceModel | None

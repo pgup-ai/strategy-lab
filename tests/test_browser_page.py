@@ -252,14 +252,32 @@ def test_provenance_is_a_strip_rather_than_a_tooltip(page):
     assert "title=" not in _provenance_block(page)
 
 
-def test_an_unmeasured_crowding_on_a_perp_is_flagged_rather_than_stated(page):
-    """A perp whose crowding was not measured is not the funded run the charter
-    publishes, and the difference is 16.44% against 15.45% on R5's test half."""
+def test_a_pinned_crowding_is_flagged_by_the_strategy_rather_than_the_market(page):
+    """A strategy running with ``crowding`` pinned to neutral is not the funded run
+    the charter publishes -- 16.44% against 15.45% on R5's test half -- and which
+    strategy that is cannot be read off the market type. The gate this replaced,
+    ``perp && !crowding_measured``, marked ``donchian`` on a funded perp where
+    nothing is wrong and stayed silent on an equity machine running a feature
+    short.
+    """
     script = _script(page)
 
-    assert "var crowdingBlind = perp && !prov.crowding_measured;" in script
+    assert "var crowdingBlind = prov.reads_crowding && !prov.crowding_measured;" in script
     assert "crowdingBlind ? 'warn' : ''" in script
     assert "class = 'alert'" in script.replace("className", "class")
+    assert "perp && !prov.crowding_measured" not in script
+
+
+def test_a_board_tile_flags_a_pinned_crowding_on_the_same_predicate(page):
+    """Both surfaces or neither: a tile silent about what the strip warns on is
+    the board quietly contradicting the chart it links to (M36's failure mode)."""
+    block = _within(page, "function tileFeatures(row)")
+
+    assert "prov.reads_crowding && !prov.crowding_measured" in block
+    assert "crowding pinned neutral" in block
+    # The market type still picks the *wording* -- fetchable on a perp, permanent
+    # off it -- which is the distinction the predicate itself must not make.
+    assert "market_type === 'perp'" in block
 
 
 def test_every_provenance_field_the_payload_carries_reaches_the_strip(client):
@@ -278,8 +296,7 @@ def test_every_provenance_field_the_payload_carries_reaches_the_strip(client):
 
 
 def _provenance_block(page: str) -> str:
-    start = page.index("function renderProvenance")
-    return page[start : page.index("\n  }\n", start)]
+    return _within(page, "function renderProvenance")
 
 
 # --------------------------------------------------------------------------
@@ -460,6 +477,75 @@ def test_a_tile_whose_frame_ends_behind_the_newest_candle_says_so(page):
 
     assert "row.as_of === row.dataset_last_bar ? '' : 'lag'" in script
     assert "tileLine('newest stored bar', stamp(row.dataset_last_bar), 'lag')" in script
+
+
+def test_each_tile_states_the_staleness_that_applies_to_its_own_market(page):
+    """A perp's right edge can lag its newest candle by up to one settlement
+    (M37); an equity's cannot lag at all, and what goes stale is its whole
+    history. Neither line belongs on the other tile: stating a risk that does not
+    exist for a market is the same kind of wrong as stating none.
+    """
+    script = _script(page)
+    freshness = _within(script, "function tileFreshness(row, wrap)")
+    restated, funded = freshness.split("return;", 1)
+
+    # The restated branch says when the candles were written, and cannot say
+    # anything about a right edge that has nothing to lag behind.
+    assert "row.identity.market_type === CFG.restatedMarketType" in restated
+    assert "writtenLine(row)" in restated
+    assert "dataset_last_bar" not in restated
+
+    # The funded branch is R10b's, unchanged, and carries no write time.
+    assert "tileLine('newest stored bar', stamp(row.dataset_last_bar), 'lag')" in funded
+    assert "written" not in funded
+
+    assert "'candles written'" in _within(script, "function writtenLine(row)")
+
+
+def test_the_restated_market_and_when_it_is_flagged_are_decided_in_python(page):
+    """Which market has a restated history decides what a tile claims, and a
+    hardcoded ``'equity'`` in JavaScript is a contract decision somewhere no test
+    looks -- the same reason the chart primitives and the exit modes are tables
+    here.
+    """
+    from strategy_lab.browser.page import RESTATED_MARKET_TYPE, RESTATEMENT_STALE_DAYS
+
+    config = bootstrap_config()
+    script = _script(page)
+
+    assert config["restatedMarketType"] == RESTATED_MARKET_TYPE
+    assert config["restatementStaleDays"] == RESTATEMENT_STALE_DAYS
+    assert "'equity'" not in script, "the market type is retyped in the page script"
+    # The direction too, not merely the name: ``<=`` here would flag every
+    # freshly written history and nothing else, which is the same control
+    # reading exactly backwards.
+    assert "age >= CFG.restatementStaleDays" in _within(script, "function writtenLine(row)")
+
+
+def test_a_write_stamp_is_parsed_rather_than_left_to_the_browser(page):
+    """Postgres stamps carry a space where ISO 8601 wants a ``T``.
+
+    ``Date`` parses that by implementation-defined luck, and an unparseable one
+    yields ``NaN`` days, which compares false against every threshold and reads
+    as fresh -- a stale history silently unflagged, which is the failure this
+    line exists to prevent.
+    """
+    age = _within(_script(page), "function writtenAgeDays(written)")
+
+    assert "written.replace(' ', 'T')" in age
+    assert "isNaN(at) ? null" in age
+
+
+def test_the_default_market_is_the_one_whose_tiles_carry_no_restatement_caveat(page):
+    """``perp`` still, now that equities are selectable: opening on a market whose
+    every tile carries "this history is restated on a dividend" is a choice a
+    reader should make rather than inherit.
+    """
+    from strategy_lab.browser.page import DEFAULT_MARKET_TYPE, RESTATED_MARKET_TYPE
+
+    assert DEFAULT_MARKET_TYPE != RESTATED_MARKET_TYPE
+    assert bootstrap_config()["defaultMarketType"] == DEFAULT_MARKET_TYPE
+    assert "marketSel.value = CFG.defaultMarketType;" in _script(page)
 
 
 def test_a_tile_carries_the_provenance_a_figure_cannot_be_read_without(page):

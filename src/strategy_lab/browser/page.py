@@ -45,6 +45,12 @@ things that must not be re-decided in JavaScript:
 * **the exit modes offered**, taken from the engine's own ``ExitMode`` rather
   than retyped, so a mode added to the engine appears here and a mode removed
   from it disappears.
+* **which market type has a restated history, and when that becomes worth
+  flagging** (``RESTATED_MARKET_TYPE``, ``RESTATEMENT_STALE_DAYS``). A perp tile
+  and an equity tile go stale for different reasons and each states only its
+  own: a perp's frame is bounded by its own stored funding, so what can lag is
+  its **right edge**; an equity's runs to its newest bar and what can be stale
+  is its **whole history**, because a dividend rescales every past bar.
 * **the styling**, imported from ``backtests/report.py``: the frozen report and
   the live view are the same product and must not drift into looking like two.
 
@@ -99,11 +105,37 @@ CONTRACTS_WITH_EXIT_MODE: tuple[str, ...] = (Contract.SIGNAL_SET.value,)
 # here would be a control whose only outcome is a 422.
 MARKET_TYPES: tuple[str, ...] = get_args(MarketType)
 
-# What the board opens on. R10b is perps-first by its own plan -- the census's
-# item (f) makes an equity row's freshness a different and still-unmeasured
-# problem -- and the filter is on the page rather than in the endpoint, so
-# nothing is hidden from a caller who asks for the rest.
+# What the board opens on, and it stays ``perp`` now that equities are on it:
+# opening on a market whose every tile carries a restatement caveat is a choice
+# a reader should make rather than inherit. The filter is on the page rather
+# than in the endpoint, so nothing is hidden from a caller who asks for the rest.
 DEFAULT_MARKET_TYPE = "perp"
+
+# The market type whose stored history is *restated* rather than extended. The
+# Yahoo fetcher rescales every OHLC column by ``adj_close / close``, which is
+# correct -- a dividend-adjusted series is the right input for a strategy that
+# compounds -- so what a tile owes a reader is not a different number but the
+# fact that the number can move backwards in time. Measured on the stored SPY
+# weekly series against a fresh fetch: 333 of 333 bars moved, median 0.257%, and
+# ``donchian`` differed on 3 of them where two ratio-based strategies differed
+# on none.
+RESTATED_MARKET_TYPE = "equity"
+
+# How old a stored equity history has to be before "nothing has been restated
+# since" stops being a safe assumption. Quarterly is the ordinary distribution
+# cadence for a US equity or equity ETF and monthly is the shortest routine one,
+# so a month is the point past which at least one ex-dividend date has plausibly
+# passed for *something* in the universe. Deliberately not an attempt to detect a
+# dividend: that means storing a second copy to diff against, and R10a's rule is
+# to persist only what cannot be re-fetched. The flag says "old enough to be
+# worth refreshing", never "this was restated".
+RESTATEMENT_STALE_DAYS = 31
+
+if RESTATED_MARKET_TYPE not in MARKET_TYPES:
+    raise RuntimeError(
+        f"the board flags {RESTATED_MARKET_TYPE!r} histories as restatable, which "
+        f"storage does not key candles on: {sorted(MARKET_TYPES)}"
+    )
 
 if DEFAULT_MARKET_TYPE not in MARKET_TYPES:
     raise RuntimeError(
@@ -120,6 +152,8 @@ def bootstrap_config() -> dict[str, object]:
         "exitModes": [mode.value for mode in ExitMode],
         "marketTypes": list(MARKET_TYPES),
         "defaultMarketType": DEFAULT_MARKET_TYPE,
+        "restatedMarketType": RESTATED_MARKET_TYPE,
+        "restatementStaleDays": RESTATEMENT_STALE_DAYS,
         "colors": {"up": UP, "down": DOWN, "upDim": UP_DIM, "downDim": DOWN_DIM},
     }
 
@@ -304,7 +338,10 @@ __SHELL_CSS__
     that answered by a cheaper route would be a third path free to disagree with
     the other two. Perp frames are bounded by their own stored funding span, so
     <b>as of</b> can sit a bar behind the newest stored candle; refresh advances
-    candles and settlements together. Nothing here is on a timer.
+    candles and settlements together. Equity frames run to their newest bar and
+    settle nothing, so they show <b>candles written</b> instead: that history is
+    dividend-adjusted, which restates past bars rather than appending to them.
+    Nothing here is on a timer.
   </p>
 </div>
 <div class="provenance instrument-only" id="provenance"></div>
@@ -663,7 +700,12 @@ __SHELL_CSS__
     var host = el('provenance');
     host.replaceChildren();
     var perp = prov.identity.market_type === 'perp';
-    var crowdingBlind = perp && !prov.crowding_measured;
+    // Not the market type, which was wrong in both directions: it marked
+    // `donchian` on a funded perp, where nothing is wrong, and stayed silent on
+    // a state machine running an equity with crowding pinned to 0.5 -- the M20
+    // condition itself. A marker that fires when nothing is wrong is how a
+    // reader learns to ignore it, so the false alarm is not the lesser half.
+    var crowdingBlind = prov.reads_crowding && !prov.crowding_measured;
 
     host.appendChild(chip('Strategy', prov.strategy + ' v' + prov.version));
     host.appendChild(chip('Contract', prov.contract));
@@ -696,18 +738,21 @@ __SHELL_CSS__
     if (crowdingBlind) {
       var alert = document.createElement('p');
       alert.className = 'alert';
-      // Both branches say only what is true of *this* strategy. "Crowding-
-      // neutral variant" is a claim about a strategy that reads crowding, and
-      // said about one that does not it invents a difference.
-      alert.textContent = prov.funding_attached
-        ? 'Perp, funding attached, and still no crowding behind these bars: ' +
-          prov.strategy + ' reads no funding-derived feature, so what is drawn ' +
-          'here is what it would do on a venue that never settled.'
-        : 'Perp with no funding column on this frame. ' + prov.strategy + ' reads ' +
-          'no funding-derived feature, so its own output is unaffected — but ' +
-          'nothing here is comparable with a funded run, and the charter\\'s R5 ' +
-          'figures are the crowding-measured ones. A strategy that does read ' +
-          'funding is refused on this frame rather than falling back to neutral.';
+      // The split is the market type because that decides whether the gap can
+      // be closed at all. Not `funding_attached`, which used to split it: above
+      // this line the column is absent by construction, since `crowding_measured`
+      // *is* whether the strategy found it, so that branch is unreachable now.
+      alert.textContent = perp
+        ? prov.strategy + ' reads crowding and this perp frame carries no funding ' +
+          'column, so it ran with crowding pinned to neutral rather than measured. ' +
+          'Not comparable with a funded run: measured on BTC/USDT perp 4h over R5\\'s ' +
+          'test half, the crowding-neutral variant returned +16.44% against the ' +
+          'published +15.45%. Fetch funding for this range.'
+        : prov.identity.market_type + ' settles no funding, and ' + prov.strategy +
+          ' reads crowding — so it ran on every bar with that feature pinned to ' +
+          'neutral, one feature short of the machine the charter measured. This is ' +
+          'permanent here rather than a fetch away: on a perp the same frame would ' +
+          'be refused instead of falling back.';
       host.appendChild(alert);
     }
   }
@@ -903,19 +948,74 @@ __SHELL_CSS__
       host.appendChild(chip);
     });
     var prov = row.provenance;
-    var perp = row.identity.market_type === 'perp';
-    if (prov && perp && !prov.crowding_measured) {
+    // The strip's predicate, for the strip's reason. `crowding 0.500` is already
+    // in the chips above, so what this adds is that the 0.5 was *pinned*.
+    if (prov && prov.reads_crowding && !prov.crowding_measured) {
       var blind = document.createElement('span');
       blind.className = 'warn';
-      blind.textContent = 'crowding_measured no';
-      blind.title = prov.funding_attached
-        ? prov.strategy + ' reads no funding-derived feature: this is what it ' +
-          'would do on a venue that never settled.'
-        : 'perp with no funding column on this frame — not comparable with a ' +
-          'funded run, and the charter\\'s R5 figures are the crowding-measured ones.';
+      blind.textContent = 'crowding pinned neutral';
+      blind.title = row.identity.market_type === 'perp'
+        ? prov.strategy + ' reads crowding and this perp frame carries no funding ' +
+          'column — not comparable with a funded run, and the charter\\'s R5 figures ' +
+          'are the crowding-measured ones.'
+        : row.identity.market_type + ' settles no funding, so ' + prov.strategy +
+          ' ran one feature short with crowding pinned to 0.5. Permanent here: on ' +
+          'a perp this frame would be refused rather than fall back.';
       host.appendChild(blind);
     }
     return host;
+  }
+
+  function writtenAgeDays(written) {
+    // Postgres stamps read `2026-08-03 02:20:07.225509+00:00`, whose space makes
+    // it not ISO 8601 -- Date parses that by implementation-defined luck, so the
+    // same swap the tile bounds already do. An unparseable stamp is null rather
+    // than NaN days, which would compare false against every threshold and read
+    // as fresh.
+    if (!written) return null;
+    var at = new Date(written.replace(' ', 'T')).getTime();
+    return isNaN(at) ? null : (Date.now() - at) / 86400000;
+  }
+
+  function writtenLine(row) {
+    // Never "restated": nothing here detects a dividend, and claiming one would
+    // need a second stored copy to diff against -- which R10a's rule refuses.
+    // What this says is how old these bars are as *writes*, flagged once that is
+    // long enough for a distribution to have plausibly landed since.
+    var age = writtenAgeDays(row.last_written);
+    var stale = age !== null && age >= CFG.restatementStaleDays;
+    var line = tileLine('candles written', stamp(row.last_written), stale ? 'lag' : '');
+    line.title = 'Dividend-adjusted, so a distribution rescales past bars rather ' +
+      'than appending one: measured on the stored SPY weekly series, 333 of 333 ' +
+      'bars moved against a fresh fetch (median 0.257%) and donchian differed on ' +
+      '3 of them. This is the newest write in the set — refresh re-fetches the ' +
+      'recent bars.' + (stale
+        ? ' Older than ' + CFG.restatementStaleDays + ' days, which is long enough ' +
+          'for a distribution to have landed since.'
+        : '');
+    return line;
+  }
+
+  // Each tile states its own staleness and not the other's: a perp's right edge
+  // can lag its newest candle by up to one settlement (M37), where an equity's
+  // cannot lag at all and what goes stale is the whole history. Carrying both
+  // lines on both tiles would state a risk that does not exist for one of them,
+  // which is the same kind of wrong as stating neither.
+  function tileFreshness(row, wrap) {
+    if (row.identity.market_type === CFG.restatedMarketType) {
+      wrap.appendChild(tileLine('as of', stamp(row.as_of)));
+      wrap.appendChild(writtenLine(row));
+      return;
+    }
+    wrap.appendChild(tileLine('as of', stamp(row.as_of),
+      row.as_of === row.dataset_last_bar ? '' : 'lag'));
+    if (row.as_of !== row.dataset_last_bar) {
+      // Bounded by stored funding rather than by the newest candle, so the lag
+      // is a fact about settlements and not a stale page. Said out loud because
+      // a board silently a bar behind is exactly the figure-without-context the
+      // provenance habit exists to prevent.
+      wrap.appendChild(tileLine('newest stored bar', stamp(row.dataset_last_bar), 'lag'));
+    }
   }
 
   function tile(row) {
@@ -933,6 +1033,13 @@ __SHELL_CSS__
       refusal.title = row.unavailable;
       wrap.appendChild(refusal);
       wrap.appendChild(tileLine('newest stored bar', stamp(row.dataset_last_bar)));
+      // No `as of` to compare against here, so the extent line above carries no
+      // lag claim -- but the write time is still a fact about the stored bars,
+      // and on a restated history it is the one that says whether re-fetching
+      // would change what is refusing.
+      if (row.identity.market_type === CFG.restatedMarketType) {
+        wrap.appendChild(writtenLine(row));
+      }
       return wrap;
     }
 
@@ -944,15 +1051,7 @@ __SHELL_CSS__
       wrap.appendChild(pill);
     }
     wrap.appendChild(sparkline(row.closes));
-    wrap.appendChild(tileLine('as of', stamp(row.as_of),
-      row.as_of === row.dataset_last_bar ? '' : 'lag'));
-    if (row.as_of !== row.dataset_last_bar) {
-      // Bounded by stored funding rather than by the newest candle, so the lag
-      // is a fact about settlements and not a stale page. Said out loud because
-      // a board silently a bar behind is exactly the figure-without-context the
-      // provenance habit exists to prevent.
-      wrap.appendChild(tileLine('newest stored bar', stamp(row.dataset_last_bar), 'lag'));
-    }
+    tileFreshness(row, wrap);
     if (row.latest_fill) {
       var fill = row.latest_fill;
       wrap.appendChild(tileLine(
@@ -1433,4 +1532,12 @@ __SHELL_CSS__
 </html>
 """
 
-__all__ = ["CONTRACT_PRIMITIVES", "bootstrap_config", "render_browser_html"]
+__all__ = [
+    "CONTRACT_PRIMITIVES",
+    "DEFAULT_MARKET_TYPE",
+    "MARKET_TYPES",
+    "RESTATED_MARKET_TYPE",
+    "RESTATEMENT_STALE_DAYS",
+    "bootstrap_config",
+    "render_browser_html",
+]
