@@ -6,7 +6,7 @@ from strategy_lab.core.clock import Clock
 from strategy_lab.core.types import Bar, BarEvent, InstrumentId, MarketSnapshot, Signal
 from strategy_lab.engine.context import BarBuffer
 from strategy_lab.engine.market_clock import MarketClock
-from strategy_lab.engine.runner import StrategyRunner
+from strategy_lab.engine.runner import DEFAULT_FAILURE_BARS, ExitMode, StrategyRunner
 from strategy_lab.strategies.base import Strategy
 
 
@@ -34,13 +34,24 @@ class MultiAssetRunner:
         strategies: dict[InstrumentId, Strategy],
         timeframe: str,
         clock: Clock,
+        exit_mode: ExitMode | str | None = None,
+        failure_bars: int = DEFAULT_FAILURE_BARS,
         context: set[InstrumentId] | None = None,
     ) -> None:
         self.timeframe = timeframe
         self.clock = clock
+        # One mode for every instrument, not one per instrument: the mode is a
+        # property of how the book is run, and a universe where some instruments
+        # exit on a different rule is a different design decision than this class
+        # is making. A caller that wants that builds the runners itself.
         self._runners = {
             instrument: StrategyRunner(
-                strategy=strategy, instrument=instrument, timeframe=timeframe, clock=clock
+                strategy=strategy,
+                instrument=instrument,
+                timeframe=timeframe,
+                clock=clock,
+                exit_mode=exit_mode,
+                failure_bars=failure_bars,
             )
             for instrument, strategy in strategies.items()
         }

@@ -58,6 +58,19 @@ runner or to strategy code. See
 [the Phase 1a design doc](docs/design/2026-08-02-realtime-trading-framework.md)
 for the full rationale.
 
+**There is one runner per strategy contract, and each refuses the other's
+strategies at construction.** `StrategyRunner` drives `SignalSet`;
+`ExposureRunner` (`engine/exposure_runner.py`) drives `TargetExposure` and emits
+`ExposureSignal`. Two classes rather than one dispatching on contract, for the
+reason there are three registries — a shared class runs both and says nothing
+when one half breaks. **The refusal is at construction rather than first use**
+(M40): `on_bar` returns before touching the strategy while the buffer is inside
+warmup, so a contract mismatch is invisible for exactly as long as the warmup —
+measured at **2,192 bars, 365 days at 4h**, before the check existed.
+`StrategyRunner` also takes an optional `ExitMode`, and applies it by calling
+`engine._exit_signals` **over the buffer** rather than reimplementing it; without
+one it emits the strategy's own exits, which is what it did before R10e.
+
 The event-driven flow also runs many instruments at once: `stream()` k-way
 merges every subscription into one time-ordered stream, `MarketClock`
 (`engine/market_clock.py`) groups it into `MarketSnapshot`s, and
@@ -246,7 +259,12 @@ Key design decisions that span multiple files:
 - **Exit ownership is split between strategies and the engine.** Strategies return a
   `SignalSet` of exit ingredients (opposite-signal exits, setup stop levels,
   trend-failure series, optional per-bar `position_size` scale); the engine's `ExitMode`
-  decides which ingredients fire. Not every strategy supports every mode — see the
+  decides which ingredients fire, and since R10e `StrategyRunner` takes the same
+  `ExitMode` and resolves it through the engine's own function. Two modes do not
+  reach the event path: `setup_invalidation_stop` is **refused** there, because
+  the engine applies it as an intrabar `sl_stop` that no bar-close `Signal`
+  encodes, and `trend_structure` can begin raising **mid-run** once a growing
+  buffer acquires the short entries it refuses. Not every strategy supports every mode — see the
   exit-mode × strategy matrix in [STRATEGIES.md](STRATEGIES.md) before changing exit
   behavior or comparing runs. Two strategies invert the usual pattern:
   `trend_rider_v1_deepseek_v4_pro` bakes all exits into its own signals (run with
