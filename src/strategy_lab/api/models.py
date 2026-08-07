@@ -178,8 +178,9 @@ class BoardQuery(_Strict):
 
     There is no cost model, no ``allow_shorts`` and no ``failure_bars``: the
     board runs every row at the engine's defaults, which each row's own
-    provenance states. Widening the query would multiply the cache key by
-    settings a tile cannot show.
+    provenance states. Every row is a full recompute, so widening the query
+    would buy a tile settings it cannot show at the cost of running the board
+    again per combination.
     """
 
     strategies: Annotated[str, Field(min_length=1, max_length=512)]
@@ -187,8 +188,9 @@ class BoardQuery(_Strict):
     # missing filter: the board covers what is stored.
     market_type: MarketType | None = None
     exit_mode: ExitMode | None = None
-    # Bounded above by what a cached row holds: asking for more would serve a
-    # shorter tail than the number requested, silently.
+    # Bounded above by ``board.MAX_SPARK_BARS``, which is where a row's tail is
+    # actually cut: asking for more would serve a shorter one than the number
+    # requested, silently.
     spark_bars: Annotated[int, Field(ge=2, le=MAX_SPARK_BARS)] = DEFAULT_SPARK_BARS
 
     @property
@@ -202,10 +204,11 @@ class BoardQuery(_Strict):
         if not names:
             raise ValueError("name at least one strategy")
         if len(set(names)) != len(names):
-            # Two identical rows per dataset, one of them shadowing the other in
-            # the cache. Refused rather than deduplicated: the caller asked for
-            # something that cannot be drawn, and silently narrowing it is the
-            # habit this whole module exists to break.
+            # Two identical tiles per dataset, and the second computed from
+            # scratch to say what the first already said. Refused rather than
+            # deduplicated: the caller asked for something that cannot be drawn,
+            # and silently narrowing it is the habit this module exists to
+            # break.
             raise ValueError(f"duplicate strategy in {value!r}")
         for name in names:
             resolve_strategy(name)

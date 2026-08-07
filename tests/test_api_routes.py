@@ -141,7 +141,7 @@ def test_an_unregistered_strategy_on_the_board_is_refused_by_name(client):
 
 
 def test_the_same_strategy_twice_on_the_board_is_refused_rather_than_deduplicated(client):
-    """Two identical tiles per instrument, one shadowing the other in the cache."""
+    """Two identical tiles per instrument, the second recomputed to say the same."""
     response = _board(client, strategies="donchian,donchian")
 
     assert response.status_code == 422

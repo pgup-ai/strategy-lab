@@ -289,7 +289,7 @@ def test_a_row_is_the_last_bar_of_every_series_the_payload_carries(monkeypatch):
 
 
 # --------------------------------------------------------------------------
-# Checks 3 and 4 -- the cache, and what moves it.
+# Check 3 -- every request recomputes, which is the browser's contract.
 # --------------------------------------------------------------------------
 
 
@@ -552,7 +552,7 @@ def test_the_sparkline_tail_is_bounded_by_what_was_asked_for(monkeypatch):
         return row["closes"]
 
     assert len(closes()) == 120
-    # A cached row holds the query model's own upper bound and is trimmed on the
+    # A row is built with ``board.MAX_SPARK_BARS`` and trimmed on the
     # way out, so a longer tail asked for second is served in full rather than
     # from a copy already cut to the first request's length.
     assert len(closes(spark_bars=MAX_SPARK_BARS)) == MAX_SPARK_BARS
