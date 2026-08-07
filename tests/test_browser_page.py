@@ -711,7 +711,16 @@ def test_refresh_all_is_refused_while_the_board_is_still_arriving(page):
     board = script[script.index("function loadBoard()"):]
     board = board[: board.index("\n  function ", 1)]
     assert "el('refresh-all').disabled = true;" in board
-    # Re-enabled only for the load that is still current -- an aborted one must
-    # not undo the disable its successor just set.
-    assert "if (token === boardPending) el('refresh-all').disabled = false;" in board
     assert board.index("disabled = true;") < board.index("disabled = false;")
+
+    # Re-enabled on the *success* path only, and after its own token guard, so
+    # neither a superseded load nor a truncated one lifts the disable: a stream
+    # that ended early leaves `boardIdentities` partial, and "refresh all" over
+    # a partial list reports it as the whole batch. Each tile keeps its own
+    # button, which is the escape hatch that stays honest.
+    done = board[board.index("}, signal).then(function () {"):]
+    done = done[: done.index("}).catch(")]
+    assert "el('refresh-all').disabled = false;" in done
+    assert done.index("if (token !== boardPending) return;") < done.index("disabled = false;")
+    caught = board[board.index("}).catch("):]
+    assert "disabled = false;" not in caught, "a truncated board must stay unrefreshable"

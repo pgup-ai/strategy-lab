@@ -1106,6 +1106,12 @@ __SHELL_CSS__
       setStatus(rows + ' rows · first in ' + painted + ' ms');
     }, signal).then(function () {
       if (token !== boardPending) return;
+      // Here rather than after the catch below: a truncated stream leaves
+      // `boardIdentities` holding only the rows that arrived, and "refresh all"
+      // over a partial list reports it as the whole batch. A board that did not
+      // finish is not one you can refresh all of -- each tile keeps its own
+      // button, which is the honest escape hatch.
+      el('refresh-all').disabled = false;
       // After the rows, which is where `refreshAll` puts its own failures too:
       // this clears the banner, so anything shown before it is gone. The held
       // failure is re-shown rather than consumed -- only a fresh refresh clears
@@ -1126,10 +1132,6 @@ __SHELL_CSS__
       // blank one, and the banner says it is truncated. The banner alone: a
       // board that failed to stream says nothing about the chart's provenance.
       if (token === boardPending) setBanner(error.message);
-    }).then(function () {
-      // Not on an aborted board: the load that superseded it has already
-      // disabled the button for its own stream and is still filling the list.
-      if (token === boardPending) el('refresh-all').disabled = false;
     });
   }
 
