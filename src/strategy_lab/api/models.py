@@ -297,6 +297,7 @@ class ProvenanceModel(_Strict):
     failure_bars: int | None
     warmup_bars: int
     allow_shorts: bool
+    reads_crowding: bool
     crowding_measured: bool
     funding_attached: bool
     cost_model: dict[str, float] | None

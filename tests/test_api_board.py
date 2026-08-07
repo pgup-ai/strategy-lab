@@ -275,7 +275,8 @@ def test_a_row_is_the_last_bar_of_every_series_the_payload_carries(monkeypatch):
         provenance=Provenance(
             identity={}, strategy=_MACHINE, version="1.0.0", contract="signal_set",
             exit_mode="continuation_failure", failure_bars=4, warmup_bars=1,
-            allow_shorts=True, crowding_measured=True, funding_attached=True,
+            allow_shorts=True, reads_crowding=True, crowding_measured=True,
+            funding_attached=True,
             cost_model=None, first_bar="2024-01-01", last_bar="2024-01-02",
             bar_count=4, generated_at="2024-01-02T00:00:00+00:00",
         ),

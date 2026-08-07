@@ -252,14 +252,33 @@ def test_provenance_is_a_strip_rather_than_a_tooltip(page):
     assert "title=" not in _provenance_block(page)
 
 
-def test_an_unmeasured_crowding_on_a_perp_is_flagged_rather_than_stated(page):
-    """A perp whose crowding was not measured is not the funded run the charter
-    publishes, and the difference is 16.44% against 15.45% on R5's test half."""
+def test_a_pinned_crowding_is_flagged_by_the_strategy_rather_than_the_market(page):
+    """A strategy running with ``crowding`` pinned to neutral is not the funded run
+    the charter publishes -- 16.44% against 15.45% on R5's test half -- and which
+    strategy that is cannot be read off the market type.
+
+    The gate this replaced was ``perp && !crowding_measured``, and it was wrong in
+    both directions: it marked ``donchian`` on a funded perp, where nothing is
+    wrong, and stayed silent on a state machine running an equity a feature short.
+    """
     script = _script(page)
 
-    assert "var crowdingBlind = perp && !prov.crowding_measured;" in script
+    assert "var crowdingBlind = prov.reads_crowding && !prov.crowding_measured;" in script
     assert "crowdingBlind ? 'warn' : ''" in script
     assert "class = 'alert'" in script.replace("className", "class")
+    assert "perp && !prov.crowding_measured" not in script
+
+
+def test_a_board_tile_flags_a_pinned_crowding_on_the_same_predicate(page):
+    """Both surfaces or neither: a tile silent about what the strip warns on is
+    the board quietly contradicting the chart it links to (M36's failure mode)."""
+    block = _function_block(page, "tileFeatures")
+
+    assert "prov.reads_crowding && !prov.crowding_measured" in block
+    assert "crowding pinned neutral" in block
+    # The market type still picks the *wording* -- fetchable on a perp, permanent
+    # off it -- which is the distinction the predicate itself must not make.
+    assert "market_type === 'perp'" in block
 
 
 def test_every_provenance_field_the_payload_carries_reaches_the_strip(client):
@@ -277,9 +296,18 @@ def test_every_provenance_field_the_payload_carries_reaches_the_strip(client):
     assert {field.name for field in fields(Provenance)} <= rendered
 
 
-def _provenance_block(page: str) -> str:
-    start = page.index("function renderProvenance")
+def _function_block(page: str, name: str) -> str:
+    """One function's source, so "the tile says X" is not satisfied by the strip.
+
+    Nested blocks close at four spaces or deeper, so the first two-space ``}`` is
+    the function's own.
+    """
+    start = page.index("function " + name)
     return page[start : page.index("\n  }\n", start)]
+
+
+def _provenance_block(page: str) -> str:
+    return _function_block(page, "renderProvenance")
 
 
 # --------------------------------------------------------------------------

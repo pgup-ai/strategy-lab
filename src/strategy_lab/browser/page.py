@@ -706,7 +706,14 @@ __SHELL_CSS__
     var host = el('provenance');
     host.replaceChildren();
     var perp = prov.identity.market_type === 'perp';
-    var crowdingBlind = perp && !prov.crowding_measured;
+    // Not the market type. `crowding_measured no` is a fault for a strategy that
+    // *reads* crowding and a tautology for one that does not, and gating on
+    // `perp` conflated the two in both directions: it marked `donchian` on a
+    // funded perp, where nothing is wrong, and stayed silent on a state machine
+    // running an equity with crowding pinned to 0.5 -- the M20 condition itself,
+    // on the market R10c widened to. A marker that fires when nothing is wrong is
+    // how a reader learns to ignore it.
+    var crowdingBlind = prov.reads_crowding && !prov.crowding_measured;
 
     host.appendChild(chip('Strategy', prov.strategy + ' v' + prov.version));
     host.appendChild(chip('Contract', prov.contract));
@@ -739,18 +746,22 @@ __SHELL_CSS__
     if (crowdingBlind) {
       var alert = document.createElement('p');
       alert.className = 'alert';
-      // Both branches say only what is true of *this* strategy. "Crowding-
-      // neutral variant" is a claim about a strategy that reads crowding, and
-      // said about one that does not it invents a difference.
-      alert.textContent = prov.funding_attached
-        ? 'Perp, funding attached, and still no crowding behind these bars: ' +
-          prov.strategy + ' reads no funding-derived feature, so what is drawn ' +
-          'here is what it would do on a venue that never settled.'
-        : 'Perp with no funding column on this frame. ' + prov.strategy + ' reads ' +
-          'no funding-derived feature, so its own output is unaffected — but ' +
-          'nothing here is comparable with a funded run, and the charter\\'s R5 ' +
-          'figures are the crowding-measured ones. A strategy that does read ' +
-          'funding is refused on this frame rather than falling back to neutral.';
+      // Both branches say only what is true of *this* strategy, and the split is
+      // the market type because that is what decides whether the gap can be
+      // closed. It is no longer `funding_attached`: above this line the column is
+      // absent by construction, since `crowding_measured` *is* whether the
+      // strategy found it, so that branch would never be taken.
+      alert.textContent = perp
+        ? prov.strategy + ' reads crowding and this perp frame carries no funding ' +
+          'column, so it ran with crowding pinned to neutral rather than measured. ' +
+          'Not comparable with a funded run: measured on BTC/USDT perp 4h over R5\\'s ' +
+          'test half, the crowding-neutral variant returned +16.44% against the ' +
+          'published +15.45%. Fetch funding for this range.'
+        : prov.identity.market_type + ' settles no funding, and ' + prov.strategy +
+          ' reads crowding — so it ran on every bar with that feature pinned to ' +
+          'neutral, one feature short of the machine the charter measured. This is ' +
+          'permanent here rather than a fetch away: on a perp the same frame would ' +
+          'be refused instead of falling back.';
       host.appendChild(alert);
     }
   }
@@ -946,16 +957,21 @@ __SHELL_CSS__
       host.appendChild(chip);
     });
     var prov = row.provenance;
-    var perp = row.identity.market_type === 'perp';
-    if (prov && perp && !prov.crowding_measured) {
+    // The same predicate as the provenance strip, for the same reason: a tile
+    // that marked every `donchian` row and no equity state machine is marking
+    // the market type rather than the fault. `crowding 0.500` is right there in
+    // the chips above, so what this adds is that the 0.5 was *pinned*.
+    if (prov && prov.reads_crowding && !prov.crowding_measured) {
       var blind = document.createElement('span');
       blind.className = 'warn';
-      blind.textContent = 'crowding_measured no';
-      blind.title = prov.funding_attached
-        ? prov.strategy + ' reads no funding-derived feature: this is what it ' +
-          'would do on a venue that never settled.'
-        : 'perp with no funding column on this frame — not comparable with a ' +
-          'funded run, and the charter\\'s R5 figures are the crowding-measured ones.';
+      blind.textContent = 'crowding pinned neutral';
+      blind.title = row.identity.market_type === 'perp'
+        ? prov.strategy + ' reads crowding and this perp frame carries no funding ' +
+          'column — not comparable with a funded run, and the charter\\'s R5 figures ' +
+          'are the crowding-measured ones.'
+        : row.identity.market_type + ' settles no funding, so ' + prov.strategy +
+          ' ran one feature short with crowding pinned to 0.5. Permanent here: on ' +
+          'a perp this frame would be refused rather than fall back.';
       host.appendChild(blind);
     }
     return host;
