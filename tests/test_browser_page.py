@@ -592,3 +592,39 @@ def test_opening_a_tile_carries_its_exact_edges_not_a_rounded_day(page):
         assert "exactBounds = null;" in after[: after.index("});")], owner
     # And editing a date, which makes the visible dates the truth again.
     assert "exactBounds = null;\n      load();" in script
+
+
+def test_refreshing_the_instrument_drops_the_frame_the_tile_pinned(page):
+    """A refresh moves the frame's right edge, so the tile's edges stop describing it.
+
+    Kept, the reload would re-request the old ``end`` -- ``load_candles`` filters
+    ``timestamp <= end`` -- and draw no new bars while the status reported the
+    candles it had just taken. The board, recomputing against the new funding
+    window, would then show a later bar than the chart it links to.
+    """
+    script = _script(page)
+
+    body = script[script.index("el('refresh').addEventListener"):]
+    body = body[: body.index("});")]
+    assert "exactBounds = null;" in body
+    assert body.index("exactBounds = null;") < body.index("return load();")
+
+
+def test_a_refresh_that_outlives_the_board_view_does_not_restart_it(page):
+    """``refreshOne`` and ``refreshAll`` resolve on their own schedule.
+
+    Open a tile while one is in flight and the continuation would start a full
+    board -- a whole-history recompute per row -- against a hidden host, then
+    retitle the page over the chart the user is looking at. ``setView`` aborts
+    the *stream*; it cannot abort a POST that has not resolved yet.
+    """
+    script = _script(page)
+
+    assert "function reloadBoardIfShown()" in script
+    assert "viewSel.value === 'board' ? loadBoard() : Promise.resolve();" in script
+    # Both refresh paths go through it rather than calling loadBoard directly.
+    for owner in ("function refreshOne(", "function refreshAll("):
+        body = script[script.index(owner):]
+        body = body[: body.index("\n  function ", 1)]
+        assert "reloadBoardIfShown()" in body, owner
+        assert "return loadBoard();" not in body, owner

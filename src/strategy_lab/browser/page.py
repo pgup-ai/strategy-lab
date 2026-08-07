@@ -1001,6 +1001,11 @@ __SHELL_CSS__
   // Set only when a tile opens the instrument view; see `query`.
   var exactBounds = null;
 
+  function reloadBoardIfShown() {
+    // A refresh started on the board can resolve after the user has left it.
+    return viewSel.value === 'board' ? loadBoard() : Promise.resolve();
+  }
+
   function abortBoard() {
     // Stops the rows at the server, not just on screen. Bumping the token as
     // well so anything already decoded and queued bails out too.
@@ -1081,8 +1086,11 @@ __SHELL_CSS__
           text: identity.symbol + ' ' + identity.timeframe + ' ' + refreshText(result)
         };
         // The whole board recomputes, since nothing is held between requests.
-        // One dataset moved; the rest cost what they always cost.
-        return loadBoard();
+        // One dataset moved; the rest cost what they always cost -- so if the
+        // user opened a tile while the POST was in flight, this would start a
+        // full board against a hidden host and retitle the page over the chart
+        // they are looking at.
+        return reloadBoardIfShown();
       })
       .catch(function (error) { setError(error.message); })
       .then(function () { if (button) button.disabled = false; });
@@ -1126,7 +1134,7 @@ __SHELL_CSS__
           'refreshed ' + (identities.length - failures.length) + ' of ' +
           identities.length + ' datasets · ' + candles + ' candles · ' +
           settlements + ' settlements' };
-        return loadBoard();
+        return reloadBoardIfShown();
       })
       // After the reload, which clears the banner: a failure the user cannot
       // see is the same as one that did not happen.
@@ -1304,6 +1312,13 @@ __SHELL_CSS__
       // here it looked identical to a clean refresh.
       .then(function (result) {
         view.refreshed = { view: 'instrument', text: refreshText(result) };
+        // The tile's edges described the frame *before* this fetch. Kept, the
+        // reload would re-request the old `end` and draw no new bars while the
+        // status reported the candles it just took -- and the board, recomputing
+        // against the new funding window, would then show a later bar than the
+        // chart it links to. That is M36's contradiction, arrived at from the
+        // other side.
+        exactBounds = null;
         return load();
       })
       .catch(function (error) { setError(error.message); })
