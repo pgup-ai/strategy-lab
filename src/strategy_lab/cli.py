@@ -828,6 +828,18 @@ def replay_command(
     candles, and a stored copy of that would be a second research record to drift.
     What only this path can record is what a run saw at the moment it decided --
     including, today, that it decided with ``crowding`` neutral.
+
+    **The run header, the signals and the reasons commit in three transactions,
+    not one**, so a failure in the third leaves a run with signals and no
+    reasons. That is deliberate rather than overlooked. It is the state every
+    run before this phase is already in, so it degrades to the old record rather
+    than to a corrupt one; the reverse order would leave a run that appears to
+    have decided nothing, which is actively misleading; and a single transaction
+    means threading one connection through ``create_run`` and ``write_signals``
+    too, which is a change to the append-only signal path rather than to this
+    phase. The failure is loud -- the exception propagates and the command exits
+    non-zero -- and a re-run mints a fresh ``run_id`` rather than repairing the
+    old one, exactly as a second replay of any range does.
     """
     from strategy_lab.core.clock import SimClock
     from strategy_lab.core.types import InstrumentId, Mode

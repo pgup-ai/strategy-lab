@@ -125,7 +125,17 @@ class StrategyRunner:
         if hasattr(self.clock, "advance_to"):
             self.clock.advance_to(bar.ts_close_ms)
 
+        # A bar older than the buffer's last is dropped there -- a stale replay
+        # after a reconnect -- and the buffer is then unchanged. Continuing would
+        # compute from that unchanged history and stamp the result with the
+        # dropped bar's timestamp: a signal for a bar the strategy never saw, and
+        # now a persisted `bar_reasons` row describing one. Nothing arrived, so
+        # nothing is decided.
+        dropped = self.buffer.dropped_out_of_order
         self.buffer.append(bar)
+        if self.buffer.dropped_out_of_order != dropped:
+            return ()
+
         # Bar warmup_bars+1 is the first to emit. Any consumer comparing runner
         # output against a whole-history backtest has to drop the same prefix.
         if len(self.buffer) <= self.strategy.warmup_bars:

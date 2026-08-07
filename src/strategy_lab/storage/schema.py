@@ -117,11 +117,18 @@ bar_reasons_table = Table(
     Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
     # No `side` here, unlike `uq_signals_identity`: a bar has one state, where a
     # reversal bar has two signals. The bar *is* the identity.
+    #
+    # `market_type` *is* here, unlike `uq_signals_identity`, which omits it and
+    # carries that as a known defect in the charter's §12 -- spot and perp on one
+    # bar collapse to a single row. `CandleId` is
+    # `(exchange, market_type, symbol, timeframe)`, and anything less attributes
+    # a perp's reasons to its spot series.
     UniqueConstraint(
         "run_id",
         "strategy_id",
         "strategy_version",
         "exchange",
+        "market_type",
         "symbol",
         "timeframe",
         "ts_bar_ms",

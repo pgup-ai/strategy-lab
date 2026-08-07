@@ -342,9 +342,39 @@ BAR_REASON_MIGRATIONS: tuple[str, ...] = (
       CONSTRAINT bar_reasons_features_aligned
         CHECK (cardinality(feature_names) = cardinality(feature_values)),
       CONSTRAINT uq_bar_reasons_identity UNIQUE
-        (run_id, strategy_id, strategy_version, exchange, symbol, timeframe, ts_bar_ms)
+        (run_id, strategy_id, strategy_version,
+         exchange, market_type, symbol, timeframe, ts_bar_ms)
     )
     """,
+    # `signals` keys its identity without `market_type`, and the charter's §12
+    # carries that as an inherited defect: spot and perp on the same bar collapse
+    # to one row. This table copied the shape before the omission was noticed, so
+    # the constraint is repaired here rather than inherited -- `CandleId` is
+    # `(exchange, market_type, symbol, timeframe)` and a per-bar record keyed by
+    # less than that attributes a perp's reasons to its spot series.
+    #
+    # Guarded like the indexes and for the same reason: DROP/ADD takes ACCESS
+    # EXCLUSIVE, so it must not fire on a table that is already correct.
+    """
+DO $$
+BEGIN
+  IF EXISTS (
+    SELECT 1 FROM pg_constraint
+    WHERE conname = 'uq_bar_reasons_identity'
+      AND conrelid = 'bar_reasons'::regclass
+      AND NOT EXISTS (
+        SELECT 1 FROM unnest(conkey) AS k(attnum)
+        JOIN pg_attribute a ON a.attrelid = conrelid AND a.attnum = k.attnum
+        WHERE a.attname = 'market_type'
+      )
+  ) THEN
+    ALTER TABLE bar_reasons DROP CONSTRAINT uq_bar_reasons_identity;
+    ALTER TABLE bar_reasons ADD CONSTRAINT uq_bar_reasons_identity UNIQUE
+      (run_id, strategy_id, strategy_version,
+       exchange, market_type, symbol, timeframe, ts_bar_ms);
+  END IF;
+END $$;
+""",
     _guarded_index_migration(
         "ix_bar_reasons_lookup", "bar_reasons", "symbol, timeframe, ts_bar_ms"
     ),

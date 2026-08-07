@@ -334,3 +334,35 @@ def test_features_are_json_ready_strings():
     assert features["allow_shorts"] == "True"
     assert features["trend_failure_ema_span"] == "200"
     assert json.loads(json.dumps(features)) == features
+
+
+def test_a_stale_bar_decides_nothing_and_records_nothing():
+    """``BarBuffer`` drops a bar older than its last, leaving the history unchanged.
+
+    Continuing past that would compute from the unchanged buffer and stamp the
+    result with the dropped bar's timestamp -- a signal for a bar the strategy
+    never saw, and a ``bar_reasons`` row describing one. The row is the reason
+    this now returns early: signals were already wrong here, but nothing
+    persisted them.
+    """
+    strategy = get_strategy("state_machine_v1")
+    df = synthetic_ohlcv(n=strategy.warmup_bars + 4)
+    runner = make_runner(strategy)
+    runner.prime(df.iloc[: strategy.warmup_bars])
+    bars = bars_from(df.iloc[strategy.warmup_bars :])
+    for bar in bars:
+        runner.on_bar(bar)
+
+    recorded = {reason.ts_bar_ms for reason in runner.reasons}
+    buffered = len(runner.buffer)
+
+    # From the *primed* history, so its timestamp has never been recorded -- a
+    # stale bar the runner has already streamed would merely overwrite its own
+    # row, which cannot tell a working guard from a missing one.
+    stale = bars_from(df.iloc[: strategy.warmup_bars])[0]
+    assert stale.ts_open_ms not in recorded
+
+    assert runner.on_bar(stale) == ()
+    assert runner.buffer.dropped_out_of_order == 1
+    assert len(runner.buffer) == buffered
+    assert {reason.ts_bar_ms for reason in runner.reasons} == recorded
