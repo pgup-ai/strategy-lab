@@ -28,13 +28,9 @@ settlements.** An equity runs to its newest stored bar and *no*
 ``funding_span`` query is issued for one -- not as an optimisation but because
 asking is how a coverage guard gets invented for a market that has none, and a
 window derived from an empty table would bound a frame by an absence. What can
-go stale there is the other end entirely: the Yahoo fetcher rescales all history
-by adjusted close, so a dividend **restates** past bars rather than appending to
-them -- measured, 333 of 333 stored SPY weekly bars moved against a fresh fetch
-(median 0.257%) and ``donchian`` differed on 3. ``last_written``
-(``max(updated_at)``, one aggregate on the enumeration that already runs) is what
-a tile shows for that, and it is a different claim from ``as_of`` rather than a
-second spelling of it.
+go stale there is the other end entirely: a dividend-adjusted history is
+**restated** rather than appended to, so ``last_written`` rides beside ``as_of``
+and is a different claim rather than a second spelling of it.
 
 **A dataset that still cannot be answered reports why in its row.** A
 ``ValueError`` -- no candles in the funded window, funding that does not cover
@@ -143,10 +139,9 @@ class BoardRow:
 class DatasetRef:
     """A stored candle set, its newest bar, and when it was last written.
 
-    All three come from the one enumeration query. ``last_bar`` and
-    ``last_written`` answer different questions and only look alike on a venue
-    whose history grows: a dividend-adjusted equity series is *restated* on a
-    distribution, so its bars can all move without its newest one changing.
+    The two stamps only look alike on a venue whose history grows: a
+    dividend-adjusted equity series is *restated* on a distribution, so its bars
+    can all move without its newest one changing.
     """
 
     identity: MarketDataIdentity
@@ -157,12 +152,9 @@ class DatasetRef:
 def stored_datasets(*, market_type: str | None = None) -> list[DatasetRef]:
     """Every stored candle set, on storage's own four-part identity.
 
-    One aggregate query for the whole board, and it is also the freshness probe
-    -- both halves of it. ``last_timestamp`` is the newest bar each set holds,
-    which is what a perp tile shows beside its ``as of`` so a funding-bounded lag
-    is visible rather than two; ``last_written`` is when those bars were last
-    upserted, which is what an equity tile shows because its whole history is
-    rewritten on a dividend rather than extended.
+    One aggregate query for the whole board, and it is also the freshness probe:
+    both stamps a tile can show come off it, and which one a tile shows is
+    decided by its market type rather than here.
     """
     sets = list_candle_sets()
     if market_type is not None:
@@ -185,14 +177,12 @@ def stored_datasets(*, market_type: str | None = None) -> list[DatasetRef]:
 def board_window(identity: MarketDataIdentity) -> BoardWindow:
     """The bounds this dataset's frame is asked for, chosen by its market type.
 
-    The dispatch is the point. A perp is bounded by its own stored settlements
-    (below); anything else runs to its newest stored bar and is **not asked
-    about funding at all**. That second half is a claim rather than an
-    optimisation: an equity settles nothing, so a ``funding_span`` query for one
-    can only ever return ``None``, and a window derived from an empty table is a
-    coverage guard invented for a market that has none. Asserted by statement in
-    ``tests/test_api_board.py`` rather than left to the absence of an error,
-    because the failure it prevents is silent.
+    A perp is bounded by its own stored settlements (below); anything else runs
+    to its newest stored bar and is **not asked about funding at all**. That
+    second half is a claim rather than an optimisation, and
+    ``tests/test_api_board.py`` asserts it by *statement* rather than by the
+    absence of an error, because a ``funding_span`` for an equity returns
+    ``None`` and everything carries on working.
     """
     if identity.market_type == "perp":
         return funding_window(identity)
@@ -210,10 +200,9 @@ def funding_window(identity: MarketDataIdentity) -> BoardWindow:
     and the refusal that follows, which names the fetch command; inventing a
     window there would hide the missing history rather than report it.
 
-    Perp only, and it refuses anything else rather than answering
-    ``WHOLE_HISTORY`` for it. Answering would make this look like a function of
-    every market type while quietly querying ``funding_rates`` for instruments
-    that have none -- the caller above is where the market type is decided.
+    It refuses a non-perp rather than answering ``WHOLE_HISTORY`` for one:
+    answering would make this look like a function of every market type, and the
+    dispatch belongs in ``board_window`` where it can be seen.
     """
     if identity.market_type != "perp":
         raise ValueError(
@@ -250,9 +239,6 @@ def stream_board(
 
     The funding probe is per *contract*, not per dataset: funding is keyed
     without a timeframe, so BTC 4h and BTC 1h share one window and one query.
-    Datasets that are not perps memoise too, and memoise a query that was never
-    issued -- ``board_window`` returns ``WHOLE_HISTORY`` for them without
-    touching the database.
     """
     windows: dict[tuple[str, str, str], BoardWindow] = {}
     for dataset in datasets:
@@ -333,11 +319,9 @@ def _compute(
 def _empty_row(dataset: DatasetRef, *, strategy: str, unavailable: str) -> BoardRow:
     """A refusal, plus the two facts about the *stored data* that survive it.
 
-    ``dataset_last_bar`` and ``last_written`` come off the enumeration rather
-    than off the run, so they are still true when there is no run: "this frame
-    is shorter than the strategy's warmup" is a fact about bars that exist, and
-    when they were last written is exactly what a reader needs in order to
-    decide whether refreshing would change it.
+    Both stamps come off the enumeration rather than off the run, so they are
+    still true when there is no run -- and when the bars were last written is
+    what says whether re-fetching would change what is refusing.
     """
     return BoardRow(
         identity=_identity(dataset.identity),

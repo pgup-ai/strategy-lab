@@ -327,12 +327,9 @@ class BoardRowModel(_Strict):
     ``None`` there: nothing was computed, so there is no run to describe, and a
     provenance block full of defaults would describe one that never happened.
 
-    ``dataset_last_bar`` and ``last_written`` are both non-optional and survive a
+    ``dataset_last_bar`` and ``last_written`` are non-optional and survive a
     refusal, because both are facts about the stored candles rather than about
-    the run: how far they reach, and when they were last written. The second is
-    what an equity tile shows in place of the first's lag -- a dividend-adjusted
-    history is restated rather than extended, so it can move without its newest
-    bar changing.
+    the run.
     """
 
     identity: dict[str, str]

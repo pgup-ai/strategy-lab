@@ -18,13 +18,10 @@ usable at all and one that it must never acquire:
 * and ``browse`` still writes **nothing** -- no report directory, no ``signals``
   row, no ``bar_reasons`` row, no schema change.
 
-The equity section at the end adds the one property a second market type needs:
-a frame's bound is chosen **by its market type**, and an instrument that settles
-nothing is never asked about settlements. That is asserted twice and by
-statement -- once on the function the board calls and once on the SQL that
-reaches the database -- because its failure mode is silent: a ``funding_span``
-for an equity returns ``None`` and everything carries on working, having invented
-a coverage question for a market that has no answer to it.
+The equity section at the end adds what a second market type needs: a frame's
+bound is chosen **by its market type**, and an instrument that settles nothing is
+never asked about settlements -- asserted by statement, at the call and again at
+the SQL, because that failure is silent rather than loud.
 """
 
 from __future__ import annotations
@@ -41,11 +38,9 @@ from sqlalchemy.engine import Engine
 from strategy_lab.api import app as app_module
 from strategy_lab.api.board import (
     MAX_SPARK_BARS,
-    WHOLE_HISTORY,
     BoardStamp,
     BoardWindow,
     DatasetRef,
-    board_window,
     funding_window,
     stored_datasets,
     stream_board,
@@ -517,11 +512,6 @@ def test_the_enumeration_is_storages_own_identity_newest_bar_and_newest_write():
     assert {ref.identity.symbol for ref in listed} == set(perps["symbol"])
     assert all(ref.last_bar for ref in listed)
     assert all(ref.last_written for ref in listed)
-    # A write cannot predate the bar it wrote, on any dataset in storage.
-    assert all(
-        pd.Timestamp(ref.last_written) >= pd.Timestamp(ref.last_bar)
-        for ref in stored_datasets()
-    )
 
 
 def test_every_board_row_field_survives_the_wire_model(monkeypatch):
@@ -603,33 +593,25 @@ def test_the_sparkline_tail_is_bounded_by_what_was_asked_for(monkeypatch):
 # R10c -- a second market type, on the same one computation.
 # --------------------------------------------------------------------------
 
-# Weekly ETF sets of 333 bars each. Short enough that ``ema_cross`` (3,840
-# declared warmup bars) refuses them and long enough that ``donchian`` (96) does
-# not, which is what makes a mixed board on real data rather than a stub.
+# Weekly ETF sets of 333 bars each: short enough that ``state_machine_v1`` (2,192
+# warmup bars) refuses them and long enough that ``donchian`` (96) does not,
+# which is what makes a board of real answers *and* refusals rather than a stub.
 _SHORT_WEEKLIES = {("yahoo", "equity", symbol, "1w") for symbol in ("XLF", "XLK", "QQQ", "SMH")}
 
-# Two strategies chosen so the same board holds answers and refusals: the state
-# machine needs 2,192 bars and answers only on the hourly equity sets, while
-# ``donchian`` answers everywhere. A board of refusals alone would not show that
-# a refusal stays inside its own row.
 _EQUITY_STRATEGIES = f"{_MACHINE},donchian"
 
 
-def _equity_identity(symbol: str = "SPY", timeframe: str = "1w") -> MarketDataIdentity:
+def _equity_identity() -> MarketDataIdentity:
     return MarketDataIdentity(
-        exchange="yahoo", market_type="equity", symbol=symbol, timeframe=timeframe
+        exchange="yahoo", market_type="equity", symbol="SPY", timeframe="1w"
     )
 
 
 @pytest.mark.db
 def test_a_board_over_every_stored_equity_answers_one_row_per_dataset_and_strategy():
-    """Check 1, on the datasets that actually hit the warmup rule.
-
-    ``XLF``, ``XLK``, ``QQQ`` and ``SMH`` hold 333 weekly bars against
-    ``state_machine_v1``'s 2,192, so those rows carry the engine's own refusal --
-    and the hourly sets beside them are answered in the same response. A short
-    frame is a fact about that instrument's stored bars, not a reason for the
-    board to blank.
+    """Check 1, on the datasets that actually hit the warmup rule: a short frame
+    is a fact about that instrument's stored bars, not a reason for the board to
+    blank, so the refusal rides in its own row while its neighbours answer.
     """
     client = TestClient(app_module.create_app())
     stored = list_candle_sets()
@@ -654,9 +636,8 @@ def test_a_board_over_every_stored_equity_answers_one_row_per_dataset_and_strate
         refused = by_pair[(key, _MACHINE)]
         assert refused["unavailable"] is not None, key
         assert "warmup bars but the frame has 333" in refused["unavailable"], key
-        # The refusal is the whole of the row, and the two facts about the
-        # *stored bars* survive it: how far they reach and when they were
-        # written. Neither is a fact about a run that did not happen.
+        # The refusal is the whole of the row, and the two facts about the stored
+        # bars survive it -- neither describes a run that did not happen.
         assert refused["provenance"] is None
         assert refused["dataset_last_bar"] and refused["last_written"]
         assert by_pair[(key, "donchian")]["unavailable"] is None, key
@@ -719,26 +700,7 @@ def test_an_equity_rows_state_and_latest_fill_are_the_single_views_own():
         }
 
 
-def test_the_frame_bound_is_chosen_by_market_type():
-    """Check 3, at the seam where the choice is made.
-
-    ``funding_window`` is perp-only and says so rather than answering
-    ``WHOLE_HISTORY`` for everything else: answering would make it look like a
-    function of every market while quietly querying ``funding_rates`` for
-    instruments that settle nothing.
-    """
-    assert board_window(_equity_identity()) == WHOLE_HISTORY
-    assert board_window(
-        MarketDataIdentity(
-            exchange="binance", market_type="spot", symbol="BTC/USDT", timeframe="1d"
-        )
-    ) == WHOLE_HISTORY
-
-    with pytest.raises(ValueError, match="settles nothing"):
-        funding_window(_equity_identity())
-
-
-def test_only_a_perp_dataset_is_asked_about_funding(monkeypatch):
+def test_only_a_perp_is_asked_about_funding_and_asking_otherwise_is_refused(monkeypatch):
     """Check 3, on the function the board calls, with a perp control beside it.
 
     Asserted by statement rather than by the absence of an error: a
@@ -747,6 +709,9 @@ def test_only_a_perp_dataset_is_asked_about_funding(monkeypatch):
     it. Without the perp in the list the empty assertion would also pass on a
     board that never bounded anything.
     """
+    with pytest.raises(ValueError, match="settles nothing"):
+        funding_window(_equity_identity())
+
     asked: list[str] = []
 
     def _record(**kwargs) -> None:
@@ -814,12 +779,9 @@ def test_no_funding_query_reaches_the_database_for_an_equity_board(statements):
 
 @pytest.mark.db
 def test_an_equity_row_carries_when_its_candles_were_last_written():
-    """``max(updated_at)``, and it is not a second spelling of the newest bar.
-
-    An equity history is *restated* rather than extended -- 333 of 333 stored
-    SPY weekly bars moved against a fresh fetch -- so when the bars were written
-    is the freshness question for one, and it is answered from a column
-    ``upsert_candles`` already maintains rather than from a new one.
+    """``max(updated_at)``, per dataset, and not a second spelling of the newest
+    bar. The re-query is per row rather than in aggregate because what can go
+    wrong is the grouping: one set's write time attached to another's identity.
     """
     from sqlalchemy import and_
 

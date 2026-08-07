@@ -160,11 +160,7 @@ class Provenance:
     failure_bars: int | None
     warmup_bars: int
     allow_shorts: bool
-    # A pair, and neither is readable alone. ``crowding_measured`` false means
-    # "the funding column was not on the frame", which is a *fault* only for a
-    # strategy that reads crowding -- for one that does not it is a tautology,
-    # and marking it a fault is how a warning marker gets trained away. See
-    # ``_provenance`` for why the two come from different sources.
+    # A pair. Read either alone and it says the wrong thing -- see ``_provenance``.
     reads_crowding: bool
     crowding_measured: bool
     funding_attached: bool
@@ -557,20 +553,17 @@ def _provenance(
     crowding however well funded the frame was, and the two facts are reported
     separately so neither is inferred from the other.
 
-    ``reads_crowding`` is what makes that pair legible, and it deliberately comes
-    from a **third** source: the strategy's declared features rather than the
-    run's metadata. It is a fact about the *configuration*, true before a bar is
+    ``reads_crowding`` is what makes that pair legible, and it comes from a
+    **third** source: the strategy's declared features rather than the run's
+    metadata. It is a fact about the *configuration*, true before a bar is
     computed, so introspecting it follows ``_why_layer`` above -- a strategy that
     grows a crowding feature is described correctly without anyone remembering to
     republish a metadata key, which is the failure mode a silent warning has.
 
-    Together they are the only honest predicate for the M20 condition. ``reads``
-    and not ``measured`` is a machine running with ``crowding`` pinned to
-    ``NEUTRAL_CROWDING`` -- one feature short of the one the charter measured, and
-    on a market that settles nothing that is *permanent* rather than fetchable.
-    Not ``reads`` and not ``measured`` is ``donchian``, where there is nothing
-    wrong at all. The old market-type gate could not tell those apart and called
-    both of them a perp problem.
+    Together they are the only honest predicate for the M20 condition: reads and
+    not measured is a machine running with ``crowding`` pinned to
+    ``NEUTRAL_CROWDING``, while neither is ``donchian``, where nothing is wrong
+    at all. A market-type gate cannot tell those apart.
     """
     strategy = resolved.strategy
     return Provenance(
@@ -587,9 +580,8 @@ def _provenance(
         failure_bars=failure_bars,
         warmup_bars=int(strategy.warmup_bars),
         allow_shorts=allow_shorts,
-        # The literal matches ``state_machine_core.build_feature_frame``, which is
-        # the code that does the pinning; a strategy with no declared features
-        # reads none of it.
+        # The literal is ``state_machine_core.build_feature_frame``'s, which is the
+        # code that does the pinning.
         reads_crowding="crowding" in getattr(strategy, "features", ()),
         crowding_measured=bool(metadata.get("crowding_measured", False)),
         funding_attached=prepared.funding_attached,

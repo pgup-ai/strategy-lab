@@ -50,11 +50,7 @@ things that must not be re-decided in JavaScript:
   and an equity tile go stale for different reasons and each states only its
   own: a perp's frame is bounded by its own stored funding, so what can lag is
   its **right edge**; an equity's runs to its newest bar and what can be stale
-  is its **whole history**, because a dividend rescales every past bar. Measured
-  on the stored SPY weekly series against a fresh fetch — 333 of 333 bars moved,
-  median 0.257%, and ``donchian`` differed on 3 — so it is small, real and
-  strategy-dependent, and no reader can tell from a tile which kind they are
-  looking at unless the tile says.
+  is its **whole history**, because a dividend rescales every past bar.
 * **the styling**, imported from ``backtests/report.py``: the frozen report and
   the live view are the same product and must not drift into looking like two.
 
@@ -109,22 +105,20 @@ CONTRACTS_WITH_EXIT_MODE: tuple[str, ...] = (Contract.SIGNAL_SET.value,)
 # here would be a control whose only outcome is a 422.
 MARKET_TYPES: tuple[str, ...] = get_args(MarketType)
 
-# What the board opens on, and it stays ``perp`` now that equities are on it.
-# An equity tile carries a restatement caveat a perp tile does not -- its whole
-# history is rewritten on a dividend, measured at 333 of 333 stored SPY weekly
-# bars -- and opening on a market whose tiles carry that is a choice a reader
-# should make rather than inherit. The filter is on the page rather than in the
-# endpoint, so nothing is hidden from a caller who asks for the rest.
+# What the board opens on, and it stays ``perp`` now that equities are on it:
+# opening on a market whose every tile carries a restatement caveat is a choice
+# a reader should make rather than inherit. The filter is on the page rather
+# than in the endpoint, so nothing is hidden from a caller who asks for the rest.
 DEFAULT_MARKET_TYPE = "perp"
 
 # The market type whose stored history is *restated* rather than extended. The
 # Yahoo fetcher rescales every OHLC column by ``adj_close / close``, which is
 # correct -- a dividend-adjusted series is the right input for a strategy that
 # compounds -- so what a tile owes a reader is not a different number but the
-# fact that the number can move backwards in time. Named here rather than
-# spelled in the page script for the same reason the contract primitives are:
-# it decides what a tile claims, and a branch in JavaScript is somewhere no test
-# looks.
+# fact that the number can move backwards in time. Measured on the stored SPY
+# weekly series against a fresh fetch: 333 of 333 bars moved, median 0.257%, and
+# ``donchian`` differed on 3 of them where two ratio-based strategies differed
+# on none.
 RESTATED_MARKET_TYPE = "equity"
 
 # How old a stored equity history has to be before "nothing has been restated
@@ -706,13 +700,11 @@ __SHELL_CSS__
     var host = el('provenance');
     host.replaceChildren();
     var perp = prov.identity.market_type === 'perp';
-    // Not the market type. `crowding_measured no` is a fault for a strategy that
-    // *reads* crowding and a tautology for one that does not, and gating on
-    // `perp` conflated the two in both directions: it marked `donchian` on a
-    // funded perp, where nothing is wrong, and stayed silent on a state machine
-    // running an equity with crowding pinned to 0.5 -- the M20 condition itself,
-    // on the market R10c widened to. A marker that fires when nothing is wrong is
-    // how a reader learns to ignore it.
+    // Not the market type, which was wrong in both directions: it marked
+    // `donchian` on a funded perp, where nothing is wrong, and stayed silent on
+    // a state machine running an equity with crowding pinned to 0.5 -- the M20
+    // condition itself. A marker that fires when nothing is wrong is how a
+    // reader learns to ignore it, so the false alarm is not the lesser half.
     var crowdingBlind = prov.reads_crowding && !prov.crowding_measured;
 
     host.appendChild(chip('Strategy', prov.strategy + ' v' + prov.version));
@@ -746,11 +738,10 @@ __SHELL_CSS__
     if (crowdingBlind) {
       var alert = document.createElement('p');
       alert.className = 'alert';
-      // Both branches say only what is true of *this* strategy, and the split is
-      // the market type because that is what decides whether the gap can be
-      // closed. It is no longer `funding_attached`: above this line the column is
-      // absent by construction, since `crowding_measured` *is* whether the
-      // strategy found it, so that branch would never be taken.
+      // The split is the market type because that decides whether the gap can
+      // be closed at all. Not `funding_attached`, which used to split it: above
+      // this line the column is absent by construction, since `crowding_measured`
+      // *is* whether the strategy found it, so that branch is unreachable now.
       alert.textContent = perp
         ? prov.strategy + ' reads crowding and this perp frame carries no funding ' +
           'column, so it ran with crowding pinned to neutral rather than measured. ' +
@@ -957,10 +948,8 @@ __SHELL_CSS__
       host.appendChild(chip);
     });
     var prov = row.provenance;
-    // The same predicate as the provenance strip, for the same reason: a tile
-    // that marked every `donchian` row and no equity state machine is marking
-    // the market type rather than the fault. `crowding 0.500` is right there in
-    // the chips above, so what this adds is that the 0.5 was *pinned*.
+    // The strip's predicate, for the strip's reason. `crowding 0.500` is already
+    // in the chips above, so what this adds is that the 0.5 was *pinned*.
     if (prov && prov.reads_crowding && !prov.crowding_measured) {
       var blind = document.createElement('span');
       blind.className = 'warn';
@@ -1007,15 +996,11 @@ __SHELL_CSS__
     return line;
   }
 
-  // A perp tile and an equity tile go stale for different reasons, and each
-  // states its own and not the other's. A perp frame is bounded on the right by
-  // its own stored funding, so what can lag is its **right edge** -- up to one
-  // settlement cadence, shown rather than hidden (M37). An equity frame runs to
-  // its newest bar and that edge cannot lag; what can be stale is its **whole
-  // history**, because the fetcher rescales every OHLC column by adjusted close,
-  // so a dividend rewrites 2020 as readily as last week. Carrying both lines on
-  // both tiles would state a risk that does not exist for one of them, which is
-  // the same kind of wrong as stating neither.
+  // Each tile states its own staleness and not the other's: a perp's right edge
+  // can lag its newest candle by up to one settlement (M37), where an equity's
+  // cannot lag at all and what goes stale is the whole history. Carrying both
+  // lines on both tiles would state a risk that does not exist for one of them,
+  // which is the same kind of wrong as stating neither.
   function tileFreshness(row, wrap) {
     if (row.identity.market_type === CFG.restatedMarketType) {
       wrap.appendChild(tileLine('as of', stamp(row.as_of)));

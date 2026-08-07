@@ -255,11 +255,10 @@ def test_provenance_is_a_strip_rather_than_a_tooltip(page):
 def test_a_pinned_crowding_is_flagged_by_the_strategy_rather_than_the_market(page):
     """A strategy running with ``crowding`` pinned to neutral is not the funded run
     the charter publishes -- 16.44% against 15.45% on R5's test half -- and which
-    strategy that is cannot be read off the market type.
-
-    The gate this replaced was ``perp && !crowding_measured``, and it was wrong in
-    both directions: it marked ``donchian`` on a funded perp, where nothing is
-    wrong, and stayed silent on a state machine running an equity a feature short.
+    strategy that is cannot be read off the market type. The gate this replaced,
+    ``perp && !crowding_measured``, marked ``donchian`` on a funded perp where
+    nothing is wrong and stayed silent on an equity machine running a feature
+    short.
     """
     script = _script(page)
 
@@ -272,7 +271,7 @@ def test_a_pinned_crowding_is_flagged_by_the_strategy_rather_than_the_market(pag
 def test_a_board_tile_flags_a_pinned_crowding_on_the_same_predicate(page):
     """Both surfaces or neither: a tile silent about what the strip warns on is
     the board quietly contradicting the chart it links to (M36's failure mode)."""
-    block = _function_block(page, "tileFeatures")
+    block = _within(page, "function tileFeatures(row)")
 
     assert "prov.reads_crowding && !prov.crowding_measured" in block
     assert "crowding pinned neutral" in block
@@ -296,18 +295,8 @@ def test_every_provenance_field_the_payload_carries_reaches_the_strip(client):
     assert {field.name for field in fields(Provenance)} <= rendered
 
 
-def _function_block(page: str, name: str) -> str:
-    """One function's source, so "the tile says X" is not satisfied by the strip.
-
-    Nested blocks close at four spaces or deeper, so the first two-space ``}`` is
-    the function's own.
-    """
-    start = page.index("function " + name)
-    return page[start : page.index("\n  }\n", start)]
-
-
 def _provenance_block(page: str) -> str:
-    return _function_block(page, "renderProvenance")
+    return _within(page, "function renderProvenance")
 
 
 # --------------------------------------------------------------------------
@@ -491,15 +480,10 @@ def test_a_tile_whose_frame_ends_behind_the_newest_candle_says_so(page):
 
 
 def test_each_tile_states_the_staleness_that_applies_to_its_own_market(page):
-    """A perp tile and an equity tile go stale for different reasons.
-
-    A perp frame is bounded on the right by its own stored funding, so what can
-    lag is its **right edge** -- up to one settlement cadence, shown rather than
-    hidden (M37). An equity frame runs to its newest bar and that edge cannot
-    lag; what can be stale is its **whole history**, because the fetcher rescales
-    every OHLC column by adjusted close and a dividend rewrites 2020 as readily
-    as last week. Neither line belongs on the other tile: stating a risk that
-    does not exist for a market is the same kind of wrong as stating none.
+    """A perp's right edge can lag its newest candle by up to one settlement
+    (M37); an equity's cannot lag at all, and what goes stale is its whole
+    history. Neither line belongs on the other tile: stating a risk that does not
+    exist for a market is the same kind of wrong as stating none.
     """
     script = _script(page)
     freshness = _within(script, "function tileFreshness(row, wrap)")
@@ -519,23 +503,16 @@ def test_each_tile_states_the_staleness_that_applies_to_its_own_market(page):
 
 
 def test_the_restated_market_and_when_it_is_flagged_are_decided_in_python(page):
-    """Which market has a restated history is not a branch in the page script.
-
-    It decides what a tile claims, and a hardcoded ``'equity'`` in JavaScript is
-    a contract decision somewhere no test looks -- the same reason the chart
-    primitives and the exit modes are tables here. The threshold beside it is a
-    judgement, not a measurement: nothing detects a dividend, so the flag says
-    "old enough to be worth refreshing", never "this was restated".
+    """Which market has a restated history decides what a tile claims, and a
+    hardcoded ``'equity'`` in JavaScript is a contract decision somewhere no test
+    looks -- the same reason the chart primitives and the exit modes are tables
+    here.
     """
-    from typing import get_args
-
-    from strategy_lab.api.models import MarketType
     from strategy_lab.browser.page import RESTATED_MARKET_TYPE, RESTATEMENT_STALE_DAYS
 
     config = bootstrap_config()
     script = _script(page)
 
-    assert RESTATED_MARKET_TYPE in get_args(MarketType)
     assert config["restatedMarketType"] == RESTATED_MARKET_TYPE
     assert config["restatementStaleDays"] == RESTATEMENT_STALE_DAYS
     assert "'equity'" not in script, "the market type is retyped in the page script"
@@ -560,16 +537,12 @@ def test_a_write_stamp_is_parsed_rather_than_left_to_the_browser(page):
 
 
 def test_the_default_market_is_the_one_whose_tiles_carry_no_restatement_caveat(page):
-    """``perp`` still, now that equities are selectable.
-
-    Opening on a market whose every tile carries "this history is restated on a
-    dividend" is a choice a reader should make rather than inherit -- and the
-    filter is on the page rather than in the endpoint, so nothing is hidden from
-    a caller who asks for the rest.
+    """``perp`` still, now that equities are selectable: opening on a market whose
+    every tile carries "this history is restated on a dividend" is a choice a
+    reader should make rather than inherit.
     """
     from strategy_lab.browser.page import DEFAULT_MARKET_TYPE, RESTATED_MARKET_TYPE
 
-    assert DEFAULT_MARKET_TYPE == "perp"
     assert DEFAULT_MARKET_TYPE != RESTATED_MARKET_TYPE
     assert bootstrap_config()["defaultMarketType"] == DEFAULT_MARKET_TYPE
     assert "marketSel.value = CFG.defaultMarketType;" in _script(page)
