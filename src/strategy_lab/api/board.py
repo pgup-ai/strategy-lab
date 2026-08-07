@@ -10,18 +10,31 @@ disagree with the other two. Measured, one warm analysis is 330-400 ms on the
 stored perp frames against 5.5 s for the first one in a process; that is the
 price of not having a second answer, and it is paid once per closed bar.
 
-Three things follow, all of them measured.
+Four things follow, all of them measured.
 
-**Each frame is bounded by its own funding span.** BTC/USDT perp candles begin
-40 h before the venue's first settlement, so an unbounded request raises
-``FundingUnavailable`` permanently and correctly -- and a board that asked for
-"every dataset" would blank on the first instrument. The rule here is
-``tests/test_state_machine_gate.py``'s and ``scripts/r7d``'s: open at the first
-stored settlement, close at the last. The right bound costs at most one bar
-(ETH's funding lands 4 h behind its newest candle) and is what keeps a candle
-fetch that ran without funding from turning the whole board into refusals.
-``as_of`` and ``dataset_last_bar`` are both on the row so that lag is readable
-rather than inferred.
+**A frame's bound is shaped by its market type, and a perp's is its own funding
+span.** BTC/USDT perp candles begin 40 h before the venue's first settlement, so
+an unbounded request raises ``FundingUnavailable`` permanently and correctly --
+and a board that asked for "every dataset" would blank on the first instrument.
+The rule here is ``tests/test_state_machine_gate.py``'s and ``scripts/r7d``'s:
+open at the first stored settlement, close at the last. The right bound costs at
+most one bar (ETH's funding lands 4 h behind its newest candle) and is what keeps
+a candle fetch that ran without funding from turning the whole board into
+refusals. ``as_of`` and ``dataset_last_bar`` are both on the row so that lag is
+readable rather than inferred.
+
+**Anything that is not a perp settles nothing, so it is not asked about
+settlements.** An equity runs to its newest stored bar and *no*
+``funding_span`` query is issued for one -- not as an optimisation but because
+asking is how a coverage guard gets invented for a market that has none, and a
+window derived from an empty table would bound a frame by an absence. What can
+go stale there is the other end entirely: the Yahoo fetcher rescales all history
+by adjusted close, so a dividend **restates** past bars rather than appending to
+them -- measured, 333 of 333 stored SPY weekly bars moved against a fresh fetch
+(median 0.257%) and ``donchian`` differed on 3. ``last_written``
+(``max(updated_at)``, one aggregate on the enumeration that already runs) is what
+a tile shows for that, and it is a different claim from ``as_of`` rather than a
+second spelling of it.
 
 **A dataset that still cannot be answered reports why in its row.** A
 ``ValueError`` -- no candles in the funded window, funding that does not cover
@@ -82,6 +95,12 @@ class BoardWindow:
     end: str | None
 
 
+# The whole stored history, which is the honest window for an instrument that
+# settles nothing. Named rather than spelled twice so the two callers below
+# cannot drift into meaning different things by it.
+WHOLE_HISTORY = BoardWindow(start=None, end=None)
+
+
 @dataclass(frozen=True)
 class BoardStamp:
     """What the answer depends on, as cheaply as it can be established.
@@ -114,6 +133,7 @@ class BoardRow:
     target: float | None
     as_of: str | None
     dataset_last_bar: str
+    last_written: str
     closes: list[float]
     unavailable: str | None
     provenance: Provenance | None
@@ -121,19 +141,28 @@ class BoardRow:
 
 @dataclass(frozen=True)
 class DatasetRef:
-    """A stored candle set and the newest bar in it, from the enumeration query."""
+    """A stored candle set, its newest bar, and when it was last written.
+
+    All three come from the one enumeration query. ``last_bar`` and
+    ``last_written`` answer different questions and only look alike on a venue
+    whose history grows: a dividend-adjusted equity series is *restated* on a
+    distribution, so its bars can all move without its newest one changing.
+    """
 
     identity: MarketDataIdentity
     last_bar: str
+    last_written: str
 
 
 def stored_datasets(*, market_type: str | None = None) -> list[DatasetRef]:
     """Every stored candle set, on storage's own four-part identity.
 
-    One aggregate query for the whole board. It is also the freshness probe:
-    ``last_timestamp`` is the newest bar each set holds, which is what a tile
-    shows beside its ``as of`` so a funding-bounded lag is visible
-    rather than two.
+    One aggregate query for the whole board, and it is also the freshness probe
+    -- both halves of it. ``last_timestamp`` is the newest bar each set holds,
+    which is what a perp tile shows beside its ``as of`` so a funding-bounded lag
+    is visible rather than two; ``last_written`` is when those bars were last
+    upserted, which is what an equity tile shows because its whole history is
+    rewritten on a dividend rather than extended.
     """
     sets = list_candle_sets()
     if market_type is not None:
@@ -147,13 +176,31 @@ def stored_datasets(*, market_type: str | None = None) -> list[DatasetRef]:
                 timeframe=str(row["timeframe"]),
             ),
             last_bar=str(row["last_timestamp"]),
+            last_written=str(row["last_written"]),
         )
         for _, row in sets.iterrows()
     ]
 
 
+def board_window(identity: MarketDataIdentity) -> BoardWindow:
+    """The bounds this dataset's frame is asked for, chosen by its market type.
+
+    The dispatch is the point. A perp is bounded by its own stored settlements
+    (below); anything else runs to its newest stored bar and is **not asked
+    about funding at all**. That second half is a claim rather than an
+    optimisation: an equity settles nothing, so a ``funding_span`` query for one
+    can only ever return ``None``, and a window derived from an empty table is a
+    coverage guard invented for a market that has none. Asserted by statement in
+    ``tests/test_api_board.py`` rather than left to the absence of an error,
+    because the failure it prevents is silent.
+    """
+    if identity.market_type == "perp":
+        return funding_window(identity)
+    return WHOLE_HISTORY
+
+
 def funding_window(identity: MarketDataIdentity) -> BoardWindow:
-    """The bounds this frame should be asked for, from its own stored funding.
+    """The bounds a *perp* frame should be asked for, from its own stored funding.
 
     Not a fallback and not a guess: on a perp the funded span *is* the window a
     funding-reading strategy can be run over, and outside it the coverage guard
@@ -162,16 +209,26 @@ def funding_window(identity: MarketDataIdentity) -> BoardWindow:
     buy-and-hold. A perp with no stored funding at all gets the unbounded window
     and the refusal that follows, which names the fetch command; inventing a
     window there would hide the missing history rather than report it.
+
+    Perp only, and it refuses anything else rather than answering
+    ``WHOLE_HISTORY`` for it. Answering would make this look like a function of
+    every market type while quietly querying ``funding_rates`` for instruments
+    that have none -- the caller above is where the market type is decided.
     """
     if identity.market_type != "perp":
-        return BoardWindow(start=None, end=None)
+        raise ValueError(
+            f"funding_window is for a perp, not {identity.market_type!r}: "
+            f"{identity.exchange}/{identity.symbol} settles nothing, so a funding "
+            f"span for it would be an empty table read as a window. Use "
+            f"board_window, which dispatches on the market type."
+        )
     span = funding_span(
         exchange=identity.exchange,
         market_type=identity.market_type,
         symbol=identity.symbol,
     )
     if span is None:
-        return BoardWindow(start=None, end=None)
+        return WHOLE_HISTORY
     return BoardWindow(start=str(span[0]), end=str(span[1]))
 
 
@@ -193,13 +250,16 @@ def stream_board(
 
     The funding probe is per *contract*, not per dataset: funding is keyed
     without a timeframe, so BTC 4h and BTC 1h share one window and one query.
+    Datasets that are not perps memoise too, and memoise a query that was never
+    issued -- ``board_window`` returns ``WHOLE_HISTORY`` for them without
+    touching the database.
     """
     windows: dict[tuple[str, str, str], BoardWindow] = {}
     for dataset in datasets:
         identity = dataset.identity
         contract = (identity.exchange, identity.market_type, identity.symbol)
         if contract not in windows:
-            windows[contract] = funding_window(identity)
+            windows[contract] = board_window(identity)
         stamp = BoardStamp(dataset_last_bar=dataset.last_bar, window=windows[contract])
         for strategy in strategies:
             yield _row(
@@ -263,6 +323,7 @@ def _compute(
         target=None if payload.target is None else payload.target[-1],
         as_of=payload.provenance.last_bar,
         dataset_last_bar=dataset.last_bar,
+        last_written=dataset.last_written,
         closes=[float(bar["close"]) for bar in payload.bars[-MAX_SPARK_BARS:]],
         unavailable=None,
         provenance=payload.provenance,
@@ -270,6 +331,14 @@ def _compute(
 
 
 def _empty_row(dataset: DatasetRef, *, strategy: str, unavailable: str) -> BoardRow:
+    """A refusal, plus the two facts about the *stored data* that survive it.
+
+    ``dataset_last_bar`` and ``last_written`` come off the enumeration rather
+    than off the run, so they are still true when there is no run: "this frame
+    is shorter than the strategy's warmup" is a fact about bars that exist, and
+    when they were last written is exactly what a reader needs in order to
+    decide whether refreshing would change it.
+    """
     return BoardRow(
         identity=_identity(dataset.identity),
         strategy=strategy,
@@ -280,6 +349,7 @@ def _empty_row(dataset: DatasetRef, *, strategy: str, unavailable: str) -> Board
         target=None,
         as_of=None,
         dataset_last_bar=dataset.last_bar,
+        last_written=dataset.last_written,
         closes=[],
         unavailable=unavailable,
         provenance=None,
@@ -298,10 +368,12 @@ def _identity(identity: MarketDataIdentity) -> dict[str, str]:
 __all__ = [
     "DEFAULT_SPARK_BARS",
     "MAX_SPARK_BARS",
+    "WHOLE_HISTORY",
     "BoardRow",
     "BoardStamp",
     "BoardWindow",
     "DatasetRef",
+    "board_window",
     "funding_window",
     "stored_datasets",
     "stream_board",

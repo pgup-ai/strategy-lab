@@ -226,6 +226,23 @@ def load_candles(
 
 
 def list_candle_sets(database_url: str | None = None) -> pd.DataFrame:
+    """Every stored candle set: how far its bars reach, and when they were written.
+
+    ``last_written`` is ``max(updated_at)``, maintained by ``upsert_candles`` on
+    every conflicting row, and it is a different question from
+    ``last_timestamp``. On a venue whose history only grows the two move
+    together and the write time says nothing. On a **dividend-adjusted** equity
+    series they come apart: the Yahoo fetcher rescales every OHLC column by
+    ``adj_close / close``, so a distribution rewrites bars back to the start of
+    the history rather than appending one. Measured against a fresh fetch of the
+    stored SPY weekly series, **333 of 333 overlapping bars moved** (median
+    0.257%, largest 0.405%, oldest 2020-01-01), and ``donchian`` -- which
+    compares a close against a channel's own high and low, where a non-uniform
+    rescale does not cancel -- differed on 3 of them.
+
+    It is one more aggregate over a group-by that already runs, rather than a
+    query per set, because the board asks this of every stored dataset at once.
+    """
     engine = get_engine(database_url)
     query = (
         select(
@@ -236,6 +253,7 @@ def list_candle_sets(database_url: str | None = None) -> pd.DataFrame:
             func.count().label("candles"),
             func.min(candles_table.c.timestamp).label("first_timestamp"),
             func.max(candles_table.c.timestamp).label("last_timestamp"),
+            func.max(candles_table.c.updated_at).label("last_written"),
         )
         .group_by(
             candles_table.c.exchange,

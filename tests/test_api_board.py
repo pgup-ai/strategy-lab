@@ -17,6 +17,14 @@ usable at all and one that it must never acquire:
 * rows **arrive as they finish**, because the cost is serial and measured;
 * and ``browse`` still writes **nothing** -- no report directory, no ``signals``
   row, no ``bar_reasons`` row, no schema change.
+
+The equity section at the end adds the one property a second market type needs:
+a frame's bound is chosen **by its market type**, and an instrument that settles
+nothing is never asked about settlements. That is asserted twice and by
+statement -- once on the function the board calls and once on the SQL that
+reaches the database -- because its failure mode is silent: a ``funding_span``
+for an equity returns ``None`` and everything carries on working, having invented
+a coverage question for a market that has no answer to it.
 """
 
 from __future__ import annotations
@@ -33,9 +41,11 @@ from sqlalchemy.engine import Engine
 from strategy_lab.api import app as app_module
 from strategy_lab.api.board import (
     MAX_SPARK_BARS,
+    WHOLE_HISTORY,
     BoardStamp,
     BoardWindow,
     DatasetRef,
+    board_window,
     funding_window,
     stored_datasets,
     stream_board,
@@ -276,6 +286,7 @@ def test_a_row_is_the_last_bar_of_every_series_the_payload_carries(monkeypatch):
             exchange="binance", market_type="perp", symbol="BTC/USDT", timeframe="4h"
         ),
         last_bar="2024-01-02",
+        last_written="2024-01-03 09:00:00+00:00",
     )
 
     row = _compute(dataset, strategy=_MACHINE, stamp=_ANY_STAMP, exit_mode=None)
@@ -286,6 +297,9 @@ def test_a_row_is_the_last_bar_of_every_series_the_payload_carries(monkeypatch):
     assert row.target == 0.4
     assert row.closes == [10.0, 11.0, 12.0, 13.0]
     assert row.as_of == "2024-01-02"
+    # Off the enumeration, not off the payload: when the bars were written is a
+    # fact about storage, and the analysis has no opinion about it.
+    assert row.last_written == "2024-01-03 09:00:00+00:00"
 
 
 # --------------------------------------------------------------------------
@@ -356,18 +370,25 @@ def _without_generated_at(row: dict) -> dict:
     return {**row, "provenance": {k: v for k, v in provenance.items() if k != "generated_at"}}
 
 
-def _stub_datasets(monkeypatch, pairs: list[tuple[str, str]]) -> pd.DataFrame:
+def _stub_datasets(
+    monkeypatch,
+    pairs: list[tuple[str, str]],
+    *,
+    market_type: str = "perp",
+    last_written: str = "2024-01-01 00:00:00+00:00",
+) -> pd.DataFrame:
     """The enumeration query, replaced by a frame a test can move a bar on."""
     sets = pd.DataFrame(
         [
             {
                 "exchange": "binance",
-                "market_type": "perp",
+                "market_type": market_type,
                 "symbol": symbol,
                 "timeframe": timeframe,
                 "candles": 600,
                 "first_timestamp": pd.Timestamp("2024-01-01", tz="UTC"),
                 "last_timestamp": pd.Timestamp("2024-01-01", tz="UTC"),
+                "last_written": pd.Timestamp(last_written),
             }
             for symbol, timeframe in pairs
         ]
@@ -383,7 +404,8 @@ def _stub_datasets(monkeypatch, pairs: list[tuple[str, str]]) -> pd.DataFrame:
 
 
 @pytest.mark.db
-def test_a_board_request_writes_nothing(statements, tmp_path, monkeypatch):
+@pytest.mark.parametrize("market_type", ["perp", "equity"])
+def test_a_board_request_writes_nothing(statements, tmp_path, monkeypatch, market_type):
     """No report directory, no ``signals`` row, no ``bar_reasons`` row, no DDL.
 
     Asserted rather than assumed, and asserted three ways because they fail
@@ -391,6 +413,11 @@ def test_a_board_request_writes_nothing(statements, tmp_path, monkeypatch):
     the working directory, a stray write would land in one of the two
     append-only tables, and a stray migration would issue DDL against a database
     this whole surface treats as read-only.
+
+    Both market types, because widening the board is exactly the kind of change
+    that adds a writer: an equity's freshness comes from ``updated_at``, which is
+    a column a write maintains, and reading it must not be the thing that moves
+    it.
     """
     engine = get_engine()
     with engine.connect() as conn:
@@ -405,7 +432,7 @@ def test_a_board_request_writes_nothing(statements, tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     statements.clear()
     rows = _rows(
-        client.get("/api/board", params={"strategies": _MACHINE, "market_type": "perp"})
+        client.get("/api/board", params={"strategies": _MACHINE, "market_type": market_type})
     )
     client.get("/")
 
@@ -453,6 +480,7 @@ def test_rows_are_yielded_as_they_finish_rather_than_as_one_blob(monkeypatch):
                 exchange="binance", market_type="perp", symbol=symbol, timeframe="4h"
             ),
             last_bar="2024-01-01 00:00:00+00:00",
+            last_written="2024-01-01 00:30:00+00:00",
         )
         for symbol in ("BTC/USDT", "ETH/USDT", "SOL/USDT")
     ]
@@ -472,7 +500,13 @@ def test_rows_are_yielded_as_they_finish_rather_than_as_one_blob(monkeypatch):
 
 
 @pytest.mark.db
-def test_the_enumeration_is_storages_own_identity_and_newest_bar():
+def test_the_enumeration_is_storages_own_identity_newest_bar_and_newest_write():
+    """Both stamps, from the one group-by rather than a query per dataset.
+
+    They answer different questions and only look alike on a venue whose history
+    grows: an equity series is restated on a dividend, so every bar can move
+    without the newest one changing.
+    """
     stored = list_candle_sets()
     perps = stored[stored["market_type"] == "perp"]
 
@@ -481,6 +515,12 @@ def test_the_enumeration_is_storages_own_identity_and_newest_bar():
     assert len(listed) == len(perps)
     assert {ref.identity.symbol for ref in listed} == set(perps["symbol"])
     assert all(ref.last_bar for ref in listed)
+    assert all(ref.last_written for ref in listed)
+    # A write cannot predate the bar it wrote, on any dataset in storage.
+    assert all(
+        pd.Timestamp(ref.last_written) >= pd.Timestamp(ref.last_bar)
+        for ref in stored_datasets()
+    )
 
 
 def test_every_board_row_field_survives_the_wire_model(monkeypatch):
@@ -556,3 +596,257 @@ def test_the_sparkline_tail_is_bounded_by_what_was_asked_for(monkeypatch):
     # way out, so a longer tail asked for second is served in full rather than
     # from a copy already cut to the first request's length.
     assert len(closes(spark_bars=MAX_SPARK_BARS)) == MAX_SPARK_BARS
+
+
+# --------------------------------------------------------------------------
+# R10c -- a second market type, on the same one computation.
+# --------------------------------------------------------------------------
+
+# Weekly ETF sets of 333 bars each. Short enough that ``ema_cross`` (3,840
+# declared warmup bars) refuses them and long enough that ``donchian`` (96) does
+# not, which is what makes a mixed board on real data rather than a stub.
+_SHORT_WEEKLIES = {("yahoo", "equity", symbol, "1w") for symbol in ("XLF", "XLK", "QQQ", "SMH")}
+
+# Two strategies chosen so the same board holds answers and refusals: the state
+# machine needs 2,192 bars and answers only on the hourly equity sets, while
+# ``donchian`` answers everywhere. A board of refusals alone would not show that
+# a refusal stays inside its own row.
+_EQUITY_STRATEGIES = f"{_MACHINE},donchian"
+
+
+def _equity_identity(symbol: str = "SPY", timeframe: str = "1w") -> MarketDataIdentity:
+    return MarketDataIdentity(
+        exchange="yahoo", market_type="equity", symbol=symbol, timeframe=timeframe
+    )
+
+
+@pytest.mark.db
+def test_a_board_over_every_stored_equity_answers_one_row_per_dataset_and_strategy():
+    """Check 1, on the datasets that actually hit the warmup rule.
+
+    ``XLF``, ``XLK``, ``QQQ`` and ``SMH`` hold 333 weekly bars against
+    ``state_machine_v1``'s 2,192, so those rows carry the engine's own refusal --
+    and the hourly sets beside them are answered in the same response. A short
+    frame is a fact about that instrument's stored bars, not a reason for the
+    board to blank.
+    """
+    client = TestClient(app_module.create_app())
+    stored = list_candle_sets()
+    equities = {
+        (row.exchange, row.market_type, row.symbol, row.timeframe)
+        for row in stored[stored["market_type"] == "equity"].itertuples()
+    }
+    assert equities, "no stored equity datasets; fetch one before running this"
+    assert _SHORT_WEEKLIES <= equities, "the 333-bar weekly sets are not stored"
+
+    rows = _rows(
+        client.get(
+            "/api/board", params={"strategies": _EQUITY_STRATEGIES, "market_type": "equity"}
+        )
+    )
+
+    assert len(rows) == len(equities) * 2
+    assert {_key(row) for row in rows} == equities
+    by_pair = {(_key(row), row["strategy"]): row for row in rows}
+
+    for key in _SHORT_WEEKLIES:
+        refused = by_pair[(key, _MACHINE)]
+        assert refused["unavailable"] is not None, key
+        assert "warmup bars but the frame has 333" in refused["unavailable"], key
+        # The refusal is the whole of the row, and the two facts about the
+        # *stored bars* survive it: how far they reach and when they were
+        # written. Neither is a fact about a run that did not happen.
+        assert refused["provenance"] is None
+        assert refused["dataset_last_bar"] and refused["last_written"]
+        assert by_pair[(key, "donchian")]["unavailable"] is None, key
+
+    answered = [row for row in rows if row["unavailable"] is None]
+    assert answered
+    for row in answered:
+        assert row["as_of"] is not None
+        assert row["closes"], "a row with no sparkline tail"
+        # No settlement bounds the frame, so it reaches the newest stored bar --
+        # the perp's one-bar lag (M37) is structurally absent here.
+        assert row["as_of"] == row["dataset_last_bar"]
+
+
+@pytest.mark.db
+def test_an_equity_rows_state_and_latest_fill_are_the_single_views_own():
+    """Check 2, unchanged from R10b: M36 binds every view, and a second market
+    type is still one view.
+
+    The window comes off the row's own provenance rather than out of the board's
+    bounding function, so this compares two answers rather than one answer with
+    itself.
+    """
+    client = TestClient(app_module.create_app())
+    rows = _rows(
+        client.get(
+            "/api/board", params={"strategies": _EQUITY_STRATEGIES, "market_type": "equity"}
+        )
+    )
+    answered = [row for row in rows if row["unavailable"] is None]
+    assert answered
+    assert any(row["state"] is not None for row in answered), (
+        "no answered row carries a state; this compares nothing about the why layer"
+    )
+
+    for row in answered:
+        provenance = row["provenance"]
+        payload = client.get(
+            "/api/analysis",
+            params={
+                **row["identity"],
+                "strategy": row["strategy"],
+                "start": provenance["first_bar"],
+                "end": provenance["last_bar"],
+            },
+        )
+        assert payload.status_code == 200, payload.text
+        single = payload.json()
+
+        assert (single["why"]["states"][-1] if single["why"] else None) == row["state"]
+        assert (
+            None
+            if single["why"] is None
+            else {name: values[-1] for name, values in single["why"]["features"].items()}
+        ) == row["features"]
+        assert (single["markers"][-1] if single["markers"] else None) == row["latest_fill"]
+        assert single["bars"][-1]["close"] == row["closes"][-1]
+        assert {k: v for k, v in single["provenance"].items() if k != "generated_at"} == {
+            k: v for k, v in provenance.items() if k != "generated_at"
+        }
+
+
+def test_the_frame_bound_is_chosen_by_market_type():
+    """Check 3, at the seam where the choice is made.
+
+    ``funding_window`` is perp-only and says so rather than answering
+    ``WHOLE_HISTORY`` for everything else: answering would make it look like a
+    function of every market while quietly querying ``funding_rates`` for
+    instruments that settle nothing.
+    """
+    assert board_window(_equity_identity()) == WHOLE_HISTORY
+    assert board_window(
+        MarketDataIdentity(
+            exchange="binance", market_type="spot", symbol="BTC/USDT", timeframe="1d"
+        )
+    ) == WHOLE_HISTORY
+
+    with pytest.raises(ValueError, match="settles nothing"):
+        funding_window(_equity_identity())
+
+
+def test_only_a_perp_dataset_is_asked_about_funding(monkeypatch):
+    """Check 3, on the function the board calls, with a perp control beside it.
+
+    Asserted by statement rather than by the absence of an error: a
+    ``funding_span`` for an equity returns ``None`` and everything carries on
+    working, having invented a coverage question for a market with no answer to
+    it. Without the perp in the list the empty assertion would also pass on a
+    board that never bounded anything.
+    """
+    asked: list[str] = []
+
+    def _record(**kwargs) -> None:
+        asked.append(kwargs["symbol"])
+        return None
+
+    def _uncomputed(*args, **kwargs):
+        raise ValueError("the analysis is not what this test is about")
+
+    monkeypatch.setattr("strategy_lab.api.board.funding_span", _record)
+    monkeypatch.setattr("strategy_lab.api.board.build_analysis", _uncomputed)
+    datasets = [
+        DatasetRef(
+            identity=identity,
+            last_bar="2024-01-01 00:00:00+00:00",
+            last_written="2024-01-01 00:30:00+00:00",
+        )
+        for identity in (
+            _equity_identity(),
+            MarketDataIdentity(
+                exchange="binance", market_type="spot", symbol="BTC/USDT", timeframe="1d"
+            ),
+            MarketDataIdentity(
+                exchange="binance", market_type="perp", symbol="BTC/USDT", timeframe="4h"
+            ),
+        )
+    ]
+
+    rows = list(stream_board(datasets, strategies=["donchian"]))
+
+    assert len(rows) == 3
+    assert asked == ["BTC/USDT"], "a market that settles nothing was asked about settlements"
+
+
+@pytest.mark.db
+def test_no_funding_query_reaches_the_database_for_an_equity_board(statements):
+    """Check 3 again, one layer down: the SQL, not the call.
+
+    The function-level assertion above is exact and the substitution below is
+    durable -- a future bound that read ``funding_rates`` by some other route
+    would satisfy the first and fail this. The perp control is in the same test
+    so an assertion that stopped matching cannot pass by matching nothing.
+    """
+    client = TestClient(app_module.create_app())
+
+    statements.clear()
+    equity = _rows(
+        client.get("/api/board", params={"strategies": "donchian", "market_type": "equity"})
+    )
+    funding_reads = [sql for sql in statements if "funding_rates" in sql]
+
+    assert equity
+    assert funding_reads == [], f"an equity board queried funding: {funding_reads}"
+
+    statements.clear()
+    perp = _rows(
+        client.get("/api/board", params={"strategies": "donchian", "market_type": "perp"})
+    )
+    assert perp
+    assert [sql for sql in statements if "funding_rates" in sql], (
+        "the perp control issued no funding query; this test would pass on a "
+        "board that had stopped bounding anything"
+    )
+
+
+@pytest.mark.db
+def test_an_equity_row_carries_when_its_candles_were_last_written():
+    """``max(updated_at)``, and it is not a second spelling of the newest bar.
+
+    An equity history is *restated* rather than extended -- 333 of 333 stored
+    SPY weekly bars moved against a fresh fetch -- so when the bars were written
+    is the freshness question for one, and it is answered from a column
+    ``upsert_candles`` already maintains rather than from a new one.
+    """
+    from sqlalchemy import and_
+
+    from strategy_lab.db.candles import candles_table
+
+    client = TestClient(app_module.create_app())
+    rows = _rows(
+        client.get("/api/board", params={"strategies": "donchian", "market_type": "equity"})
+    )
+    assert rows
+
+    engine = get_engine()
+    for row in rows:
+        identity = row["identity"]
+        with engine.connect() as conn:
+            written = conn.execute(
+                select(func.max(candles_table.c.updated_at)).where(
+                    and_(
+                        candles_table.c.exchange == identity["exchange"],
+                        candles_table.c.market_type == identity["market_type"],
+                        candles_table.c.symbol == identity["symbol"],
+                        candles_table.c.timeframe == identity["timeframe"],
+                    )
+                )
+            ).scalar()
+        assert pd.Timestamp(row["last_written"]) == pd.Timestamp(written), identity
+        # A write happens after the bar it writes, never before.
+        assert pd.Timestamp(row["last_written"]) >= pd.Timestamp(row["dataset_last_bar"])
+    # And on this market they are genuinely different questions: every stored
+    # equity set was written after its newest bar closed.
+    assert any(row["last_written"] != row["dataset_last_bar"] for row in rows)
