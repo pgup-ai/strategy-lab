@@ -292,6 +292,7 @@ not begin until the previous gate passes.
 | **R10a** | **Persist the why-layer on the path that cannot recompute it** | A bar-by-bar diff of stored-live reasons against the browser's recomputed ones — and it is **expected to fail on census item (a)**, which is the deliverable | R7d | **Done.** The event path persists per-bar reasons, the research path keeps recomputing, and the diff between them is R10's gate made checkable per bar (M35). **Census item (a) is measured and it is the whole gap**: `crowding` differs on 6,048 of 6,048 bars, the other four features on none, the state on 488 — and pinning crowding to the live constant reproduces every stored state with **0 residual**. Found a storage defect on the way (M34) whose implication for `market_candles` is real and unrepaired. 957 tests, every published figure bit-identical. See [§9.10](#910-r10a-the-why-layer--census-item-a-measured). *Superseded content, from before it ran:* Designed at [docs/plans/2026-08-06-r10a-why-layer.md](../plans/2026-08-06-r10a-why-layer.md); a design plan rather than a pre-registration, since it produces a schema and a diff rather than a figure. **The obvious version of this is half wrong**: the research path already computes a `WhyLayer` per bar and is right not to store it — recompute is 19 ms and a stored copy of a deterministic function of stored candles is a second record to drift. What is unrecomputable is what a **live** run saw when it decided, so the event path persists, the research path keeps recomputing, and R10's gate becomes the diff between them. That turns the six-item census from prose into a row count. |
 | **R10b** | **From one instrument to a board** | Every row's state and latest fill **identical** to what `/api/analysis` returns for the same pair, and `browse` still writes nothing | R10a | **Done — all six acceptance checks pass.** The board slices `build_analysis` and asserts every row equal to `/api/analysis` over that row's own window (M36); a board read issues **0 mutating statements** and first paint is **67 ms**; the row cache was **removed under review** (checks 3 and 4 withdrawn) because its stamp could not see an in-place candle rewrite, so every request recomputes. Two findings: **parallelism returned 1.10×** under the GIL, so streaming is the only lever for widening this; and a funding-bounded frame leaves a row up to one bar stale, shown rather than hidden (M37). See [§9.11](#911-r10b-the-board--several-instruments-one-computation). *Superseded content, from before it ran:* Designed at [docs/plans/2026-08-06-r10b-dashboard.md](../plans/2026-08-06-r10b-dashboard.md). The single-instrument view is **done** — chart, fills, provenance and a rendered why-panel all ship today — so this adds breadth, not depth. Three measurements shape it: a warm analysis costs **~300–500 ms** per instrument (BTC 5,602 ms cold, then ETH 491, SOL 310), the payload is **15,124 bars and 694 markers** where a tile needs a state and a sparkline, and a full-frame request on BTC perp **raises** because its candles start 40 h before the venue's first settlement. So the board **slices `build_analysis` rather than recomputing** — a cheaper route would be a third path free to disagree with the other two — bounds each frame by its own `funding_span`, and caches on the **last bar** rather than on wall-clock time. |
 | **R10c** | **Equities on the board** — and what a tile can honestly claim about a restated history | Census item **(f)** measured, then the board widened: each market type states the staleness that applies to *it*, and no `funding_span` query is issued for an instrument that has no funding | R10b | **Done — all six acceptance checks pass.** 10 equity datasets × 2 strategies = **20 rows**; all **14** answered rows identical to `/api/analysis` over their own window (M36); **0** `funding_rates` statements on an equity board against **7** on the perp control, asserted by statement; **0** mutating statements on the read path; and the perp board is **field-for-field identical** to `ddae16f`. `last_written` (`max(updated_at)`) needed no schema change. The finding is that widening a view means **re-deriving what it claims, not reusing the sentence** (M38). Widening it also exposed a warning gated on a proxy: `state_machine_v1` on an equity is the M20 condition — `crowding` pinned neutral, three of four features — and neither browser surface flagged it, while both flagged `donchian` on a funded perp where nothing is wrong. Closed in the same phase (**M39**): the predicate is now `reads_crowding && !crowding_measured`, off a new `Provenance.reads_crowding`. See [§9.12](#912-r10c-equities-on-the-board--census-item-f-and-what-a-tile-can-honestly-claim). *Superseded content, from before it ran:* Designed at [docs/plans/2026-08-07-r10c-equities-on-the-board.md](../plans/2026-08-07-r10c-equities-on-the-board.md). **(f) is now a number**: against a fresh fetch of the stored SPY weekly series, **333 of 333 overlapping bars moved**, median **0.257%**, oldest changed bar **2020-01-01** — an equity history is *restated*, not appended. It reaches the signals rarely and unevenly: `tsmom` and `trend_following_deepseek_v4` are untouched because a uniform rescale cancels in a ratio, while **`donchian` differs on 3 bars, 39 entries against 38**, since each bar's factor reflects the dividends paid after it and a marginal channel break can flip. So a perp tile's risk is its **right edge** and an equity tile's is its **whole history**, and `market_candles.updated_at` already answers the second without a schema change. |
+| **R10d** | **The event path's remaining census items** — (b) exit modes, (c) size, (d) `TargetExposure` | All six census items are numbers rather than four numbers and three prose claims, so R10's gate becomes evaluable | R10c | **Done — all three items measured, replicated on BTC and ETH.** **(b)** every pass-through mode differs on **0** bars, so **6 of 9** strategies' replay streams already *are* their canonical backtest configuration and the census's "five strategies" was pessimistic — but `trend_following_deepseek_v4` emits **0** exits of its own, so a replay of it opens positions and never closes one (7,331 of 15,128 BTC bars); `turnaround_v1`/`v2` differ on 984. **(c)** recomputable from a cold buffer with **0 differing over 600 bars**, so it is a reporting choice rather than a gap in the gate (M35) — though `state_machine_v1` carries a scale on **all 355** of its entries, 0.178–0.700. **(d)** the streaming driver the determinism suite already uses reproduces whole history **exactly, 0 of 400 bars**, on a real perp frame it had never seen: a missing adapter, not a correctness problem. **The finding no reading anticipated**: `StrategyRunner` accepts `state_machine_v2` and runs **2,192 bars — 365.3 days at 4h** — before raising `AttributeError`, because a contract mismatch hides behind the warmup it is longer than (**M40**). Verdict: closing (a) is **necessary and not sufficient**, and the build order is (a), then (d)'s one-line construction check, then (b) for one strategy. Two caveats are about the harness rather than the repo. See [§9.13](#913-r10d-the-event-paths-remaining-census-items--b-c-and-d-measured). *Superseded content, from before it ran:* Pre-registered at [docs/plans/2026-08-07-r10d-event-path-census.md](../plans/2026-08-07-r10d-event-path-census.md). A **measurement** phase, not a build: R10a and R10c each measured their census item before deciding what to build, and both found the obvious remedy was the wrong shape (M35, M38). **The methodological point is that (a) and (b) confound** — on a perp `state_machine_v1`'s replayed signals already differ from its backtested ones *because of crowding*, so (b) is measured against the whole-history `SignalSet` rather than against a replay run, with one real replay validating the shortcut. Two priors are declared in advance so a confirmation cannot be dressed as a discovery: `_exit_signals` is a **pure pass-through** for `opposite_signal_only`, the canonical mode of six strategies, so (b)'s "matches no single backtest configuration" is expected to be a per-*mode* gap rather than a per-*strategy* one; and `tests/test_exposure_determinism.py` already streams exposure strategies correctly through a deliberate mirror of `StrategyRunner`, so (d) is expected to be a missing adapter rather than an unsolved problem. Nothing is built, no holdout is spent, and a pass-through mode differing on any bar is a **kill switch** rather than a finding. |
 | R10 | Paper trading | Research and live code paths produce identical output | R9 | — **next, and now the program's main line rather than a later phase.** M31 ended the state-machine sequence on the finding that the estimator works and the book does not, which makes execution the open problem and this the phase that owns it. Nothing blocks it: the read-only browser shipped the viewing half in PR #14, and the six ways a live signal differs from a backtested one are already enumerated as a work list in the 2026-08-05 state-of-play entry. *Original gate note:* , and the gap is now enumerated**: six ways a live signal differs from a backtested one, in the 2026-08-05 state-of-play entry. Two are structural rather than bugs — the runner withholds exit ingredients until Phase 1b gives it an `ExitMode`, and `TargetExposure` strategies cannot run on the event path at all. The product vision (a command-and-control dashboard) lands here, not earlier. |
 | R11 | Canary (small size) | Expected vs actual fills, costs, state transitions all match | R10 | — |
 
@@ -381,6 +382,7 @@ Newest first. One entry per meaningful step — what was done, what was learned,
 
 | Date | Entry |
 |---|---|
+| 2026-08-07 | **R10d: the census is six numbers, and the event path is closer than it claimed on two items and worse on two others.** Pre-registered at `2ca80f0` before any figure; a measurement phase that built nothing, spent no holdout and touched no source file. Both frames, BTC/USDT and ETH/USDT perp 4h, every number replicating. **(b)** Measured against `_exit_signals` over the same `SignalSet`, which isolates it from (a): **every pass-through mode differs on 0 bars**, so for **6 of 9** strategies the replay stream already *is* the canonical backtest configuration, and the census's "five strategies" is wrong toward pessimism. But **`trend_following_deepseek_v4` emits 0 exits of its own**, so a replay of it opens positions and never closes one — 7,331 of 15,128 BTC bars, a different *kind* of defect from `turnaround_v1`/`v2`'s 984. **(c)** 7 of 9 strategies emit no `position_size`; `state_machine_v1` carries one on **all 355** of its entries, spanning 0.178–0.700 — and a cold buffer reproduces it with **0 differing over 600 bars**, so under M35 the live path loses nothing by not sending it. (c) is a reporting choice, not a gap in the gate. **(d)** The driver `tests/test_exposure_determinism.py` already uses reproduces the whole-history target **exactly, 0 of 400 bars**, on a real perp frame it had never run on — so (d) is a missing adapter. **The finding no reading anticipated**: `StrategyRunner` accepts `state_machine_v2` and survives **2,192 bars, 365.3 days at 4h**, before raising `AttributeError` — the contract mismatch hides behind the warmup it is longer than, which is exactly the failure `require_warmup_bars` sits in `__init__` to prevent (**M40**). Also measured in passing: census item **(a) on the continuous contract**, 6 of 400 BTC bars and 32 of 400 ETH. **Two caveats are about the harness**: a cosmetic `FutureWarning` fix silently broke CONTROL R and it went red on ETH before being caught, and the pre-registered entry control was **vacuous** and had to be replaced by one that can fail. So: closing (a) is necessary and not sufficient, and the ordering for the build phase is (a), then (d)'s one-line construction check, then (b) for one strategy. See [§9.13](#913-r10d-the-event-paths-remaining-census-items--b-c-and-d-measured). |
 | 2026-08-07 | **The crowding warning now names its condition rather than the market type (M39)** — R10c's caveat 1, closed. Both browser surfaces gated on `market_type === 'perp'`, a proxy that was fine while the board was perps-only and wrong **in both directions** once it was not: silent on `state_machine_v1` over an equity, which runs with `crowding` pinned to 0.5 on every bar — the M20 condition, permanent rather than fetchable — and firing on `donchian` over a funded perp, where nothing is wrong. `Provenance` now carries **`reads_crowding`**, introspected from the strategy's declared features, and the predicate is `reads_crowding && !crowding_measured`; the two alert branches split on market type only for the *wording*, since a perp's gap is fetchable and an equity's is not. Verified on stored candles — the two correct cells unchanged, the two wrong ones flipped — and **seven mutants run, seven died**. See [§9.12](#912-r10c-equities-on-the-board--census-item-f-and-what-a-tile-can-honestly-claim). |
 | 2026-08-07 | **R10c: equities on the board, and census item (f) is a number.** Against a fresh fetch of the stored SPY weekly series, **333 of 333 overlapping bars moved** — median **0.257%**, oldest **2020-01-01** — because the Yahoo fetcher rescales all history by adjusted close. So an equity history is **restated**, not appended. It reaches the signals rarely and unevenly: `tsmom` (209 entries) and `trend_following_deepseek_v4` (21) differ on **0** bars, since a rescale cancels in a ratio, while **`donchian` differs on 3, 39 entries against 38**, because each bar's factor reflects the dividends paid *after* it and a marginal channel break flips. **The consequence is that widening a view is not "add a market type to the filter".** A perp tile's staleness is its **right edge** (bounded by its own funding, M37); an equity tile's is its **whole history**, and each now states only its own. `market_candles.updated_at` already answered the second, so `last_written` is one more aggregate on the enumeration that already ran — **no schema change**. The load-bearing half is the converse: **no `funding_span` query is issued for an instrument that settles nothing**, asserted by statement, because a query that can only return `None` is how a coverage guard gets invented for a market that has none (M38). **All six acceptance checks pass**, verified independently: 20 rows over 10 equity datasets, all 14 answered ones identical to `/api/analysis` over their own window (M36), 0 `funding_rates` statements against 7 on the perp control, 0 mutating statements, and the perp board field-for-field identical to `ddae16f`. `DEFAULT_MARKET_TYPE` stays `perp`. **One caveat found by building it**: `state_machine_v1` on an equity is the M20 condition — `crowding` pinned neutral, three of four features, where a perp would be *refused* — and the board tile does not flag it, because the honest predicate is "reads a funding-derived feature" rather than the market type; carried to §12. The board now covers the scope the product vision opens with: crypto and stock/ETF. See [§9.12](#912-r10c-equities-on-the-board--census-item-f-and-what-a-tile-can-honestly-claim). |
 | 2026-08-06 | **R10b: the board ships, and it slices the single view rather than recomputing it.** `GET /api/board` streams one row per (dataset, strategy) as each finishes — state, feature values, latest fill, sparkline, provenance — and the page opens on a grid of tiles that link into the existing instrument view. **All six acceptance checks pass**, verified independently: rows are **identical** to `/api/analysis` over each row's own window (M36), a board **read** issues **0 mutating statements**, and first paint is **67 ms** against a declared bar of one second. **The row cache shipped and was then removed under review**: it could not see the in-place candle rewrite `/api/refresh` performs by design, so checks 3 and 4 are withdrawn and every request recomputes — which is what CLAUDE.md's browser contract said all along. **One of the plan's two options turned out not to exist**: parallelism returned **1.10×** on four threads, because the work is pandas and vectorbt under the GIL, so streaming is the only lever and that constrains every later attempt to widen the board. **One tradeoff is deliberate and visible**: bounding each frame at its last settlement leaves a perp row up to one bar stale (ETH `as_of` 16:00 against a 20:00 stored bar), shown in orange rather than hidden, because the alternative blanks every tile the moment a candle fetch outruns funding (M37). Perps only — census item (f) makes equity freshness a different problem and it is still unmeasured. See [§9.11](#911-r10b-the-board--several-instruments-one-computation). |
@@ -1794,6 +1796,148 @@ makes rather than inherits.
 
 ---
 
+### 9.13 R10d the event path's remaining census items — (b), (c) and (d), measured
+
+**Pre-registered** at [docs/plans/2026-08-07-r10d-event-path-census.md](../plans/2026-08-07-r10d-event-path-census.md),
+`2ca80f0`, before any figure here. A **measurement** phase: nothing was built, no holdout
+spent, no source file touched, so no published figure can have moved. Frames are BTC/USDT
+perp 4h (15,128 bars, 2019-09-10 → 2026-08-07) and ETH/USDT perp 4h (14,649 bars,
+2019-11-27 → 2026-08-03), each bounded at both ends by its own `funding_span`. Every number
+below replicates across the two.
+
+**The census is now six numbers.** (a) and (f) were already measured; (b), (c) and (d) are
+here. **Both declared priors held, and the phase's real finding was in neither.**
+
+#### (b) Exit modes — a per-(strategy, mode) gap, and only three strategies have one
+
+The claim was *"for the five strategies that depend on engine-side exits the signal stream
+matches no single backtest configuration"*. Measured against `_exit_signals` over the same
+`SignalSet`, which isolates (b) from (a):
+
+| strategy | canonical mode | BTC bars differing | ETH |
+|---|---|---|---|
+| `donchian`, `ema_cross`, `multi_horizon`, `state_machine_v1`, `trend_rider_v1…`, `tsmom` | `opposite_signal_only` | **0** | **0** |
+| `turnaround_v1` | `continuation_failure` | 984 | 1,035 |
+| `turnaround_v2` | `continuation_failure` | 984 | 1,035 |
+| **`trend_following_deepseek_v4`** | `trend_structure` | **7,331** | **7,012** |
+
+**`opposite_signal_only` differs on 0 bars, on every strategy, on both frames** — the kill
+switch did not fire, and prior 1 held: `_exit_signals` returns the strategy's own series
+unchanged for it, so for **6 of 9** strategies the replay stream already *is* the canonical
+backtest configuration. The census's "five strategies" is wrong in the direction of pessimism.
+
+**`setup_invalidation_stop` is not a pass-through, and the first version of this harness said
+it was** (corrected under review). `_exit_signals` does return the strategy's own series for
+it — but `_stop_kwargs` then hands `from_signals` an `sl_stop` the replay stream does not
+carry, so its exit *series* pass through while its *configuration* does not. Worse, that
+function **raises** when a strategy provides no setup stop, which is 7 of the 9 — exactly
+what STRATEGIES.md's matrix claims, and exactly what a harness calling only `_exit_signals`
+reported as a clean zero. The pass-through set is now *derived* from both engine functions
+rather than listed, and the corrected table has 7 raising and `turnaround_v1`/`v2` running
+with `adds_engine_stop=True`. No headline moves — no strategy's canonical mode is
+`setup_invalidation_stop`, and the mislabelled cells were all zero — but the harness now
+agrees with the matrix it claimed to be testing.
+
+**But `trend_following_deepseek_v4` is worse than the census said.** It emits **0** exits of
+its own — by design, the engine owns them — so a replay of it emits entries and **never an
+exit** on any bar. It is not that the stream matches no configuration; it is that the stream
+is a book that opens and never closes. That one strategy is 48% of BTC's bars different, and
+it is a different *kind* of defect from the turnarounds' 984.
+
+Two side findings. `trend_rider_v1_deepseek_v4_pro` differs on **0** bars in *every*
+runnable mode including `continuation_failure` — STRATEGIES.md calls that layer "redundant
+on top of internal 3-bar", and redundant turns out to mean exactly 0. And the engine's
+warmup boundary and the runner's **agree on all nine strategies**, which is the phase's one
+non-vacuous control (see the caveats).
+
+#### (c) Size — a reporting gap, not a data-loss gap
+
+**7 of 9 strategies emit no `position_size` at all.** The two that do:
+
+| strategy | entry bars | scale ≠ 1.0 | range (BTC) |
+|---|---|---|---|
+| `state_machine_v1` | 355 / 357 | **355 / 357 — all of them** | 0.178 – 0.700 |
+| `trend_rider_v1_deepseek_v4_pro` | 1,660 / 1,561 | 10 / 32 | 0.747 – 1.000 |
+
+So the number is not decorative: the state machine's every entry carries a scale, spanning
+4× between smallest and largest. And it is **recomputable** — a cold buffer over the last
+600 bars reproduces the whole-history value with **0 differing and 0 NaN disagreements**, on
+both strategies and both frames. Reading 1: under M35 the live path *loses* nothing by not
+sending it, because the consumer holds the bars it is derived from. (c) is a **reporting**
+choice — a `Signal` field — not a schema question and not a gap that blocks R10's gate.
+
+`trend_rider_v1`'s ATR sizing saturating is visible here too: 1,650 of 1,660 BTC entries sit
+at exactly 1.0, the §12 follow-up showing up on 4h as well as 15m.
+
+#### (d) `TargetExposure` — the streaming is correct, and the failure is deferred by a year
+
+Prior 2 held, and then some. Streamed against whole-history over the **unfunded** frame, so
+both sides are crowding-neutral and only a streaming defect can move it:
+
+| | BTC | ETH |
+|---|---|---|
+| streamed vs whole-history, both neutral | **0 / 400 bars** | **0 / 400** |
+| neutral vs funded — census (a) on this contract | 6 / 400 | 32 / 400 |
+
+The driver `tests/test_exposure_determinism.py` already uses — imported here rather than
+copied — reproduces the whole-history target exactly on a **real perp frame**, which is a
+frame it had never run on. So (d) is a *missing adapter*, not a correctness problem. The
+second row is census item (a) measured on the continuous contract for the first time: 1.5%
+of BTC bars and 8% of ETH's.
+
+**The finding no reading anticipated.** The census says exposure strategies "cannot run on
+the event path at all". They can — for a year. `StrategyRunner` accepts `state_machine_v2`
+at construction *and* survives **2,192 bars — 365.3 days at 4h** — before raising
+`AttributeError: 'StateMachineV2' object has no attribute 'generate_signals'`. `on_bar`
+returns before touching the strategy while the buffer is inside warmup, so the contract
+mismatch is invisible until the first bar the runner would have emitted on. That is exactly
+the failure `require_warmup_bars` sits in `__init__` to prevent — its own docstring says *"a
+live process refuses to start rather than refusing partway through a session"* — and the
+contract gets no such check (**M40**).
+
+#### What this says about R10's gate
+
+Closing (a) alone is **necessary and not sufficient**. Ordered by what actually blocks
+*"research and live code paths produce identical output"*:
+
+1. **(a)** — the only *total* gap, and the only one that silently changes a published number.
+2. **(d)'s construction check** — one line, and it converts a year-deferred crash into a
+   refusal at start.
+3. **(b) for `trend_following_deepseek_v4`** — a stream that never exits is unusable, and it
+   is one strategy rather than five.
+4. **(b) for the turnarounds** — ~1,000 bars, real, bounded.
+5. **(d)'s adapter** and **(c)'s field** — both proven to lose nothing; ordinary work.
+
+**Caveats, and two are about this harness rather than the repo.**
+
+1. **My own "cosmetic" fix broke CONTROL R, and it went red on ETH before it was caught.**
+   `reindex(fill_value=False)` fills *new* rows but leaves existing `NaN` cells, and
+   `NaN.astype(bool)` is `True` — so every bar that emitted only an exit read as an entry.
+   The original `.fillna(False)` was right. The control is now densified once, at the source.
+   §8 rule 1 in its natural habitat: the failure was in the instrument, and only a
+   *disagreeing* frame revealed it.
+2. **The pre-registered entry control was vacuous**, and is replaced rather than reported.
+   The protocol said entries must differ on 0 bars because `_exit_signals` passes them
+   through — true and untestable, since it returns exits and never sees an entry. What does
+   touch entries is `_mask_warmup`. The control that can fail compares the engine's masked
+   entries against the runner's own warmup rule; it is clean on all nine, and it could have
+   not been.
+3. **A single-bar probe reported a clean start** for the runner that dies 2,192 bars later.
+   The harness now feeds until it raises, which is why (d)'s headline is a number.
+4. **(d)'s comparison is 400 bars**, not the whole frame — the streaming driver is
+   quadratic, since every bar recomputes over the whole buffer.
+5. **The harness returned 0 with a red control**, which is how caveat 1 survived long enough
+   to need catching by eye. Every stop condition now exits non-zero, not only the
+   pre-registered kill switch.
+6. **The shared exposure driver was hardcoded to 15m/BTC**, so (d)'s "real 4h perp frame"
+   was streaming 4h data under a 15m label. Measured rather than argued: the label reaches
+   `Bar.timeframe` and `ts_close_ms` and nothing else, because `BarBuffer.frame()` carries
+   bar-open timestamps and OHLCV — identical index and **0 of 400 differing targets** either
+   way, on both frames. It is parameterised now so the claim is true, not because a number
+   moved.
+
+---
+
 ## 10. Decision log
 
 Decisions and their reasoning. Amend with a new row rather than editing history.
@@ -1848,6 +1992,7 @@ Decisions and their reasoning. Amend with a new row rather than editing history.
 | M37 | **A visibly stale row beats a whole-board refusal, and the staleness is on the tile** | Every perp frame is bounded on the right by its own last funding settlement, because the coverage guard refuses a frame whose candles outrun its funding — correctly, since R2 measured carry on these instruments at roughly the size of buy-and-hold. On a board that makes a row **up to one bar stale**: measured, ETH reads `as_of` 16:00 against a 20:00 stored bar. The alternative is an unbounded right edge, where a single `fetch-crypto` that advanced candles without funding blanks **every** tile at once. So the board shows both timestamps, in orange, and is stale on purpose rather than wrong by accident. This is the same judgement the provenance strip already encodes for the single view (M20's lesson: a figure read without its context eventually contradicts the charter with no way to see why), applied where the context is *time* rather than a funding column. | 2026-08-06 |
 | M38 | **A view states the staleness that applies to *its* market, and asks nothing of a market that has none** | R10b's board was perps-only and its freshness line was a perp's: `as_of` against the newest stored bar, because a perp frame is bounded on the right by its own funding (M37). R10c ([§9.12](#912-r10c-equities-on-the-board--census-item-f-and-what-a-tile-can-honestly-claim)) found that widening it is **not** "add a market type to the filter", because an equity goes stale at the *other end*. Census item (f), measured: **333 of 333** stored SPY weekly bars moved against a fresh fetch (median 0.257%, oldest 2020-01-01), because the fetcher rescales all history by adjusted close — so an equity history is **restated**, not appended, and `donchian` differs on **3** of those bars where two ratio-based strategies differ on none. A perp tile's risk is its right edge; an equity tile's is its whole history; carrying both lines on both tiles would state a risk that does not exist, which is the same kind of wrong as stating neither. **The converse is the load-bearing half.** No `funding_span` query is issued for an instrument that settles nothing — asserted by statement rather than by absence of an error, because a query that can only return `None` is how a coverage guard gets invented for a market that has none, and a frame bounded by an absence fails silently. `funding_window` is perp-only and refuses anything else; `board_window` dispatches. **The general rule: a surface that widens to a new market type must re-derive what it claims, not reuse the sentence.** | 2026-08-07 |
 | M39 | **A warning's predicate names the condition, not a proxy that happened to correlate with it** | R10c's own caveat 1, closed. The crowding warning on both browser surfaces was gated on `market_type === 'perp'`, which was a fair proxy while the board was perps-only and became wrong **in both directions** the moment it was not: silent on `state_machine_v1` over an equity — the M20 condition itself, `crowding` pinned to `NEUTRAL_CROWDING` on every bar, one feature short of the machine the charter measured, and *permanent* there rather than a fetch away — while firing on `donchian` over a funded perp, where nothing is wrong at all. **A marker that fires when nothing is wrong is how a reader learns to ignore it**, so the false alarm is not the lesser half. The fault the reader cares about is *"this strategy reads crowding and ran without it"*, and neither existing field says that: `crowding_measured` alone conflates "failed to measure" with "does not measure". So `Provenance` now carries **`reads_crowding`** beside it — introspected from the strategy's declared features rather than from the run's metadata, because it is a fact about the configuration and true before a bar is computed, following `_why_layer`'s existing convention — and the predicate is the pair. Verified on stored candles: the two correct cells unchanged, the two wrong ones flipped. **The general rule: when a view widens, re-check that every gate on it names its condition rather than something that used to imply it.** The companion to M38 — that one is about what a view *claims*, this one about what it *warns*. | 2026-08-07 |
+| M40 | **A contract mismatch must be refused where the warmup claim is, or it hides behind the warmup it is longer than** | R10d ([§9.13](#913-r10d-the-event-paths-remaining-census-items--b-c-and-d-measured)) set out to measure how far `TargetExposure` is from the event path and found it is already *on* it, wrongly. `StrategyRunner` accepts `state_machine_v2` at construction and survives **2,192 bars — 365.3 days at 4h** before raising `AttributeError: no attribute 'generate_signals'`, because `on_bar` returns before touching the strategy while the buffer is inside warmup. So the mismatch is invisible for exactly as long as the warmup is, and the deeper the warmup the longer the lie. `require_warmup_bars` is already in `__init__` for precisely this reason — its docstring says *"a live process refuses to start rather than refusing partway through a session"* — and the contract, which is the cheaper check, is not made there. **The general rule: every precondition a runner depends on is checked at construction, not at first use, because "first use" on a warmup-gated path is a year away.** The census called this "cannot run at all", which is the reassuring version of a runner that starts cleanly and crashes after a year. | 2026-08-07 |
 
 ### Carried from Phase 0 (design doc §11)
 
@@ -1883,6 +2028,8 @@ Not blocking, but they will bite during this program.
 | `backfill()` returns `AsyncIterator[Bar]`, `prime()` takes a DataFrame | Blocks the live-warmup path |
 | `Subscription.include_forming` declared but never read | Forming-bar handling is a real MDE concern |
 | `uq_signals_identity` omits `market_type` | Spot + perp signals on the same bar collapse to one |
+| `StrategyRunner` accepts an exposure strategy and raises a **warmup later** | Measured by R10d ([§9.13](#913-r10d-the-event-paths-remaining-census-items--b-c-and-d-measured)): 2,192 bars, 365.3 days at 4h, then `AttributeError`. A `hasattr(strategy, "generate_signals")` check in `__init__` beside `require_warmup_bars` turns it into a refusal at start. One line, and M40 is the rule it belongs to |
+| A replay of `trend_following_deepseek_v4` never emits an exit | It provides none by design — the engine owns them under `trend_structure` — so its event-path stream opens positions and never closes one. Not a bug in either component; the missing piece is (b), an `ExitMode` on the runner |
 | `ruff` never enforces its own 100-char limit (22 violations) | Cosmetic |
 | `trend_rider_v1` ATR sizing saturates on 15m crypto | Works on weekly SPY; not a bug, but a trap if reused |
 

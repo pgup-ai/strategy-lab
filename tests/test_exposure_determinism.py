@@ -157,19 +157,37 @@ def whole_history_targets(strategy, df: pd.DataFrame, *, first: int | None = Non
     return strategy.compute_target(df).target.iloc[boundary:]
 
 
-def streamed_targets(strategy, df: pd.DataFrame, *, prime: pd.DataFrame | None = None) -> pd.Series:
-    """What the same strategy holds when the same bars arrive one at a time."""
+def streamed_targets(
+    strategy,
+    df: pd.DataFrame,
+    *,
+    prime: pd.DataFrame | None = None,
+    instrument: InstrumentId = INSTRUMENT,
+    timeframe: str = TIMEFRAME,
+) -> pd.Series:
+    """What the same strategy holds when the same bars arrive one at a time.
+
+    The identity is a parameter so a caller on a different instrument or bar size
+    gets bars labelled with its own -- ``scripts/r10d`` runs this on 4h perp
+    frames. Measured before it was added: the label reaches ``Bar.timeframe`` and
+    ``ts_close_ms`` and **nothing else**, since ``BarBuffer.frame()`` carries
+    bar-open timestamps and OHLCV, so 400 bars of ``state_machine_v2`` on BTC and
+    ETH gave an identical index and 0 differing targets either way. It is
+    parameterised so the caller's claim about its own timeframe is true, not
+    because a number moved.
+    """
     buffer = BarBuffer()
     if prime is not None:
-        bar_ms = timeframe_to_millis(TIMEFRAME)
+        bar_ms = timeframe_to_millis(timeframe)
         for timestamp, row in prime.sort_index(kind="stable").iterrows():
-            buffer.append(_row_to_bar(timestamp, row, INSTRUMENT, TIMEFRAME, bar_ms))
+            buffer.append(_row_to_bar(timestamp, row, instrument, timeframe, bar_ms))
 
-    feed = ReplayFeed(frames={INSTRUMENT.at(TIMEFRAME): df})
+    feed = ReplayFeed(frames={instrument.at(timeframe): df})
+    sub = Subscription(instrument, timeframe)
 
     async def _run() -> pd.Series:
         held: dict[pd.Timestamp, float] = {}
-        async for event in feed.stream([SUB]):
+        async for event in feed.stream([sub]):
             buffer.append(event.bar)
             if len(buffer) <= strategy.warmup_bars:
                 continue
