@@ -72,9 +72,7 @@ def _insert_raw(conn, run_id, *, ts_bar_ms: int) -> None:
     )
 
 
-# --------------------------------------------------------------------------
 # Schema guarantees
-# --------------------------------------------------------------------------
 
 
 def test_appending_a_reason_is_never_blocked(run_id):
@@ -216,9 +214,7 @@ def test_a_row_cannot_carry_more_names_than_values(run_id):
             )
 
 
-# --------------------------------------------------------------------------
 # The write path
-# --------------------------------------------------------------------------
 
 
 def test_one_row_per_bar_and_the_count_is_the_bar_count(run_id):
@@ -362,9 +358,18 @@ def test_features_round_trip_by_name_not_by_position(run_id):
     assert stored.state == "compression"
 
 
-def test_writing_nothing_touches_no_connection():
+def test_writing_nothing_touches_no_connection(monkeypatch):
     """An empty write must not open a transaction, so a caller can offer whatever
-    it collected without first asking whether it collected anything."""
+    it collected without first asking whether it collected anything.
+
+    Asserted by making the engine unreachable rather than by the return value: a
+    0 proves nothing was inserted, not that nothing was connected to, and it is
+    the connection this test is named for.
+    """
+    def refuse(*args, **kwargs):
+        raise AssertionError("write_bar_reasons opened a connection for an empty write")
+
+    monkeypatch.setattr("strategy_lab.storage.bar_reasons.get_engine", refuse)
     assert write_bar_reasons(uuid.uuid4(), Mode.REPLAY, []) == 0
 
 

@@ -233,7 +233,7 @@ def main() -> None:
     print(f"  {len(payload.bars)} bars, why-layer over {len(payload.why.states)} rows, "
           f"{time.time() - started:.1f}s")
 
-    # ---------------------------------------------------------------- harness
+    # harness
     # Reading 3's trap, checked before anything is compared: if the research side
     # ran crowding-neutral too, this diff proves neutral == neutral and nothing
     # else -- exactly the blindness census item (e) records in the determinism
@@ -258,7 +258,7 @@ def main() -> None:
     if not aligned:
         raise SystemExit("the two paths did not see the same bars; nothing below is comparable")
 
-    # ------------------------------------------------------------------- diff
+    # diff
     features = sorted(strategy.features)
     per_feature = {
         name: compare(
@@ -286,7 +286,7 @@ def main() -> None:
         print(f"  {label:<12} {stored_states.count(label):>6} / "
               f"{research_states.count(label):>6}")
 
-    # --------------------------------------------------------------- controls
+    # controls
     print("\nCONTROL A -- the live path really ran crowding at the neutral constant")
     stored_crowding = {reason.features["crowding"] for reason in rows}
     control_a = stored_crowding == {NEUTRAL_CROWDING}
