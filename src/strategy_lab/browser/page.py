@@ -1010,6 +1010,9 @@ __SHELL_CSS__
     return viewSel.value === 'board';
   }
 
+  // A board failure that landed off the board, waiting for the board to return.
+  var heldBoardError = null;
+
   // A refresh chain outlives the view that started it, and its progress and
   // failures belong to that view. Written unguarded they land on the
   // instrument view's status line, and `setError` also dims its provenance
@@ -1019,7 +1022,10 @@ __SHELL_CSS__
   }
 
   function boardError(text) {
-    if (onBoard()) setError(text);
+    // Held rather than dropped when the user has left. A refresh that failed
+    // while they were reading a chart is still a refresh that failed, and a
+    // board drawn afterwards with no banner says the fetch worked.
+    if (onBoard()) setError(text); else heldBoardError = text;
   }
 
   function abortBoard() {
@@ -1074,7 +1080,10 @@ __SHELL_CSS__
       setStatus(rows + ' rows · first in ' + painted + ' ms');
     }, signal).then(function () {
       if (token !== boardPending) return;
-      setError('');
+      // After the rows, which is where `refreshAll` puts its own failures too:
+      // `setError('')` clears the banner, so anything shown before this is gone.
+      setError(heldBoardError || '');
+      heldBoardError = null;
       document.title = 'board · ' + strategySel.value + ' · strategy-lab';
       el('title').textContent = 'board';
       setStatus(rows === 0

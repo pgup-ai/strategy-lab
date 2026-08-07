@@ -630,7 +630,16 @@ def test_a_board_refresh_says_nothing_over_the_instrument_view(page):
     for writer, wrapped in (("boardStatus", "setStatus"), ("boardError", "setError")):
         body = script[script.index("function " + writer + "(text)"):]
         body = body[: body.index("\n  }")]
-        assert "if (onBoard()) " + wrapped + "(text);" in body, writer
+        assert "if (onBoard()) " + wrapped + "(text)" in body, writer
+    # Progress is transient and may be dropped; a *failure* is held for the
+    # board's return, or a refresh that failed while a chart was being read
+    # comes back to a board with no banner, which reads as success.
+    held = script[script.index("function boardError(text)"):]
+    held = held[: held.index("\n  }")]
+    assert "else heldBoardError = text;" in held
+    board = script[script.index("function loadBoard()"):]
+    assert "setError(heldBoardError || '');" in board
+    assert "heldBoardError = null;" in board
     for owner in ("function refreshOne(", "function refreshAll("):
         body = script[script.index(owner):]
         body = body[: body.index("\n  function ", 1)]
