@@ -106,7 +106,9 @@ streams one newline-delimited row per (dataset, strategy) as each finishes and
 **slices `build_analysis` rather than deriving the same answer a cheaper way**
 (M36). It holds nothing between requests: a row cache keyed on the newest stored
 candle shipped and was removed, because `POST /api/refresh` rewrites overlapping
-recent candles by design and the stamp could not see it.
+recent candles by design and the stamp could not see it. It spans market types,
+and **each one states the staleness that applies to it** — `board_window`
+dispatches on market type, and a perp is the only thing asked about funding.
 
 Key design decisions that span multiple files:
 
@@ -135,6 +137,19 @@ Key design decisions that span multiple files:
   was tried and removed, since `refresh` rewrites overlapping recent candles and
   no cheap stamp sees that. **Parallelism does not help either**, measured at
   1.10× on four threads, since the work is pandas and vectorbt under the GIL.
+  And **widening a view to a new market type means re-deriving what it claims,
+  not reusing the sentence** (M38). A perp goes stale at its **right edge**,
+  bounded by its own funding; an equity goes stale **all the way back**, because
+  the Yahoo fetcher rescales all history by adjusted close — measured, 333 of
+  333 stored SPY weekly bars moved against a fresh fetch (median 0.257%), and
+  `donchian` differed on 3 of them where two ratio-based strategies differed on
+  none. So a perp tile shows `as of` against the newest stored bar and an equity
+  tile shows `candles written` from `max(updated_at)`, and **neither carries the
+  other's line**. The converse is load-bearing: **no `funding_span` query is
+  issued for an instrument that settles nothing** — `funding_window` is perp-only
+  and *raises* otherwise, `board_window` dispatches — because a query that can
+  only return `None` is how a coverage guard gets invented for a market that has
+  none, and the test asserts the absent statement rather than the absent error.
 
 - **A perp refresh advances candles and funding together, because the coverage
   guard refuses the pair when they drift.** `refresh_candles` fetches bars up to
