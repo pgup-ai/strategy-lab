@@ -631,15 +631,26 @@ def test_a_board_refresh_says_nothing_over_the_instrument_view(page):
         body = script[script.index("function " + writer + "(text)"):]
         body = body[: body.index("\n  }")]
         assert "if (onBoard()) " + wrapped + "(text)" in body, writer
-    # Progress is transient and may be dropped; a *failure* is held for the
-    # board's return, or a refresh that failed while a chart was being read
-    # comes back to a board with no banner, which reads as success.
+    # Progress is transient and may be dropped; a *failure* is held, because it
+    # is a fact about the data rather than about the view. It has to survive a
+    # trip to the chart *and* a board redraw the user asked for in between --
+    # both of which otherwise wipe the banner, which is the same silence as
+    # never showing it.
     held = script[script.index("function boardError(text)"):]
     held = held[: held.index("\n  }")]
-    assert "else heldBoardError = text;" in held
+    assert "heldBoardError = text;" in held
+    assert "if (onBoard()) setError(text);" in held
+
     board = script[script.index("function loadBoard()"):]
+    board = board[: board.index("\n  function ", 1)]
     assert "setError(heldBoardError || '');" in board
-    assert "heldBoardError = null;" in board
+    assert "heldBoardError = null;" not in board, "a redraw does not unfail a fetch"
+
+    # Cleared by the user retrying, which is the one event that makes it stale.
+    for owner in ("function refreshOne(", "function refreshAll("):
+        body = script[script.index(owner):]
+        body = body[: body.index("\n  function ", 1)]
+        assert "heldBoardError = null;" in body, owner
     for owner in ("function refreshOne(", "function refreshAll("):
         body = script[script.index(owner):]
         body = body[: body.index("\n  function ", 1)]

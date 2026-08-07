@@ -1022,10 +1022,13 @@ __SHELL_CSS__
   }
 
   function boardError(text) {
-    // Held rather than dropped when the user has left. A refresh that failed
-    // while they were reading a chart is still a refresh that failed, and a
-    // board drawn afterwards with no banner says the fetch worked.
-    if (onBoard()) setError(text); else heldBoardError = text;
+    // Held *and* shown, not one or the other. A refresh failure is a fact about
+    // the data rather than about the view, so it has to survive both a trip to
+    // the chart and a board redraw the user asked for in between -- a strategy
+    // switch mid-refresh would otherwise wipe the banner as its last row lands,
+    // which is the same silence as never showing it.
+    heldBoardError = text;
+    if (onBoard()) setError(text);
   }
 
   function abortBoard() {
@@ -1082,8 +1085,9 @@ __SHELL_CSS__
       if (token !== boardPending) return;
       // After the rows, which is where `refreshAll` puts its own failures too:
       // `setError('')` clears the banner, so anything shown before this is gone.
+      // Not cleared here -- only a fresh refresh clears it, since redrawing the
+      // board does not make a failed fetch have succeeded.
       setError(heldBoardError || '');
-      heldBoardError = null;
       document.title = 'board · ' + strategySel.value + ' · strategy-lab';
       el('title').textContent = 'board';
       setStatus(rows === 0
@@ -1102,6 +1106,8 @@ __SHELL_CSS__
 
   function refreshOne(identity, button) {
     if (button) button.disabled = true;
+    // The user is retrying: whatever the last attempt said is no longer news.
+    heldBoardError = null;
     boardStatus('fetching ' + identity.symbol + ' ' + identity.timeframe + ' …');
     return getJSON('/api/refresh?' + new URLSearchParams(identity).toString(),
                    { method: 'POST' })
@@ -1124,6 +1130,7 @@ __SHELL_CSS__
   function refreshAll() {
     var button = el('refresh-all');
     button.disabled = true;
+    heldBoardError = null;
     // One venue call at a time. Firing sixteen at once is rude to the exchange
     // and interleaves the failures, and the whole point of an explicit refresh
     // is that somebody chose this moment to make them.
