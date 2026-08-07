@@ -1076,6 +1076,12 @@ __SHELL_CSS__
     // the board being started.
     abortBoard();
     var token = ++boardPending;
+    // `boardIdentities` fills as the rows land, and `refreshAll` snapshots it.
+    // Clicked mid-stream it would fetch only the datasets already drawn, then
+    // report "N of N" for a partial N -- and the reload after it recomputes the
+    // untouched ones from unchanged candles, so nothing on screen says a
+    // dataset was skipped.
+    el('refresh-all').disabled = true;
     boardAbort = typeof AbortController === 'function' ? new AbortController() : null;
     var signal = boardAbort ? boardAbort.signal : undefined;
     var host = el('board');
@@ -1120,6 +1126,10 @@ __SHELL_CSS__
       // blank one, and the banner says it is truncated. The banner alone: a
       // board that failed to stream says nothing about the chart's provenance.
       if (token === boardPending) setBanner(error.message);
+    }).then(function () {
+      // Not on an aborted board: the load that superseded it has already
+      // disabled the button for its own stream and is still filling the list.
+      if (token === boardPending) el('refresh-all').disabled = false;
     });
   }
 

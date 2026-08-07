@@ -695,3 +695,23 @@ def _within(script: str, marker: str) -> str:
     """One function body, from its declaration to the next one at file scope."""
     body = script[script.index(marker):]
     return body[: body.index("\n  }")]
+
+
+def test_refresh_all_is_refused_while_the_board_is_still_arriving(page):
+    """``boardIdentities`` fills as the rows land, and ``refreshAll`` snapshots it.
+
+    Clicked mid-stream it fetches only the datasets already drawn, then reports
+    "N of N" for a partial N -- and the reload after it recomputes the untouched
+    ones from unchanged candles, so nothing on screen says a dataset was
+    skipped. Disabled for the duration instead: a board you cannot see yet is
+    not one you can refresh.
+    """
+    script = _script(page)
+
+    board = script[script.index("function loadBoard()"):]
+    board = board[: board.index("\n  function ", 1)]
+    assert "el('refresh-all').disabled = true;" in board
+    # Re-enabled only for the load that is still current -- an aborted one must
+    # not undo the disable its successor just set.
+    assert "if (token === boardPending) el('refresh-all').disabled = false;" in board
+    assert board.index("disabled = true;") < board.index("disabled = false;")
