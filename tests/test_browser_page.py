@@ -627,30 +627,38 @@ def test_a_board_refresh_says_nothing_over_the_instrument_view(page):
 
     # The writers are guarded, not merely named -- a helper that forwarded
     # unconditionally would satisfy the call-site check below and change nothing.
-    for writer, wrapped in (("boardStatus", "setStatus"), ("boardError", "setError")):
+    for writer, wrapped in (("boardStatus", "setStatus"), ("boardError", "setBanner")):
         body = script[script.index("function " + writer + "(text)"):]
         body = body[: body.index("\n  }")]
         assert "if (onBoard()) " + wrapped + "(text)" in body, writer
+    # `setBanner`, never `setError`: the latter also dims `#provenance` and
+    # rewrites the status with "showing the last run that succeeded", which are
+    # claims about the *chart*. A board failure makes neither, and nothing on a
+    # board redraw would have undimmed it.
+    assert "el('provenance').classList.toggle('stale'" not in _within(script, "function setBanner")
     # Progress is transient and may be dropped; a *failure* is held, because it
     # is a fact about the data rather than about the view. It has to survive a
     # trip to the chart *and* a board redraw the user asked for in between --
     # both of which otherwise wipe the banner, which is the same silence as
     # never showing it.
-    held = script[script.index("function boardError(text)"):]
-    held = held[: held.index("\n  }")]
+    held = _within(script, "function boardError(text)")
     assert "heldBoardError = text;" in held
-    assert "if (onBoard()) setError(text);" in held
 
     board = script[script.index("function loadBoard()"):]
     board = board[: board.index("\n  function ", 1)]
-    assert "setError(heldBoardError || '');" in board
+    assert "setBanner(heldBoardError || '');" in board
     assert "heldBoardError = null;" not in board, "a redraw does not unfail a fetch"
 
-    # Cleared by the user retrying, which is the one event that makes it stale.
+    # Cleared by the user retrying, which is the one event that makes it stale --
+    # and the visible banner with it, or the previous failure stays up while a
+    # new fetch is in flight and reads as this attempt's.
+    cleared = _within(script, "function clearBoardError()")
+    assert "heldBoardError = null;" in cleared
+    assert "if (onBoard()) setBanner('');" in cleared
     for owner in ("function refreshOne(", "function refreshAll("):
         body = script[script.index(owner):]
         body = body[: body.index("\n  function ", 1)]
-        assert "heldBoardError = null;" in body, owner
+        assert "clearBoardError();" in body, owner
     for owner in ("function refreshOne(", "function refreshAll("):
         body = script[script.index(owner):]
         body = body[: body.index("\n  function ", 1)]
@@ -678,3 +686,9 @@ def test_a_refresh_that_outlives_the_board_view_does_not_restart_it(page):
         body = body[: body.index("\n  function ", 1)]
         assert "reloadBoardIfShown()" in body, owner
         assert "return loadBoard();" not in body, owner
+
+
+def _within(script: str, marker: str) -> str:
+    """One function body, from its declaration to the next one at file scope."""
+    body = script[script.index(marker):]
+    return body[: body.index("\n  }")]

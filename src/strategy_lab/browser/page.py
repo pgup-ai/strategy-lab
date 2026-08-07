@@ -434,13 +434,23 @@ __SHELL_CSS__
     statusEl.textContent = text;
   }
 
+  function setBanner(message) {
+    // The banner alone. Shared by both views, and says nothing about either.
+    el('error').textContent = message || '';
+    el('error').hidden = !message;
+  }
+
   function setError(message) {
     // A failed request leaves the previous chart up, which is the right thing to
     // do -- and makes the controls describe something other than what is drawn.
     // The provenance strip still tells the truth, so it is dimmed rather than
     // cleared: what you are looking at, and that it is not what you asked for.
-    el('error').textContent = message || '';
-    el('error').hidden = !message;
+    //
+    // Both of those are claims about the *chart*, which is why a board failure
+    // goes through `setBanner` instead: dimming a provenance strip a board
+    // refresh says nothing about left it dimmed until the next instrument load,
+    // asserting the chart was stale when nothing about it had changed.
+    setBanner(message);
     el('provenance').classList.toggle('stale', Boolean(message));
     if (message) setStatus('showing the last run that succeeded');
   }
@@ -1021,6 +1031,13 @@ __SHELL_CSS__
     if (onBoard()) setStatus(text);
   }
 
+  function clearBoardError() {
+    // A retry makes the last attempt's banner stale, and leaving it up while a
+    // new fetch is in flight misreports which attempt it describes.
+    heldBoardError = null;
+    if (onBoard()) setBanner('');
+  }
+
   function boardError(text) {
     // Held *and* shown, not one or the other. A refresh failure is a fact about
     // the data rather than about the view, so it has to survive both a trip to
@@ -1028,7 +1045,7 @@ __SHELL_CSS__
     // switch mid-refresh would otherwise wipe the banner as its last row lands,
     // which is the same silence as never showing it.
     heldBoardError = text;
-    if (onBoard()) setError(text);
+    if (onBoard()) setBanner(text);
   }
 
   function abortBoard() {
@@ -1084,10 +1101,11 @@ __SHELL_CSS__
     }, signal).then(function () {
       if (token !== boardPending) return;
       // After the rows, which is where `refreshAll` puts its own failures too:
-      // `setError('')` clears the banner, so anything shown before this is gone.
-      // Not cleared here -- only a fresh refresh clears it, since redrawing the
-      // board does not make a failed fetch have succeeded.
-      setError(heldBoardError || '');
+      // this clears the banner, so anything shown before it is gone. The held
+      // failure is re-shown rather than consumed -- only a fresh refresh clears
+      // it, since redrawing the board does not make a failed fetch have
+      // succeeded.
+      setBanner(heldBoardError || '');
       document.title = 'board · ' + strategySel.value + ' · strategy-lab';
       el('title').textContent = 'board';
       setStatus(rows === 0
@@ -1099,15 +1117,15 @@ __SHELL_CSS__
       // An abort is this function superseding itself, not a failure.
       if (error && error.name === 'AbortError') return;
       // Whatever arrived stays on screen. A truncated board is more use than a
-      // blank one, and the banner says it is truncated.
-      if (token === boardPending) setError(error.message);
+      // blank one, and the banner says it is truncated. The banner alone: a
+      // board that failed to stream says nothing about the chart's provenance.
+      if (token === boardPending) setBanner(error.message);
     });
   }
 
   function refreshOne(identity, button) {
     if (button) button.disabled = true;
-    // The user is retrying: whatever the last attempt said is no longer news.
-    heldBoardError = null;
+    clearBoardError();
     boardStatus('fetching ' + identity.symbol + ' ' + identity.timeframe + ' …');
     return getJSON('/api/refresh?' + new URLSearchParams(identity).toString(),
                    { method: 'POST' })
@@ -1130,7 +1148,7 @@ __SHELL_CSS__
   function refreshAll() {
     var button = el('refresh-all');
     button.disabled = true;
-    heldBoardError = null;
+    clearBoardError();
     // One venue call at a time. Firing sixteen at once is rude to the exchange
     // and interleaves the failures, and the whole point of an explicit refresh
     // is that somebody chose this moment to make them.
@@ -1181,7 +1199,8 @@ __SHELL_CSS__
       return opt.value === id;
     });
     if (!known) {
-      setError('no candle set ' + id + ' in the dataset list');
+      // Raised on the board, before the view switches, so it is the board's.
+      setBanner('no candle set ' + id + ' in the dataset list');
       return;
     }
     datasetSel.value = id;
