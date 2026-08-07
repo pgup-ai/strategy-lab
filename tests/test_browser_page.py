@@ -424,7 +424,8 @@ def test_both_views_are_reachable_and_only_one_is_shown(page):
 
     assert "body.board-view .instrument-only" in page
     assert "body.instrument-view .board-only" in page
-    assert "viewSel.addEventListener('change', function () { setView(viewSel.value); });" in script
+    assert "viewSel.addEventListener('change'" in script
+    assert "setView(viewSel.value);" in script
     assert "function openInstrument(row)" in script
     assert "setView('instrument');" in script
 
@@ -557,5 +558,15 @@ def test_opening_a_tile_carries_its_exact_edges_not_a_rounded_day(page):
     assert "start: row.provenance.first_bar," in script
     assert "end: row.provenance.last_bar" in script
     assert "if (exactBounds.start) params.set('start', exactBounds.start);" in script
-    # Editing a date makes the visible dates the truth again.
-    assert "exactBounds = null;" in script
+    # Dropped by every route that changes which instrument is being asked
+    # about, asserted by the route rather than by a count: a strategy or
+    # exit-mode change deliberately *keeps* them, because a funding span is per
+    # contract and the board gives every strategy on one dataset one window.
+    for owner in (
+        "datasetSel.addEventListener('change'",   # a different instrument
+        "viewSel.addEventListener('change'",      # entered without a tile
+    ):
+        after = script[script.index(owner):]
+        assert "exactBounds = null;" in after[: after.index("});")], owner
+    # And editing a date, which makes the visible dates the truth again.
+    assert "exactBounds = null;\n      load();" in script

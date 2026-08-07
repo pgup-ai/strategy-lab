@@ -1243,10 +1243,24 @@ __SHELL_CSS__
     return viewSel.value === 'board' ? loadBoard() : load();
   }
 
-  viewSel.addEventListener('change', function () { setView(viewSel.value); });
+  // `exactBounds` belongs to the tile that opened the view, and only to that
+  // dataset: the window is a *funding* span, which is per contract. So a
+  // strategy or exit-mode change keeps it -- same instrument, same funded
+  // range, and the board itself gives every strategy on a dataset one window --
+  // while picking a different dataset, or entering the instrument view without
+  // a tile, must drop it or the request carries the previous instrument's edges
+  // and asks for a range this one may not have funding for. `setView` assigns
+  // `viewSel.value` without firing `change`, so a tile's own bounds survive it.
+  viewSel.addEventListener('change', function () {
+    exactBounds = null;
+    setView(viewSel.value);
+  });
   marketSel.addEventListener('change', loadBoard);
   el('refresh-all').addEventListener('click', refreshAll);
-  datasetSel.addEventListener('change', load);
+  datasetSel.addEventListener('change', function () {
+    exactBounds = null;
+    load();
+  });
   strategySel.addEventListener('change', function () { syncExitEnabled(); reload(); });
   exitSel.addEventListener('change', reload);
   [el('start'), el('end')].forEach(function (control) {
