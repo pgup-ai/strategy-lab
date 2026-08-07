@@ -1272,6 +1272,17 @@ __SHELL_CSS__
   }
 
   var pending = 0;
+
+  function abandonInstrument() {
+    // The mirror of `abortBoard`. `load`'s guard only fires when another
+    // `load` bumps `pending`, and entering the board starts no instrument
+    // request -- so an `/api/analysis` still in flight would resolve into the
+    // board, draw a chart nobody is looking at and retitle the page with the
+    // instrument's symbol. Invalidated rather than aborted: it is one request
+    // rather than a row per dataset, and `getJSON` carries no signal.
+    pending += 1;
+  }
+
   function load() {
     if (!datasetSel.value || !strategySel.value) return Promise.resolve();
     var token = ++pending;
@@ -1305,14 +1316,12 @@ __SHELL_CSS__
     // zoom survives a trip through the board.
     document.body.className = name === 'board' ? 'board-view' : 'instrument-view';
     viewSel.value = name;
-    if (name !== 'board') {
-      // Leaving the board does not start another one, so `boardPending` never
-      // moves and the in-flight stream's own guard stays satisfied: it would
-      // keep appending tiles to a hidden host and calling setStatus over the
-      // instrument view, while the server finished rows nobody is going to
-      // look at -- a full recompute each, now that none of them are held.
-      abortBoard();
-    }
+    // Whichever view is being left stops writing into the one being entered.
+    // Neither switch starts a request on the side it leaves, so neither guard
+    // fires on its own: leaving the board would keep appending tiles to a
+    // hidden host and finishing a full recompute per dataset, and leaving the
+    // instrument view would draw a chart over the board and retitle the page.
+    if (name === 'board') abandonInstrument(); else abortBoard();
     return name === 'board' ? loadBoard() : load();
   }
 

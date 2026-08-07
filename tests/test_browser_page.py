@@ -549,21 +549,24 @@ def test_a_superseded_board_is_aborted_rather_than_drained(page):
     assert body.index("abortBoard();") < body.index("var token = ++boardPending;")
 
 
-def test_leaving_the_board_stops_it_rather_than_letting_it_finish(page):
-    """Switching views does not start another board, so nothing else stops one.
+def test_switching_views_stops_whichever_one_is_being_left(page):
+    """Neither switch starts a request on the side it leaves, so neither guard
+    fires on its own.
 
-    ``boardPending`` only moves when a board starts, so an in-flight stream's
-    own guard stays satisfied after a switch: it would keep appending tiles to a
-    hidden host and calling ``setStatus`` over the instrument view, while the
-    server finished rows nobody will look at -- a full recompute each, now that
-    none are held.
+    Leaving the board keeps appending tiles to a hidden host and finishing a
+    full recompute per dataset. Leaving the instrument view is the mirror: an
+    ``/api/analysis`` still in flight resolves into the board, draws a chart
+    nobody is looking at and retitles the page with the instrument's symbol.
     """
     script = _script(page)
 
     body = script[script.index("function setView(name)"):]
     body = body[: body.index("function reload()")]
-    assert "if (name !== 'board') {" in body
-    assert "abortBoard();" in body
+    assert "if (name === 'board') abandonInstrument(); else abortBoard();" in body
+    # The two guards key on different counters, so each branch may bump the one
+    # it is not about to take a token from.
+    assert "pending += 1;" in _within(script, "function abandonInstrument()")
+    assert "boardPending += 1;" in _within(script, "function abortBoard()")
 
 
 def test_opening_a_tile_carries_its_exact_edges_not_a_rounded_day(page):
