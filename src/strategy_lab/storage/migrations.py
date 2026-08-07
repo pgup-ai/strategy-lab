@@ -60,34 +60,44 @@ APPEND_ONLY_TGTYPE = 1 | 2 | 8 | 16  # ROW|BEFORE|DELETE|UPDATE == 27
 NO_TRUNCATE_TGTYPE = 2 | 32  # BEFORE|TRUNCATE, statement-level (no ROW bit) == 34
 
 
-def _guarded_trigger_migration(name: str, tgtype: int, events: str, level: str) -> str:
-    """Install one trigger on ``signals``, but only when it isn't already correct.
+def _guarded_trigger_migration(
+    name: str, tgtype: int, events: str, level: str, *, table: str, function: str
+) -> str:
+    """Install one append-only trigger, but only when it isn't already correct.
 
     ``DROP TRIGGER IF EXISTS`` plus an unconditional ``CREATE TRIGGER`` is safe
-    but not a no-op: the pair takes an ACCESS EXCLUSIVE lock on ``signals`` that
+    but not a no-op: the pair takes an ACCESS EXCLUSIVE lock on ``table`` that
     Postgres holds until the migration transaction commits, so every later
-    statement runs with all readers and writers of ``signals`` blocked -- and a
+    statement runs with all readers and writers of that table blocked -- and a
     live session may be writing signals exactly when someone runs ``migrate``.
 
     The guard compares the function and the event mask as well as the name, so a
     trigger that is missing, points at the wrong function, or fires on the wrong
     events is still repaired; only an already-correct trigger is left alone.
+
+    ``table`` and ``function`` are parameters because ``bar_reasons`` needs the
+    identical pair of guards, and they are *not* defaulted to ``signals``: the
+    two tables get **separate** reject functions rather than one shared
+    ``TG_TABLE_NAME`` implementation, because repointing ``signals``' triggers at
+    a new function is a schema change to an append-only audit trail, and the
+    guard would have to fire once to make it -- taking the exclusive lock this
+    exists to avoid, on the one table a live replay is writing.
     """
     return f"""
 DO $$
 BEGIN
   IF NOT EXISTS (
     SELECT 1 FROM pg_trigger
-    WHERE tgrelid = 'signals'::regclass
+    WHERE tgrelid = '{table}'::regclass
       AND tgname = '{name}'
       AND NOT tgisinternal
       AND tgtype = {tgtype}
-      AND tgfoid = 'signals_reject_mutation'::regproc
+      AND tgfoid = '{function}'::regproc
   ) THEN
-    DROP TRIGGER IF EXISTS {name} ON signals;
+    DROP TRIGGER IF EXISTS {name} ON {table};
     CREATE TRIGGER {name}
-      BEFORE {events} ON signals
-      FOR EACH {level} EXECUTE FUNCTION signals_reject_mutation();
+      BEFORE {events} ON {table}
+      FOR EACH {level} EXECUTE FUNCTION {function}();
   END IF;
 END $$
 """.strip()
@@ -243,10 +253,158 @@ END $$
     $$ LANGUAGE plpgsql
     """,
     _guarded_trigger_migration(
-        "trg_signals_append_only", APPEND_ONLY_TGTYPE, "UPDATE OR DELETE", "ROW"
+        "trg_signals_append_only",
+        APPEND_ONLY_TGTYPE,
+        "UPDATE OR DELETE",
+        "ROW",
+        table="signals",
+        function="signals_reject_mutation",
     ),
     _guarded_trigger_migration(
-        "trg_signals_no_truncate", NO_TRUNCATE_TGTYPE, "TRUNCATE", "STATEMENT"
+        "trg_signals_no_truncate",
+        NO_TRUNCATE_TGTYPE,
+        "TRUNCATE",
+        "STATEMENT",
+        table="signals",
+        function="signals_reject_mutation",
+    ),
+)
+
+
+# `signals` is keyed to *events* and reasons are the *inputs* to a decision
+# rather than one, so widening it would put a row of state on every bar in a
+# table whose whole shape says "something happened here". Measured on the R10a
+# diff window -- BTC/USDT perp 4h, 6,048 bars -- a replay of `state_machine_v1`
+# emitted 325 signal rows and 6,048 reason rows. `bar_reasons` is one row per bar
+# instead, and the question it exists to answer is at least as often "why did it
+# *not* trade here" as "why did it trade": that machine spent 4,124 of those
+# 6,048 bars in COMPRESSION, and rows on decision bars alone cannot say so.
+#
+# Written by the event path only. `backtest`, `sweep` and the browser recompute
+# the same values per request from immutable candles and store nothing; what is
+# genuinely unrecomputable is what a *live* run saw at the moment it decided --
+# funding that had not settled, a feed gap, a late bar, a revision.
+#
+# Same append-only pair as `signals`, for the same reason and with the same
+# escape hatch (ALTER TABLE bar_reasons DISABLE TRIGGER USER; DELETE ...; ENABLE).
+# A row-level trigger alone is not enough: TRUNCATE bypasses row-level triggers
+# entirely.
+#
+# The feature values are two parallel arrays rather than a JSONB object or one
+# column per feature. Per-feature columns cannot work -- the set is a property of
+# the strategy, and `state_machine_v1`'s five are not another strategy's -- and
+# JSONB would put the values back into the float-shaped, read-as-labels box
+# `runner._features` already warns about. NUMERIC elements keep the
+# `Decimal(str(float(x)))` rule intact end to end: measured through this exact
+# insert path, the float64 88.02116722596503 bound as a bare float stores as
+# 88.021167225965 and bound as a Decimal round-trips, because an array of Python
+# floats reaches Postgres as float8[] and the implicit float8 -> numeric cast
+# formats via "%.15g".
+#
+# **Unconstrained NUMERIC, not the NUMERIC(38,18) every price column here uses.**
+# A scale is a count of decimal *places* and a float64 needs up to 17
+# *significant* digits, so 18 places round-trips a price near 100 and silently
+# truncates a feature near 0. That is not hypothetical: R10a's first diff run
+# reported `direction`, `energy`, `stability` and `strength` disagreeing with the
+# research path on 5 / 7 / 28 / 3 of 1,000 bars by exactly one ULP, and the cause
+# was this column rather than either code path -- 0.0020833333333333333, a
+# 1/480 rolling percentile, needs 19 places. Measured on the same values,
+# `crowding`'s smallest observed reading 2.0682314349096398e-05 loses three
+# significant digits at scale 18 and round-trips exactly without one. Postgres'
+# unconstrained numeric stores the decimal it was given, so it is the only form
+# in which "the stored value is the value the machine read" is true.
+#
+# A NULL element is a feature's "not yet measurable" -- warmup rows are NaN by the
+# `features.base.mask_warmup` convention, and 0.0 there would read as "measured,
+# and neutral", a different claim about the market. NULL rather than a stored NaN
+# because Postgres NUMERIC accepts NaN without complaint and the result matches
+# nothing afterwards, including itself; SQL NULL at least has `IS NULL`.
+BAR_REASON_MIGRATIONS: tuple[str, ...] = (
+    """
+    CREATE TABLE IF NOT EXISTS bar_reasons (
+      id               BIGSERIAL PRIMARY KEY,
+      run_id           UUID NOT NULL REFERENCES runs(run_id),
+      mode             TEXT NOT NULL CONSTRAINT bar_reasons_mode_check
+                       CHECK (mode IN ('backtest','replay','paper','live')),
+      strategy_id      TEXT NOT NULL,
+      strategy_version TEXT NOT NULL,
+      exchange         TEXT NOT NULL,
+      market_type      TEXT NOT NULL,
+      symbol           TEXT NOT NULL,
+      timeframe        TEXT NOT NULL,
+      ts_bar_ms        BIGINT NOT NULL,
+      ts_emit_ms       BIGINT NOT NULL,
+      bar_is_closed    BOOLEAN NOT NULL,
+      state            TEXT NOT NULL,
+      feature_names    TEXT[] NOT NULL,
+      feature_values   NUMERIC[] NOT NULL,
+      created_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
+      CONSTRAINT bar_reasons_features_aligned
+        CHECK (cardinality(feature_names) = cardinality(feature_values)),
+      CONSTRAINT uq_bar_reasons_identity UNIQUE
+        (run_id, strategy_id, strategy_version,
+         exchange, market_type, symbol, timeframe, ts_bar_ms)
+    )
+    """,
+    # `signals` keys its identity without `market_type`, and the charter's §12
+    # carries that as an inherited defect: spot and perp on the same bar collapse
+    # to one row. This table copied the shape before the omission was noticed, so
+    # the constraint is repaired here rather than inherited -- `CandleId` is
+    # `(exchange, market_type, symbol, timeframe)` and a per-bar record keyed by
+    # less than that attributes a perp's reasons to its spot series.
+    #
+    # Guarded like the indexes and for the same reason: DROP/ADD takes ACCESS
+    # EXCLUSIVE, so it must not fire on a table that is already correct.
+    """
+DO $$
+BEGIN
+  IF EXISTS (
+    SELECT 1 FROM pg_constraint
+    WHERE conname = 'uq_bar_reasons_identity'
+      AND conrelid = 'bar_reasons'::regclass
+      AND NOT EXISTS (
+        SELECT 1 FROM unnest(conkey) AS k(attnum)
+        JOIN pg_attribute a ON a.attrelid = conrelid AND a.attnum = k.attnum
+        WHERE a.attname = 'market_type'
+      )
+  ) THEN
+    ALTER TABLE bar_reasons DROP CONSTRAINT uq_bar_reasons_identity;
+    ALTER TABLE bar_reasons ADD CONSTRAINT uq_bar_reasons_identity UNIQUE
+      (run_id, strategy_id, strategy_version,
+       exchange, market_type, symbol, timeframe, ts_bar_ms);
+  END IF;
+END $$;
+""",
+    _guarded_index_migration(
+        "ix_bar_reasons_lookup", "bar_reasons", "symbol, timeframe, ts_bar_ms"
+    ),
+    _guarded_index_migration("ix_bar_reasons_run", "bar_reasons", "run_id, ts_bar_ms"),
+    """
+    CREATE OR REPLACE FUNCTION bar_reasons_reject_mutation() RETURNS trigger AS $$
+    BEGIN
+      RAISE EXCEPTION 'bar_reasons is append-only; % is not permitted', TG_OP
+        USING HINT = 'Bar reasons are what a live run saw when it decided, and '
+                     'nothing can recompute that afterwards. To remove rows '
+                     'deliberately: ALTER TABLE bar_reasons DISABLE TRIGGER USER; '
+                     'DELETE ...; ALTER TABLE bar_reasons ENABLE TRIGGER USER;';
+    END;
+    $$ LANGUAGE plpgsql
+    """,
+    _guarded_trigger_migration(
+        "trg_bar_reasons_append_only",
+        APPEND_ONLY_TGTYPE,
+        "UPDATE OR DELETE",
+        "ROW",
+        table="bar_reasons",
+        function="bar_reasons_reject_mutation",
+    ),
+    _guarded_trigger_migration(
+        "trg_bar_reasons_no_truncate",
+        NO_TRUNCATE_TGTYPE,
+        "TRUNCATE",
+        "STATEMENT",
+        table="bar_reasons",
+        function="bar_reasons_reject_mutation",
     ),
 )
 
@@ -324,7 +482,9 @@ def run_migrations(database_url: str | None = None) -> int:
     so it is released by the commit or rollback below and never leaks a lock on
     a failed migration.
     """
-    statements = MIGRATIONS + SIGNAL_MIGRATIONS + FUNDING_MIGRATIONS
+    # `bar_reasons` after `signals`, since it takes the same foreign key to `runs`
+    # and that table is created there.
+    statements = MIGRATIONS + SIGNAL_MIGRATIONS + BAR_REASON_MIGRATIONS + FUNDING_MIGRATIONS
     engine = get_engine(database_url)
     with engine.begin() as conn:
         conn.execute(text("SELECT pg_advisory_xact_lock(:key)"), {"key": MIGRATION_LOCK_KEY})

@@ -820,6 +820,26 @@ def replay_command(
     it compares crowding-neutral against crowding-neutral. Closing the gap means
     carrying funding through ``Bar``, ``BarBuffer``, the feed and the storage
     schema, which is a phase of its own.
+
+    **This path also writes ``bar_reasons``**, one row per bar past warmup for
+    any strategy that can explain itself, carrying the state label and the
+    feature values the machine actually read. ``backtest``, ``sweep`` and the
+    browser write none: they recompute the same values per request from immutable
+    candles, and a stored copy of that would be a second research record to drift.
+    What only this path can record is what a run saw at the moment it decided --
+    including, today, that it decided with ``crowding`` neutral.
+
+    **The run header, the signals and the reasons commit in three transactions,
+    not one**, so a failure in the third leaves a run with signals and no
+    reasons. That is deliberate rather than overlooked. It is the state every
+    run before this phase is already in, so it degrades to the old record rather
+    than to a corrupt one; the reverse order would leave a run that appears to
+    have decided nothing, which is actively misleading; and a single transaction
+    means threading one connection through ``create_run`` and ``write_signals``
+    too, which is a change to the append-only signal path rather than to this
+    phase. The failure is loud -- the exception propagates and the command exits
+    non-zero -- and a re-run mints a fresh ``run_id`` rather than repairing the
+    old one, exactly as a second replay of any range does.
     """
     from strategy_lab.core.clock import SimClock
     from strategy_lab.core.types import InstrumentId, Mode
@@ -845,8 +865,14 @@ def replay_command(
         return collected
 
     signals = asyncio.run(_run())
+    reasons = runner.reasons
 
-    if persist and signals:
+    # Reasons alone are enough to mint a run: a state machine that never changed
+    # side over the range emitted nothing and still saw something on every bar,
+    # and that is the case the per-bar table exists for. A strategy with no
+    # `feature_frame` produces neither, so an empty replay still leaves no orphan
+    # run header behind.
+    if persist and (signals or reasons):
         run_id = _create_run(
             run_id=uuid.uuid4(),
             mode=Mode.REPLAY,
@@ -864,13 +890,20 @@ def replay_command(
             },
         )
         written = _write_signals(run_id, Mode.REPLAY, signals)
-        typer.echo(f"Run {run_id}: emitted {len(signals)} signals, wrote {written}.")
+        message = f"Run {run_id}: emitted {len(signals)} signals, wrote {written}."
+        if reasons:
+            reason_rows = _write_bar_reasons(run_id, Mode.REPLAY, reasons)
+            message += f" Recorded {len(reasons)} bar reasons, wrote {reason_rows}."
+        typer.echo(message)
         return
 
-    typer.echo(f"Emitted {len(signals)} signals over {len(runner.buffer)} bars (not persisted).")
+    message = f"Emitted {len(signals)} signals over {len(runner.buffer)} bars (not persisted)."
+    if reasons:
+        message += f" {len(reasons)} bar reasons not persisted."
+    typer.echo(message)
 
 
-# Both wrappers exist so a test can substitute storage without a database.
+# All three wrappers exist so a test can substitute storage without a database.
 def _create_run(**kwargs):
     from strategy_lab.storage.signals import create_run
 
@@ -881,6 +914,12 @@ def _write_signals(run_id, mode, signals):
     from strategy_lab.storage.signals import write_signals
 
     return write_signals(run_id, mode, signals)
+
+
+def _write_bar_reasons(run_id, mode, reasons):
+    from strategy_lab.storage.bar_reasons import write_bar_reasons
+
+    return write_bar_reasons(run_id, mode, reasons)
 
 
 @app.command("serve")
