@@ -473,6 +473,11 @@ def test_a_tile_carries_the_provenance_a_figure_cannot_be_read_without(page):
     assert "prov.warmup_bars" in script
     assert "prov.version" in script
     assert "prov.generated_at" in script
+    # The cost model too, which CLAUDE.md's rule names beside the others and the
+    # tile omitted -- and through `costText`, so a tile and the chart read one
+    # the same way rather than through two formatters that can drift.
+    tile = _within(script, "function tile(row)")
+    assert "costText(prov.cost_model)" in tile
 
 
 def test_the_market_filter_offers_storages_own_vocabulary(page):

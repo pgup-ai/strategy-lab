@@ -974,6 +974,12 @@ __SHELL_CSS__
         prov.warmup_bars.toLocaleString() + ' · computed ' +
         prov.generated_at.slice(11, 19)
       ));
+      // Its own line rather than appended to that one, which is already long.
+      // Every tile carries the engine's defaults, and stating it on each is the
+      // point: a reader should not have to know the board never varies costs to
+      // know what these numbers were charged. `costText` rather than a second
+      // formatter, so a tile and the chart read a cost model the same way.
+      wrap.appendChild(tileLine('costs', costText(prov.cost_model)));
     }
     return wrap;
   }
