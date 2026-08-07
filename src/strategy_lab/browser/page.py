@@ -1000,6 +1000,14 @@ __SHELL_CSS__
   var boardAbort = null;
   // Set only when a tile opens the instrument view; see `query`.
   var exactBounds = null;
+
+  function abortBoard() {
+    // Stops the rows at the server, not just on screen. Bumping the token as
+    // well so anything already decoded and queued bails out too.
+    boardPending += 1;
+    if (boardAbort) boardAbort.abort();
+    boardAbort = null;
+  }
   var boardIdentities = [];
 
   function boardQuery() {
@@ -1013,12 +1021,14 @@ __SHELL_CSS__
 
   function loadBoard() {
     if (!strategySel.value) return Promise.resolve();
-    var token = ++boardPending;
     // Stop the superseded board at the server, not just on screen. Each row is
     // a full recompute and nothing else cancels it, so switching strategy twice
     // while one streams leaves three boards competing for the same threadpool
-    // and starves the instrument view behind them.
-    if (boardAbort) boardAbort.abort();
+    // and starves the instrument view behind them. Before the token, not after:
+    // `abortBoard` bumps the same counter, so taking one first would invalidate
+    // the board being started.
+    abortBoard();
+    var token = ++boardPending;
     boardAbort = typeof AbortController === 'function' ? new AbortController() : null;
     var signal = boardAbort ? boardAbort.signal : undefined;
     var host = el('board');
@@ -1236,6 +1246,14 @@ __SHELL_CSS__
     // zoom survives a trip through the board.
     document.body.className = name === 'board' ? 'board-view' : 'instrument-view';
     viewSel.value = name;
+    if (name !== 'board') {
+      // Leaving the board does not start another one, so `boardPending` never
+      // moves and the in-flight stream's own guard stays satisfied: it would
+      // keep appending tiles to a hidden host and calling setStatus over the
+      // instrument view, while the server finished rows nobody is going to
+      // look at -- a full recompute each, now that none of them are held.
+      abortBoard();
+    }
     return name === 'board' ? loadBoard() : load();
   }
 

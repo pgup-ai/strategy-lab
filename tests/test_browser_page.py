@@ -538,9 +538,31 @@ def test_a_superseded_board_is_aborted_rather_than_drained(page):
     """
     script = _script(page)
 
-    assert "if (boardAbort) boardAbort.abort();" in script
+    assert "function abortBoard()" in script
     assert "fetch(url, { signal: signal })" in script
     assert "if (error && error.name === 'AbortError') return;" in script
+    # Before the token, not after: `abortBoard` bumps the same counter, so a
+    # token taken first is stale the moment it is taken and the board that was
+    # just started draws nothing.
+    body = script[script.index("function loadBoard()"):]
+    assert body.index("abortBoard();") < body.index("var token = ++boardPending;")
+
+
+def test_leaving_the_board_stops_it_rather_than_letting_it_finish(page):
+    """Switching views does not start another board, so nothing else stops one.
+
+    ``boardPending`` only moves when a board starts, so an in-flight stream's
+    own guard stays satisfied after a switch: it would keep appending tiles to a
+    hidden host and calling ``setStatus`` over the instrument view, while the
+    server finished rows nobody will look at -- a full recompute each, now that
+    none are held.
+    """
+    script = _script(page)
+
+    body = script[script.index("function setView(name)"):]
+    body = body[: body.index("function reload()")]
+    assert "if (name !== 'board') {" in body
+    assert "abortBoard();" in body
 
 
 def test_opening_a_tile_carries_its_exact_edges_not_a_rounded_day(page):
