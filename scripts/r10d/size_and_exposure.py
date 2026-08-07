@@ -184,12 +184,17 @@ def runner_refusal(identity, df: pd.DataFrame) -> dict:
     return out
 
 
-def exposure_streams(df_unfunded: pd.DataFrame, df_funded: pd.DataFrame, *, bars: int) -> dict:
+def exposure_streams(
+    identity, df_unfunded: pd.DataFrame, df_funded: pd.DataFrame, *, bars: int
+) -> dict:
     """(d), second: does the proven driver reproduce whole history on a *real* frame?
 
     The verdict pair is unfunded on both sides. The funded row beside it is census
     item (a) on the continuous contract, which nothing has measured.
     """
+    instrument = InstrumentId(
+        exchange=identity.exchange, market_type=identity.market_type, symbol=identity.symbol
+    )
     out: dict[str, dict] = {}
     for name in sorted(list_exposure_strategies()):
         strategy = get_exposure_strategy(name)
@@ -200,7 +205,9 @@ def exposure_streams(df_unfunded: pd.DataFrame, df_funded: pd.DataFrame, *, bars
         window_unfunded = df_unfunded.iloc[-need:]
         window_funded = df_funded.iloc[-need:]
 
-        streamed = streamed_targets(strategy, window_unfunded)
+        streamed = streamed_targets(
+            strategy, window_unfunded, instrument=instrument, timeframe=identity.timeframe
+        )
         neutral = whole_history_targets(strategy, window_unfunded)
         funded = whole_history_targets(strategy, window_funded)
 
@@ -241,7 +248,7 @@ def main() -> int:
             if get_strategy(name).warmup_bars + args.recompute_tail < len(funded)
         ],
         "d_runner": runner_refusal(identity, funded),
-        "d_streams": exposure_streams(unfunded, funded, bars=args.stream_bars),
+        "d_streams": exposure_streams(identity, unfunded, funded, bars=args.stream_bars),
     }
 
     OUT.mkdir(parents=True, exist_ok=True)
@@ -271,6 +278,12 @@ def main() -> int:
 
     print("\n(d) StrategyRunner with an exposure strategy")
     for name, cell in result["d_runner"].items():
+        # First, because a construction refusal carries no bar count -- and it is
+        # the *desired* outcome once M40's check lands, so the branch reporting it
+        # must not be the one that crashes.
+        if not cell["constructs"]:
+            print(f"  {name:32} refused at construction: {cell['error']}")
+            continue
         if cell.get("fails_on_bar") is None:
             print(f"  {name:32} survives {cell['warmup_bars'] + 2} bars without raising")
             continue

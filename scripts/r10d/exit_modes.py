@@ -47,7 +47,13 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from strategy_lab.backtests.engine import ExitMode, _exit_signals, _mask_warmup, _warmup_bars
+from strategy_lab.backtests.engine import (
+    ExitMode,
+    _exit_signals,
+    _mask_warmup,
+    _stop_kwargs,
+    _warmup_bars,
+)
 from strategy_lab.backtests.funding_frame import with_funding_column
 from strategy_lab.backtests.sizing import DEFAULT_VOL_SPAN, SizeMode
 from strategy_lab.core.clock import SimClock
@@ -85,9 +91,21 @@ CANONICAL: dict[str, ExitMode] = {
     "state_machine_v1": ExitMode.OPPOSITE_SIGNAL_ONLY,
 }
 
-# The modes ``_exit_signals`` returns the strategy's own exits for, unchanged --
-# so the modes whose replay stream should already be the backtest's.
-PASS_THROUGH = {ExitMode.OPPOSITE_SIGNAL_ONLY, ExitMode.SETUP_INVALIDATION_STOP}
+def passes_through(df: pd.DataFrame, signals, mode: ExitMode) -> bool:
+    """Whether the *whole configuration* is the strategy's own exits, unchanged.
+
+    Derived from the two engine functions rather than listed, because a list
+    drifts and because listing it got this wrong. ``_exit_signals`` returns the
+    strategy's own series for ``opposite_signal_only`` **and**
+    ``setup_invalidation_stop`` -- but the second also hands ``from_signals`` an
+    ``sl_stop`` through ``_stop_kwargs``, an exit mechanism the replay stream does
+    not carry. So its exit *series* pass through while its *configuration* does
+    not, and calling it a pass-through would report a 0 that is true of the series
+    and false of the backtest.
+    """
+    if mode not in {ExitMode.OPPOSITE_SIGNAL_ONLY, ExitMode.SETUP_INVALIDATION_STOP}:
+        return False
+    return not _stop_kwargs(df, signals.setup_stop_loss, mode)
 
 _SIDES: tuple[tuple[str, Side], ...] = (
     ("long_entries", Side.ENTER_LONG),
@@ -147,6 +165,12 @@ def measure(name: str, df: pd.DataFrame) -> dict:
             long_exits, short_exits = _exit_signals(
                 df=df, signals=signals, exit_mode=mode, failure_bars=FAILURE_BARS
             )
+            # Both halves of the engine's exit configuration, so a mode that
+            # raises in ``_stop_kwargs`` is recorded as raising -- which is what
+            # STRATEGIES.md's matrix claims for seven of the nine strategies
+            # under ``setup_invalidation_stop``, and what a run of
+            # ``_exit_signals`` alone would have quietly reported as clean.
+            adds_stop = bool(_stop_kwargs(df, signals.setup_stop_loss, mode))
         except ValueError as exc:
             out["modes"][mode.value] = {"raises": str(exc)}
             continue
@@ -158,7 +182,8 @@ def measure(name: str, df: pd.DataFrame) -> dict:
         live_short = signals.short_exits & live
         out["modes"][mode.value] = {
             "raises": None,
-            "pass_through": mode in PASS_THROUGH,
+            "adds_engine_stop": adds_stop,
+            "pass_through": passes_through(df, signals, mode),
             "canonical": mode == CANONICAL[name],
             "long_exit_diff": int((engine_long.astype(bool) != live_long).sum()),
             "short_exit_diff": int((engine_short.astype(bool) != live_short).sum()),
@@ -300,6 +325,19 @@ def main() -> int:
         f"{'holds' if control['holds'] else 'FAILED ' + str(control['mismatches'])}"
     )
     print(f"entry control: {result['entry_control_failures'] or 'clean'}")
+
+    # Every stop condition exits non-zero, not just the pre-registered kill
+    # switch. CONTROL R going red means the substitution the whole file rests on
+    # is unvalidated, and a dirty entry control means the two paths disagree
+    # about which bars exist -- either invalidates the numbers above as surely as
+    # a pass-through difference does. Measured the hard way: an earlier revision
+    # returned 0 with CONTROL R red on ETH, and only reading the output caught it.
+    if not control["holds"]:
+        print(f"\nSTOP: CONTROL R failed -> {control['mismatches']}; the substitution is unvalidated")
+        return 1
+    if result["entry_control_failures"]:
+        print(f"\nSTOP: the two warmup rules disagree -> {result['entry_control_failures']}")
+        return 1
     if result["kill_switch_fired"]:
         print(f"\nKILL SWITCH: pass-through modes differ -> {result['pass_through_diffs']}")
         return 1

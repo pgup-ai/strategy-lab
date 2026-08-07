@@ -1821,11 +1821,22 @@ matches no single backtest configuration"*. Measured against `_exit_signals` ove
 | `turnaround_v2` | `continuation_failure` | 984 | 1,035 |
 | **`trend_following_deepseek_v4`** | `trend_structure` | **7,331** | **7,012** |
 
-**Every pass-through mode differs on 0 bars, on every strategy, on both frames** — the kill
+**`opposite_signal_only` differs on 0 bars, on every strategy, on both frames** — the kill
 switch did not fire, and prior 1 held: `_exit_signals` returns the strategy's own series
-unchanged for `opposite_signal_only` and `setup_invalidation_stop`, so for **6 of 9**
-strategies the replay stream already *is* the canonical backtest configuration. The census's
-"five strategies" is wrong in the direction of pessimism.
+unchanged for it, so for **6 of 9** strategies the replay stream already *is* the canonical
+backtest configuration. The census's "five strategies" is wrong in the direction of pessimism.
+
+**`setup_invalidation_stop` is not a pass-through, and the first version of this harness said
+it was** (corrected under review). `_exit_signals` does return the strategy's own series for
+it — but `_stop_kwargs` then hands `from_signals` an `sl_stop` the replay stream does not
+carry, so its exit *series* pass through while its *configuration* does not. Worse, that
+function **raises** when a strategy provides no setup stop, which is 7 of the 9 — exactly
+what STRATEGIES.md's matrix claims, and exactly what a harness calling only `_exit_signals`
+reported as a clean zero. The pass-through set is now *derived* from both engine functions
+rather than listed, and the corrected table has 7 raising and `turnaround_v1`/`v2` running
+with `adds_engine_stop=True`. No headline moves — no strategy's canonical mode is
+`setup_invalidation_stop`, and the mislabelled cells were all zero — but the harness now
+agrees with the matrix it claimed to be testing.
 
 **But `trend_following_deepseek_v4` is worse than the census said.** It emits **0** exits of
 its own — by design, the engine owns them — so a replay of it emits entries and **never an
@@ -1915,6 +1926,15 @@ Closing (a) alone is **necessary and not sufficient**. Ordered by what actually 
    The harness now feeds until it raises, which is why (d)'s headline is a number.
 4. **(d)'s comparison is 400 bars**, not the whole frame — the streaming driver is
    quadratic, since every bar recomputes over the whole buffer.
+5. **The harness returned 0 with a red control**, which is how caveat 1 survived long enough
+   to need catching by eye. Every stop condition now exits non-zero, not only the
+   pre-registered kill switch.
+6. **The shared exposure driver was hardcoded to 15m/BTC**, so (d)'s "real 4h perp frame"
+   was streaming 4h data under a 15m label. Measured rather than argued: the label reaches
+   `Bar.timeframe` and `ts_close_ms` and nothing else, because `BarBuffer.frame()` carries
+   bar-open timestamps and OHLCV — identical index and **0 of 400 differing targets** either
+   way, on both frames. It is parameterised now so the claim is true, not because a number
+   moved.
 
 ---
 
