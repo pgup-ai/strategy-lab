@@ -89,7 +89,8 @@ finding: persist only what cannot be recomputed, and read the rest.
 1. A board over the stored equity datasets returns a row per dataset, and a
    frame shorter than its strategy's warmup reports that in its own row — the
    same rule R10b established, on datasets that will actually hit it (`XLF`,
-   `XLK`, `QQQ` and `SMH` hold 333 weekly bars against `ema_cross`'s warmup).
+   `XLK`, `QQQ` and `SMH` hold 333 weekly bars against `state_machine_v1`'s
+   2,192).
 2. Each equity row's state and latest fill are **identical** to `/api/analysis`
    for the same pair, over that row's own window — R10b's check 2, unchanged,
    because M36 binds every view and a second market type is still one view.
@@ -113,11 +114,12 @@ finding: persist only what cannot be recomputed, and read the rest.
   written, which is what a reader needs; deciding whether a *specific*
   restatement happened means storing a second copy to diff against, and R10a's
   rule says not to store what can be re-fetched.
-- **No equity in `state_machine_v1`'s registry path on the board by default.**
-  It reads `crowding`, which needs funding; on an equity it falls back to
-  neutral and records `crowding_measured=False`, which is exactly the M20
-  condition. It stays selectable, and its tile says so, as every tile already
-  does.
+- **No market-specific strategy registry.** There is one registry, so
+  `state_machine_v1` stays selectable on an equity rather than being filtered
+  out of that board — and running it there is the M20 condition: it reads
+  `crowding`, which needs funding, so on an equity the feature falls back to
+  neutral and the run records `crowding_measured=False`. This plan assumed the
+  tiles already said so; they did not, and M39 is that fix.
 
 ---
 
