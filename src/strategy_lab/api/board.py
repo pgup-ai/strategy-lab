@@ -31,22 +31,16 @@ must not blank the other fifteen. Anything that is not a ``ValueError`` is a bug
 and propagates, because a grey tile is a worse place to hide one than a
 traceback.
 
-**The cache is keyed on the bar, never on wall-clock time.** A full-history
-recompute changes only when a bar closes or a settlement lands, so an entry
-carries the stamp it was computed under -- the newest stored candle plus the
-funding window -- and is served whenever that stamp still holds. At 4 h bars
-that is valid for hours; a time-to-live would expire while the answer had not
-moved. The stamp is what the two cheap probes below establish, and they are the
-only queries a fully cached board issues: you cannot know a cache is valid
-without asking whether a bar arrived. One entry per (dataset, strategy, exit
-mode), replaced rather than added to, so the cache cannot grow with the
-calendar. It is in-process and dies with ``browse``; **nothing here writes** --
-no report directory, no ``signals`` row, no ``bar_reasons`` row, no schema.
-
-The one input change the stamp cannot see is a settlement *rewritten in place*
-between the span's own endpoints, which a re-fetch of the same range does not
-produce and a corrected history would. `POST /api/refresh` moves the end and is
-seen.
+**Every request recomputes, and that is the browser's contract rather than an
+oversight.** An earlier version of this module memoised each row against the
+newest stored candle and the funding window. Review killed it and was right to:
+``POST /api/refresh`` upserts *overlapping* recent candles by design, so a
+corrective refresh that rewrites the last few bars without adding one leaves
+that stamp unmoved -- and a tile would then quietly contradict the chart it
+links to, which is the single failure M36 exists to prevent. A cache whose
+correctness depends on enumerating every writer is fine until one is missed.
+What makes that affordable is the streaming below, not a memo: the first row
+lands in tens of milliseconds and the rest fill in.
 """
 
 from __future__ import annotations
@@ -66,12 +60,10 @@ from strategy_lab.market_data.base import MarketDataIdentity
 # /api/analysis.
 DEFAULT_SPARK_BARS = 120
 
-# The most any row will carry, and therefore the most a cached one holds. A slot
-# is (dataset, strategy, exit mode), so a process someone flips through leaves
-# one entry per combination -- bounded, but four figures of them once every exit
-# mode has been tried, and 15,124 floats apiece would be the browser quietly
-# holding the candle table in memory. ``models.BoardQuery`` takes its upper
-# bound from here so the two cannot disagree about what is cached.
+# The most any row will carry. The full frame is 15,124 floats, and a board is
+# many rows at once, so the tail is bounded here rather than at the caller.
+# ``models.BoardQuery`` takes its upper bound from here so the two cannot
+# disagree about what a request may ask for.
 MAX_SPARK_BARS = 500
 
 
@@ -105,23 +97,6 @@ class BoardStamp:
 
 
 @dataclass(frozen=True)
-class BoardSlot:
-    """What a cache entry is *for*: one pair, at one exit mode.
-
-    Keyed on the four-part candle identity rather than on the instrument, for
-    the reason ``CandleId`` exists: BTC 4h and BTC 1h are different datasets and
-    a new 4h bar says nothing about the 1h one.
-    """
-
-    exchange: str
-    market_type: str
-    symbol: str
-    timeframe: str
-    strategy: str
-    exit_mode: str | None
-
-
-@dataclass(frozen=True)
 class BoardRow:
     """One tile: what this strategy is doing on this instrument, as of which bar.
 
@@ -152,23 +127,12 @@ class DatasetRef:
     last_bar: str
 
 
-# One entry per slot, replaced when its stamp moves. In-process, and it dies
-# with the server: a cache that outlived the process would be a second copy of
-# the research record with no way to tell it had gone stale.
-_CACHE: dict[BoardSlot, tuple[BoardStamp, BoardRow]] = {}
-
-
-def clear_board_cache() -> None:
-    """Forget everything held. Only a test should need this."""
-    _CACHE.clear()
-
-
 def stored_datasets(*, market_type: str | None = None) -> list[DatasetRef]:
     """Every stored candle set, on storage's own four-part identity.
 
     One aggregate query for the whole board. It is also the freshness probe:
-    ``last_timestamp`` is what tells a cached row whether a bar has closed since
-    it was computed, so enumerating and validating the cache are the same query
+    ``last_timestamp`` is the newest bar each set holds, which is what a tile
+    shows beside its ``as of`` so a funding-bounded lag is visible
     rather than two.
     """
     sets = list_candle_sets()
@@ -221,11 +185,11 @@ def stream_board(
     """One row per (dataset, strategy), yielded as each is finished.
 
     A generator rather than a list because the total is what it is: 330-400 ms
-    per uncached row, serially, and **parallelism does not fix it** -- measured
+    per row, serially, and **parallelism does not fix it** -- measured
     on the three stored perp frames, four threads returned 1.10x, since the work
     is pandas and vectorbt under the GIL rather than waiting on anything. What a
     caller can have is the first row early, so the board fills in instead of
-    arriving as one blob, and a fully cached board arrives at once.
+    arriving as one blob.
 
     The funding probe is per *contract*, not per dataset: funding is keyed
     without a timeframe, so BTC 4h and BTC 1h share one window and one query.
@@ -255,24 +219,7 @@ def _row(
     exit_mode: ExitMode | None,
     spark_bars: int,
 ) -> BoardRow:
-    identity = dataset.identity
-    slot = BoardSlot(
-        exchange=identity.exchange,
-        market_type=identity.market_type,
-        symbol=identity.symbol,
-        timeframe=identity.timeframe,
-        strategy=strategy,
-        exit_mode=None if exit_mode is None else ExitMode(exit_mode).value,
-    )
-    cached = _CACHE.get(slot)
-    if cached is not None and cached[0] == stamp:
-        # Returned with the spark tail this request asked for. Everything else
-        # is a function of the frame and does not depend on how much of it the
-        # caller wants to draw.
-        return replace(cached[1], closes=cached[1].closes[-spark_bars:])
-
     row = _compute(dataset, strategy=strategy, stamp=stamp, exit_mode=exit_mode)
-    _CACHE[slot] = (stamp, row)
     return replace(row, closes=row.closes[-spark_bars:])
 
 
@@ -285,10 +232,9 @@ def _compute(
 ) -> BoardRow:
     """One analysis, sliced to the handful of values a tile shows.
 
-    A ``ValueError`` becomes the row's ``unavailable`` and is cached like any
-    other answer: "this frame is shorter than the strategy's warmup" is as much
-    a function of the stored bars as a state is, and recomputing it every poll
-    would make the cheapest rows the only uncached ones. Anything else
+    A ``ValueError`` becomes the row's ``unavailable`` -- "this frame is shorter
+    than the strategy's warmup" is a fact about the stored bars, and one
+    instrument's refusal must not blank the rest of the board. Anything else
     propagates.
     """
     identity = dataset.identity
@@ -353,11 +299,9 @@ __all__ = [
     "DEFAULT_SPARK_BARS",
     "MAX_SPARK_BARS",
     "BoardRow",
-    "BoardSlot",
     "BoardStamp",
     "BoardWindow",
     "DatasetRef",
-    "clear_board_cache",
     "funding_window",
     "stored_datasets",
     "stream_board",

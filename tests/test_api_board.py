@@ -36,7 +36,6 @@ from strategy_lab.api.board import (
     BoardStamp,
     BoardWindow,
     DatasetRef,
-    clear_board_cache,
     funding_window,
     stored_datasets,
     stream_board,
@@ -60,19 +59,6 @@ _MACHINE = "state_machine_v1"
 _ANY_STAMP = BoardStamp(
     dataset_last_bar="2024-01-02", window=BoardWindow(start=None, end=None)
 )
-
-
-@pytest.fixture(autouse=True)
-def _empty_cache():
-    """Every test starts with nothing held.
-
-    The cache is process-global by design -- it dies with ``browse`` -- which
-    makes it shared state between tests, and a cached row from a neighbouring
-    test would make a cache-miss assertion pass without the code doing anything.
-    """
-    clear_board_cache()
-    yield
-    clear_board_cache()
 
 
 def _rows(response) -> list[dict]:
@@ -328,16 +314,16 @@ def statements():
 
 
 @pytest.mark.db
-def test_a_second_board_with_no_new_bar_reads_no_candle(statements, monkeypatch):
-    """A full-history recompute changes only when a bar closes.
+def test_every_board_request_recomputes_from_stored_candles(statements, monkeypatch):
+    """The browser's contract, and the board is not exempt from it.
 
-    So the second request reads **no candle row and no settlement row**. What it
-    does issue is the probes that establish the cache is still valid, and every
-    one of them is an aggregate: the dataset enumeration once for the whole
-    board -- ``pandas.read_sql`` puts a catalog lookup in front of it -- and one
-    funding span per distinct perp contract. There is no cheaper way to know a
-    bar has not arrived than to ask, and a cache that did not ask would be keyed
-    on wall-clock time, which expires while the answer has not moved.
+    An earlier version memoised each row against the newest stored candle and
+    the funding window. ``POST /api/refresh`` upserts *overlapping* recent
+    candles by design, so a corrective refresh that rewrote the last few bars
+    without adding one left that stamp unmoved and the tile stale -- while
+    ``/api/analysis`` recomputed and disagreed, which is the one failure M36
+    exists to prevent. So every request reads the candles again, and the cost is
+    paid by streaming rather than by remembering.
     """
     loads: list[str] = []
 
@@ -351,72 +337,23 @@ def test_a_second_board_with_no_new_bar_reads_no_candle(statements, monkeypatch)
 
     first = _rows(client.get("/api/board", params=params))
     assert loads, "the first board computed nothing"
+    answered = sorted(loads)
 
-    contracts = {(row["identity"]["exchange"], row["identity"]["symbol"]) for row in first}
     loads.clear()
-    statements.clear()
     second = _rows(client.get("/api/board", params=params))
 
-    assert loads == [], f"a cached board loaded candles for {loads}"
-    # Named columns rather than a count, so the claim is "no row of either table
-    # was read" rather than "few statements ran".
-    reads = [
-        sql
-        for sql in statements
-        if "market_candles.open" in sql or "funding_rates.funding_rate" in sql
+    assert sorted(loads) == answered, "the second board did not recompute every row"
+    # Same answer, recomputed: only the instant each was generated may differ.
+    assert [_without_generated_at(row) for row in second] == [
+        _without_generated_at(row) for row in first
     ]
-    assert reads == [], f"a cached board read stored data: {reads}"
-    # The catalog lookup pandas issues ahead of the enumeration, the enumeration
-    # itself, and one funding span per contract. Pinned so a probe added per
-    # *row* rather than per board cannot slip in unnoticed.
-    assert len(statements) == 2 + len(contracts), statements
-    # Identical rows, down to the instant each was computed: served, not redone.
-    assert second == first
 
 
-def test_a_new_bar_invalidates_only_the_rows_that_received_it(monkeypatch):
-    """The key is the four-part candle identity, not the instrument.
-
-    BTC 4h and BTC 1h are different datasets and a 4h close says nothing about
-    the 1h one, which is the same reason ``MarketSnapshot`` keys on ``CandleId``
-    rather than ``InstrumentId``. Driven off a stubbed enumeration because
-    ``market_candles`` is read-only on this path: what is under test is which
-    rows recompute, and a real bar would have to be written to produce one.
-    """
-    sets = _stub_datasets(
-        monkeypatch, [("BTC/USDT", "4h"), ("BTC/USDT", "1h"), ("ETH/USDT", "4h")]
-    )
-    loads: list[tuple[str, str]] = []
-
-    def _frame(**kwargs):
-        loads.append((kwargs["symbol"], kwargs["timeframe"]))
-        return synthetic_ohlcv(n=600, freq="4h")
-
-    monkeypatch.setattr("strategy_lab.api.analysis.load_candles", _frame)
-    monkeypatch.setattr(
-        "strategy_lab.backtests.funding_frame.funding_rates", lambda *a, **k: None
-    )
-    client = TestClient(app_module.create_app())
-    params = {"strategies": "donchian"}
-
-    _rows(client.get("/api/board", params=params))
-    assert sorted(loads) == [("BTC/USDT", "1h"), ("BTC/USDT", "4h"), ("ETH/USDT", "4h")]
-
-    loads.clear()
-    _rows(client.get("/api/board", params=params))
-    assert loads == [], "nothing closed, so nothing should have been recomputed"
-
-    # One bar, on one dataset.
-    sets.loc[sets["timeframe"] == "4h", "last_timestamp"] = pd.Timestamp(
-        "2024-02-01", tz="UTC"
-    )
-    sets.loc[sets["symbol"] == "ETH/USDT", "last_timestamp"] = pd.Timestamp(
-        "2024-01-01", tz="UTC"
-    )
-    loads.clear()
-    _rows(client.get("/api/board", params=params))
-
-    assert loads == [("BTC/USDT", "4h")]
+def _without_generated_at(row: dict) -> dict:
+    provenance = row.get("provenance")
+    if not provenance:
+        return row
+    return {**row, "provenance": {k: v for k, v in provenance.items() if k != "generated_at"}}
 
 
 def _stub_datasets(monkeypatch, pairs: list[tuple[str, str]]) -> pd.DataFrame:

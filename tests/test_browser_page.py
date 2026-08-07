@@ -506,3 +506,56 @@ def test_the_deepest_candle_set_is_selected_rather_than_the_first(page):
     """
     assert "row.candles > deepest.candles" in page
     assert "datasetSel.value = deepest.id" in page
+
+
+def test_one_datasets_refresh_failure_does_not_cancel_the_rest(page):
+    """The board's whole claim is that one instrument cannot blank the others.
+
+    ``/api/refresh`` reports a venue or database failure as a 502 by design, so
+    a rejection here is the designed path rather than a surprise. Chained
+    without a per-identity catch it rejected the whole batch: the datasets after
+    it were never fetched, and the reload that would have drawn the ones that
+    *did* fetch was skipped too.
+    """
+    script = _script(page)
+
+    assert "failures.push(identity.symbol" in script
+    # The count is reported as "N of M", so a partial batch is not read as a
+    # whole one. Matched without the surrounding layout, which is not the claim.
+    assert "identities.length - failures.length" in script
+    # After the reload, which clears the banner.
+    assert "if (failures.length) setError(failures.join(' · '));" in script
+
+
+def test_a_superseded_board_is_aborted_rather_than_drained(page):
+    """Every row is a full recompute and nothing else cancels one.
+
+    The strategy switcher re-requests without a reload, so two switches while a
+    board streams left three boards competing for one threadpool -- and the
+    instrument view queues behind them. An abort is this function superseding
+    itself, so it is not an error.
+    """
+    script = _script(page)
+
+    assert "if (boardAbort) boardAbort.abort();" in script
+    assert "fetch(url, { signal: signal })" in script
+    assert "if (error && error.name === 'AbortError') return;" in script
+
+
+def test_opening_a_tile_carries_its_exact_edges_not_a_rounded_day(page):
+    """A tile's frame ends at a settlement, which a ``type="date"`` cannot hold.
+
+    A bare ``end`` means *all* of that day to the API, so the chart would read
+    bars the tile excluded and disagree with the tile that opened it -- and once
+    the lag is larger those bars can outrun the funding the tile was bounded by,
+    refusing the frame outright. The dates stay human; the request carries the
+    edges.
+    """
+    script = _script(page)
+
+    assert "exactBounds = {" in script
+    assert "start: row.provenance.first_bar," in script
+    assert "end: row.provenance.last_bar" in script
+    assert "if (exactBounds.start) params.set('start', exactBounds.start);" in script
+    # Editing a date makes the visible dates the truth again.
+    assert "exactBounds = null;" in script

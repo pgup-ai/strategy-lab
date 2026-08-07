@@ -102,9 +102,11 @@ any query parameter it does not recognise, by name; `api/app.py` serves that
 plus the one page in `browser/page.py`, which inlines the same vendored chart
 `backtests/report.py` does. `browse` runs it, on the loopback interface only.
 `api/board.py` widens that to several instruments at once — `GET /api/board`
-streams one newline-delimited row per (dataset, strategy) as each finishes,
-cached on the last bar rather than on the clock, and **slices `build_analysis`
-rather than deriving the same answer a cheaper way** (M36).
+streams one newline-delimited row per (dataset, strategy) as each finishes and
+**slices `build_analysis` rather than deriving the same answer a cheaper way**
+(M36). It holds nothing between requests: a row cache keyed on the newest stored
+candle shipped and was removed, because `POST /api/refresh` rewrites overlapping
+recent candles by design and the stamp could not see it.
 
 Key design decisions that span multiple files:
 
@@ -129,8 +131,10 @@ Key design decisions that span multiple files:
   `build_analysis` a tile does not need, because a cheaper route would be a third
   answer free to drift from the other two, and the drift would surface as a tile
   quietly contradicting the chart it links to. Widening the board is bounded by
-  caching, not by computing less — **parallelism does not help here**, measured
-  at 1.10× on four threads, since the work is pandas and vectorbt under the GIL.
+  **streaming**, not by computing less and not by holding results — a row cache
+  was tried and removed, since `refresh` rewrites overlapping recent candles and
+  no cheap stamp sees that. **Parallelism does not help either**, measured at
+  1.10× on four threads, since the work is pandas and vectorbt under the GIL.
 
 - **A perp refresh advances candles and funding together, because the coverage
   guard refuses the pair when they drift.** `refresh_candles` fetches bars up to

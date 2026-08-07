@@ -406,8 +406,19 @@ __SHELL_CSS__
 
   var view = {
     bars: [], index: {}, fills: {}, why: null, payload: null,
-    pinned: null, dataset: null, refreshed: null
+    pinned: null, dataset: null,
+    // What a refresh fetched, tagged with the view that asked. One shared slot
+    // untagged meant a tile's result could be read out by the instrument view a
+    // user had since switched to, which is a status line describing something
+    // that did not happen here.
+    refreshed: null
   };
+
+  function claimRefreshed(name) {
+    var held = view.refreshed;
+    view.refreshed = null;
+    return held && held.view === name ? ' · ' + held.text : '';
+  }
 
   function refreshText(result) {
     var parts = [result.candles_upserted + ' candles'];
@@ -957,12 +968,12 @@ __SHELL_CSS__
     return wrap;
   }
 
-  function readRows(url, onRow) {
+  function readRows(url, onRow, signal) {
     // Read as it arrives. A row is a whole-history recompute (330-400 ms warm)
     // and the server emits each one as it finishes, so response.json() here
     // would wait for the slowest instrument before drawing the fastest -- 1.2 s
     // instead of 206 ms to first paint, measured on the four stored perp sets.
-    return fetch(url).then(function (response) {
+    return fetch(url, { signal: signal }).then(function (response) {
       if (!response.ok) {
         return response.json().then(function (body) {
           throw new Error(detail(body) || ('HTTP ' + response.status));
@@ -986,6 +997,9 @@ __SHELL_CSS__
   }
 
   var boardPending = 0;
+  var boardAbort = null;
+  // Set only when a tile opens the instrument view; see `query`.
+  var exactBounds = null;
   var boardIdentities = [];
 
   function boardQuery() {
@@ -1000,6 +1014,13 @@ __SHELL_CSS__
   function loadBoard() {
     if (!strategySel.value) return Promise.resolve();
     var token = ++boardPending;
+    // Stop the superseded board at the server, not just on screen. Each row is
+    // a full recompute and nothing else cancels it, so switching strategy twice
+    // while one streams leaves three boards competing for the same threadpool
+    // and starves the instrument view behind them.
+    if (boardAbort) boardAbort.abort();
+    boardAbort = typeof AbortController === 'function' ? new AbortController() : null;
+    var signal = boardAbort ? boardAbort.signal : undefined;
     var host = el('board');
     host.replaceChildren();
     boardIdentities = [];
@@ -1020,7 +1041,7 @@ __SHELL_CSS__
       }
       host.appendChild(tile(row));
       setStatus(rows + ' rows · first in ' + painted + ' ms');
-    }).then(function () {
+    }, signal).then(function () {
       if (token !== boardPending) return;
       setError('');
       document.title = 'board · ' + strategySel.value + ' · strategy-lab';
@@ -1029,9 +1050,10 @@ __SHELL_CSS__
         ? 'no candle sets stored for this market'
         : rows + ' rows · first in ' + painted + ' ms · all in ' +
           Math.round(performance.now() - started) + ' ms' +
-          (view.refreshed ? ' · ' + view.refreshed : ''));
-      view.refreshed = null;
+          claimRefreshed('board'));
     }).catch(function (error) {
+      // An abort is this function superseding itself, not a failure.
+      if (error && error.name === 'AbortError') return;
       // Whatever arrived stays on screen. A truncated board is more use than a
       // blank one, and the banner says it is truncated.
       if (token === boardPending) setError(error.message);
@@ -1044,10 +1066,12 @@ __SHELL_CSS__
     return getJSON('/api/refresh?' + new URLSearchParams(identity).toString(),
                    { method: 'POST' })
       .then(function (result) {
-        view.refreshed = identity.symbol + ' ' + identity.timeframe + ' ' +
-          refreshText(result);
-        // Every other row is served from cache on this reload, so the cost is
-        // the one dataset that actually moved.
+        view.refreshed = {
+          view: 'board',
+          text: identity.symbol + ' ' + identity.timeframe + ' ' + refreshText(result)
+        };
+        // The whole board recomputes, since nothing is held between requests.
+        // One dataset moved; the rest cost what they always cost.
         return loadBoard();
       })
       .catch(function (error) { setError(error.message); })
@@ -1063,6 +1087,7 @@ __SHELL_CSS__
     var identities = boardIdentities.slice();
     var candles = 0;
     var settlements = 0;
+    var failures = [];
     var chain = Promise.resolve();
     identities.forEach(function (identity, i) {
       chain = chain.then(function () {
@@ -1073,15 +1098,29 @@ __SHELL_CSS__
           .then(function (result) {
             candles += result.candles_upserted;
             if (result.funding_upserted) settlements += result.funding_upserted;
+          })
+          // Per identity, so one venue failure -- which /api/refresh reports as
+          // a 502 by design -- does not cancel the datasets after it, and does
+          // not skip the reload that would have drawn the ones that did fetch.
+          // The board's whole claim is that one instrument cannot blank the
+          // others; a refresh that abandons fifteen of them breaks it.
+          .catch(function (error) {
+            failures.push(identity.symbol + ' ' + identity.timeframe + ': ' +
+                          error.message);
           });
       });
     });
     return chain
       .then(function () {
-        view.refreshed = 'refreshed ' + identities.length + ' datasets · ' +
-          candles + ' candles · ' + settlements + ' settlements';
+        view.refreshed = { view: 'board', text:
+          'refreshed ' + (identities.length - failures.length) + ' of ' +
+          identities.length + ' datasets · ' + candles + ' candles · ' +
+          settlements + ' settlements' };
         return loadBoard();
       })
+      // After the reload, which clears the banner: a failure the user cannot
+      // see is the same as one that did not happen.
+      .then(function () { if (failures.length) setError(failures.join(' · ')); })
       .catch(function (error) { setError(error.message); })
       .then(function () { button.disabled = false; });
   }
@@ -1109,6 +1148,11 @@ __SHELL_CSS__
       }
       el('start').value = first.toISOString().slice(0, 10);
       el('end').value = row.provenance.last_bar.slice(0, 10);
+      // The inputs show whole days; the request carries the tile's own edges.
+      exactBounds = {
+        start: row.provenance.first_bar,
+        end: row.provenance.last_bar
+      };
     }
     setView('instrument');
   }
@@ -1127,6 +1171,17 @@ __SHELL_CSS__
     ['start', 'end'].forEach(function (bound) {
       if (el(bound).value) params.set(bound, el(bound).value);
     });
+    // A tile's frame ends at a settlement, which is a time of day these
+    // `type="date"` inputs cannot hold -- and a bare `end` means *all* of that
+    // day to the API, so the chart would read bars the tile excluded and
+    // disagree with the tile that opened it. Worse when the lag is larger: the
+    // extra bars can outrun the funding the tile was bounded by, and the whole
+    // frame is refused. Held beside the inputs and cleared the moment the user
+    // edits one, since from then on the visible dates are the truth.
+    if (exactBounds) {
+      if (exactBounds.start) params.set('start', exactBounds.start);
+      if (exactBounds.end) params.set('end', exactBounds.end);
+    }
     return params;
   }
 
@@ -1162,8 +1217,7 @@ __SHELL_CSS__
         draw(payload);
         setStatus(Math.round(performance.now() - started) + ' ms · ' +
           payload.bars.length.toLocaleString() + ' bars' +
-          (view.refreshed ? ' · ' + view.refreshed : ''));
-        view.refreshed = null;
+          claimRefreshed('instrument'));
       })
       .catch(function (error) {
         if (token === pending) setError(error.message);
@@ -1196,7 +1250,13 @@ __SHELL_CSS__
   strategySel.addEventListener('change', function () { syncExitEnabled(); reload(); });
   exitSel.addEventListener('change', reload);
   [el('start'), el('end')].forEach(function (control) {
-    control.addEventListener('change', load);
+    control.addEventListener('change', function () {
+      // Editing a date makes the visible dates the truth, so the tile's exact
+      // edges stop applying -- otherwise a user who moved `From` would still be
+      // sent the tile's original bound and see their own change ignored.
+      exactBounds = null;
+      load();
+    });
   });
   el('refresh').addEventListener('click', function () {
     var button = el('refresh');
@@ -1211,7 +1271,7 @@ __SHELL_CSS__
       // exactly the state the coverage guard will refuse next, and thrown away
       // here it looked identical to a clean refresh.
       .then(function (result) {
-        view.refreshed = refreshText(result);
+        view.refreshed = { view: 'instrument', text: refreshText(result) };
         return load();
       })
       .catch(function (error) { setError(error.message); })
