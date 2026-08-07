@@ -942,6 +942,10 @@ def browse_command(
 ) -> None:
     """Open the read-only research browser: any strategy over any stored candle set.
 
+    Opens on the board -- one tile per candle set and strategy, carrying the
+    current state, the latest fill, the feature values behind them and the bar
+    each is as of -- and every tile opens the single-instrument chart behind it.
+
     A companion to `serve`, not a replacement for it. `serve` hosts the frozen
     `plot.html` a backtest wrote -- the reproducibility record, dated and
     byte-identical on re-render. This recomputes from stored candles on every

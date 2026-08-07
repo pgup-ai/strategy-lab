@@ -1,16 +1,16 @@
-"""The research browser's HTTP surface: read-only, loopback, one page and four
+"""The research browser's HTTP surface: read-only, loopback, one page and five
 endpoints.
 
-Read-only means read-only. Nothing here writes to ``signals``, nothing writes
-into ``reports/``, and the only write of any kind is the candle upsert
-``server.py`` already performs on a refresh -- the same fetch-recent-and-upsert
-path, called rather than reimplemented, so "newest bars" never means "restart
-the process".
+Read-only means read-only. Nothing here writes to ``signals`` or
+``bar_reasons``, nothing writes into ``reports/``, and the only write of any
+kind is the candle upsert ``server.py`` already performs on a refresh -- the
+same fetch-recent-and-upsert path, called rather than reimplemented, so "newest
+bars" never means "restart the process".
 
 New endpoints go here rather than onto ``server.py`` because that module is
 already condemned in the design doc's own inventory -- *"Replace. Synchronous,
-fetches from the exchange inside a GET handler"* -- and adding four handlers to
-a component the repo has decided to retire is debt this codebase is usually good
+fetches from the exchange inside a GET handler"* -- and adding handlers to a
+component the repo has decided to retire is debt this codebase is usually good
 at refusing. ``serve`` keeps working unchanged: the per-run ``plot.html`` is the
 frozen reproducibility record and this is a live view, two different things that
 must not become one.
@@ -18,21 +18,25 @@ must not become one.
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from dataclasses import asdict
 from typing import Annotated, Any
 
 import pandas as pd
 from fastapi import FastAPI, HTTPException, Query, Request
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 
 from strategy_lab.api.analysis import (
     DatasetUnavailable,
     build_analysis,
     registered_strategies,
 )
+from strategy_lab.api.board import stored_datasets, stream_board
 from strategy_lab.api.models import (
     AnalysisModel,
     AnalysisQuery,
+    BoardQuery,
+    BoardRowModel,
     DatasetModel,
     RefreshModel,
     RefreshQuery,
@@ -131,6 +135,44 @@ def create_app() -> FastAPI:
             allow_shorts=query.allow_shorts,
         )
         return asdict(payload)
+
+    @app.get("/api/board")
+    def board(query: Annotated[BoardQuery, Query()]) -> StreamingResponse:
+        """One row per (dataset, strategy), streamed as newline-delimited JSON.
+
+        Streamed rather than assembled because the cost is unavoidable and
+        serial: a row is a whole-history ``build_analysis`` -- 330-400 ms warm
+        on the stored perp frames -- and four threads over three of them
+        measured **1.10x**, the work being pandas and vectorbt under the GIL.
+        So the board cannot be made fast; it can be made to arrive. First paint
+        is the first row rather than the sum of all of them.
+
+        Still a plain ``def``. The generator below is a synchronous iterator,
+        which Starlette drains in the threadpool, so the event loop is no more
+        blocked here than by ``analysis`` -- ``create_app``'s docstring carries
+        the 3,640 ms that rule was measured on, and this handler holds the
+        threadpool for seconds rather than milliseconds.
+
+        Each line is validated through ``BoardRowModel`` on its way out, which
+        is where ``response_model`` would have done it had this returned a list.
+
+        The enumeration happens *here* rather than inside the generator: once
+        the first byte is written the status code is spent, so a database that
+        is unreachable has to fail before the response starts or it arrives as a
+        200 that stops after zero rows.
+        """
+        datasets = stored_datasets(market_type=query.market_type)
+
+        def lines() -> Iterator[str]:
+            for row in stream_board(
+                datasets,
+                strategies=query.names,
+                exit_mode=query.exit_mode,
+                spark_bars=query.spark_bars,
+            ):
+                yield BoardRowModel.model_validate(asdict(row)).model_dump_json() + "\n"
+
+        return StreamingResponse(lines(), media_type="application/x-ndjson")
 
     @app.post("/api/refresh", response_model=RefreshModel)
     def refresh(query: Annotated[RefreshQuery, Query()]) -> dict[str, Any]:

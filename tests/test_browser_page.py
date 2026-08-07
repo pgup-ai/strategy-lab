@@ -248,7 +248,7 @@ def test_provenance_is_a_strip_rather_than_a_tooltip(page):
     """M20's lesson: a number displayed without the funding context will
     eventually contradict the charter with no way to see why. Hidden behind a
     hover, it is a field somebody has to think to look for."""
-    assert '<div class="provenance" id="provenance"></div>' in page
+    assert '<div class="provenance instrument-only" id="provenance"></div>' in page
     assert "title=" not in _provenance_block(page)
 
 
@@ -317,13 +317,28 @@ def test_the_page_and_the_report_share_one_stylesheet_shell(client):
 
 
 def test_the_page_writes_nowhere_but_the_existing_refresh_path(page):
-    """Read-only is a property of the page as well as of the API: every fetch it
-    makes is a GET except the one POST that is ``server.refresh_candles``."""
-    posts = re.findall(r"method: '([A-Z]+)'", _script(page))
-    fetched = set(re.findall(r"getJSON\('(/[^'?]+)", _script(page)))
+    """Read-only is a property of the page as well as of the API.
 
-    assert posts == ["POST"]
-    assert fetched == {"/api/analysis", "/api/refresh", "/api/datasets", "/api/strategies"}
+    Every request it makes is a GET except the POSTs, and every POST goes to
+    ``/api/refresh``, which is ``server.refresh_candles``. The board added two
+    more of those -- one per tile and one for every tile -- and no fourth
+    endpoint that writes; asserted on the URL rather than on the count, so
+    another refresh button is fine and another writer is not.
+    """
+    script = _script(page)
+    posts = re.findall(r"getJSON\('(/[^'?]+)[^;]*?method: '([A-Z]+)'", script, flags=re.S)
+    fetched = set(re.findall(r"(?:getJSON|readRows)\('(/[^'?]+)", script))
+
+    assert posts, "no POST found at all; the regex stopped matching"
+    assert {url for url, _ in posts} == {"/api/refresh"}
+    assert {method for _, method in posts} == {"POST"}
+    assert fetched == {
+        "/api/analysis",
+        "/api/board",
+        "/api/refresh",
+        "/api/datasets",
+        "/api/strategies",
+    }
 
 
 def test_serving_and_analysing_leaves_the_report_tree_alone(client, tmp_path, monkeypatch):
@@ -346,8 +361,10 @@ def test_the_switcher_re_requests_rather_than_reloading(page):
     script = _script(page)
 
     assert "location.reload" not in script
-    assert "strategySel.addEventListener('change', function () { syncExitEnabled(); load(); });" \
+    assert (
+        "strategySel.addEventListener('change', function () { syncExitEnabled(); reload(); });"
         in script
+    )
 
 
 def test_a_slower_earlier_request_cannot_overwrite_a_later_one(page):
@@ -383,6 +400,109 @@ def test_the_price_chart_is_the_authority_on_what_range_is_shown(page):
     assert "exposureChart.timeScale().setVisibleLogicalRange(range)" in page
 
 
+# --------------------------------------------------------------------------
+# The board, and the instrument view it did not replace.
+# --------------------------------------------------------------------------
+
+
+def test_the_board_is_read_as_a_stream_rather_than_as_a_response(page):
+    """``response.json()`` here waits for the slowest instrument before drawing
+    the fastest. A row is a whole-history recompute and the cost is serial --
+    four threads over three stored perp frames measured 1.10x -- so the only
+    thing that makes first paint short of the total is reading as it arrives."""
+    script = _script(page)
+
+    assert "response.body.getReader()" in script
+    assert "new TextDecoder()" in script
+    assert "readRows('/api/board?'" in script
+
+
+def test_both_views_are_reachable_and_only_one_is_shown(page):
+    """The board did not replace the instrument view; it is what you open it
+    from. Hidden rather than unmounted, so the price chart keeps its size."""
+    script = _script(page)
+
+    assert "body.board-view .instrument-only" in page
+    assert "body.instrument-view .board-only" in page
+    assert "viewSel.addEventListener('change'" in script
+    assert "setView(viewSel.value);" in script
+    assert "function openInstrument(row)" in script
+    assert "setView('instrument');" in script
+
+
+def test_a_tile_offers_refresh_for_itself_and_for_the_whole_board(page):
+    """Explicit, both of them. A background poll that fetched from a venue on
+    its own schedule would be a different thing from a page somebody refreshed,
+    and only the second is honest about when it last spoke to the exchange."""
+    script = _script(page)
+
+    assert "function refreshOne(identity, button)" in script
+    assert "function refreshAll()" in script
+    assert "setInterval" not in script, "the board must not poll on a timer"
+    assert "setTimeout" not in script
+
+
+def test_a_row_the_board_could_not_answer_says_why_on_its_own_tile(page):
+    """One instrument's permanent leading funding gap must not blank the rest,
+    so a refusal is drawn as that tile's content rather than as a page error."""
+    script = _script(page)
+
+    assert "if (row.unavailable)" in script
+    assert "refusal.textContent = row.unavailable.split('\\n')[0];" in script
+    assert "refusal.title = row.unavailable;" in script
+
+
+def test_a_tile_whose_frame_ends_behind_the_newest_candle_says_so(page):
+    """A perp frame is bounded by its own stored funding span, so ``as of`` can
+    sit a bar behind the newest stored candle. Silently, that is a board that
+    looks current and is not; said out loud, it is a fact about settlements."""
+    script = _script(page)
+
+    assert "row.as_of === row.dataset_last_bar ? '' : 'lag'" in script
+    assert "tileLine('newest stored bar', stamp(row.dataset_last_bar), 'lag')" in script
+
+
+def test_a_tile_carries_the_provenance_a_figure_cannot_be_read_without(page):
+    """M20 in miniature, sixteen times over: a state and a fill on a tile with
+    no strategy version, exit mode or crowding flag beside them is exactly the
+    number-without-context that moved a published figure."""
+    script = _script(page)
+
+    assert "prov.crowding_measured" in script
+    assert "prov.exit_mode" in script
+    assert "prov.warmup_bars" in script
+    assert "prov.version" in script
+    assert "prov.generated_at" in script
+    # The cost model too, which CLAUDE.md's rule names beside the others and the
+    # tile omitted -- and through `costText`, so a tile and the chart read one
+    # the same way rather than through two formatters that can drift.
+    tile = _within(script, "function tile(row)")
+    assert "costText(prov.cost_model)" in tile
+
+
+def test_the_market_filter_offers_storages_own_vocabulary(page):
+    """Taken from ``models.MarketType``, so a fourth market type is not a filter
+    the API answers 422 to -- and the identity model takes it from there too."""
+    from typing import get_args
+
+    from strategy_lab.api.models import IdentityQuery, MarketType
+    from strategy_lab.browser.page import DEFAULT_MARKET_TYPE, MARKET_TYPES
+
+    assert MARKET_TYPES == get_args(MarketType)
+    assert MARKET_TYPES == get_args(IdentityQuery.model_fields["market_type"].annotation)
+    assert bootstrap_config()["marketTypes"] == list(MARKET_TYPES)
+    assert DEFAULT_MARKET_TYPE in MARKET_TYPES
+
+
+def test_a_continuous_strategy_shows_a_level_on_its_tile_rather_than_no_fills(page):
+    """Markers have no word for "62% long", so a tile that only knew how to draw
+    a latest fill would render the continuous contract as "none"."""
+    script = _script(page)
+
+    assert "} else if (row.target !== null) {" in script
+    assert "tileLine('target', fmt(row.target, 3))" in script
+
+
 def test_the_deepest_candle_set_is_selected_rather_than_the_first(page):
     """Storage holds probe sets as small as 25 bars.
 
@@ -392,3 +512,220 @@ def test_the_deepest_candle_set_is_selected_rather_than_the_first(page):
     """
     assert "row.candles > deepest.candles" in page
     assert "datasetSel.value = deepest.id" in page
+
+
+def test_one_datasets_refresh_failure_does_not_cancel_the_rest(page):
+    """The board's whole claim is that one instrument cannot blank the others.
+
+    ``/api/refresh`` reports a venue or database failure as a 502 by design, so
+    a rejection here is the designed path rather than a surprise. Chained
+    without a per-identity catch it rejected the whole batch: the datasets after
+    it were never fetched, and the reload that would have drawn the ones that
+    *did* fetch was skipped too.
+    """
+    script = _script(page)
+
+    assert "failures.push(identity.symbol" in script
+    # The count is reported as "N of M", so a partial batch is not read as a
+    # whole one. Matched without the surrounding layout, which is not the claim.
+    assert "identities.length - failures.length" in script
+    # Shown after the reload, which clears the banner -- and through the
+    # view-guarded writer, since a board failure says nothing about a chart.
+    assert "if (failures.length) boardError(failures.join(' · '));" in script
+
+
+def test_a_superseded_board_is_aborted_rather_than_drained(page):
+    """Every row is a full recompute and nothing else cancels one.
+
+    The strategy switcher re-requests without a reload, so two switches while a
+    board streams left three boards competing for one threadpool -- and the
+    instrument view queues behind them. An abort is this function superseding
+    itself, so it is not an error.
+    """
+    script = _script(page)
+
+    assert "function abortBoard()" in script
+    assert "fetch(url, { signal: signal })" in script
+    assert "if (error && error.name === 'AbortError') return;" in script
+    # Before the token, not after: `abortBoard` bumps the same counter, so a
+    # token taken first is stale the moment it is taken and the board that was
+    # just started draws nothing.
+    body = script[script.index("function loadBoard()"):]
+    assert body.index("abortBoard();") < body.index("var token = ++boardPending;")
+
+
+def test_switching_views_stops_whichever_one_is_being_left(page):
+    """Neither switch starts a request on the side it leaves, so neither guard
+    fires on its own.
+
+    Leaving the board keeps appending tiles to a hidden host and finishing a
+    full recompute per dataset. Leaving the instrument view is the mirror: an
+    ``/api/analysis`` still in flight resolves into the board, draws a chart
+    nobody is looking at and retitles the page with the instrument's symbol.
+    """
+    script = _script(page)
+
+    body = script[script.index("function setView(name)"):]
+    body = body[: body.index("function reload()")]
+    assert "if (name === 'board') abandonInstrument(); else abortBoard();" in body
+    # The two guards key on different counters, so each branch may bump the one
+    # it is not about to take a token from.
+    assert "pending += 1;" in _within(script, "function abandonInstrument()")
+    assert "boardPending += 1;" in _within(script, "function abortBoard()")
+
+
+def test_opening_a_tile_carries_its_exact_edges_not_a_rounded_day(page):
+    """A tile's frame ends at a settlement, which a ``type="date"`` cannot hold.
+
+    A bare ``end`` means *all* of that day to the API, so the chart would read
+    bars the tile excluded and disagree with the tile that opened it -- and once
+    the lag is larger those bars can outrun the funding the tile was bounded by,
+    refusing the frame outright. The dates stay human; the request carries the
+    edges.
+    """
+    script = _script(page)
+
+    assert "exactBounds = {" in script
+    assert "start: row.provenance.first_bar," in script
+    assert "end: row.provenance.last_bar" in script
+    assert "if (exactBounds.start) params.set('start', exactBounds.start);" in script
+    # Dropped by every route that changes which instrument is being asked
+    # about, asserted by the route rather than by a count: a strategy or
+    # exit-mode change deliberately *keeps* them, because a funding span is per
+    # contract and the board gives every strategy on one dataset one window.
+    for owner in (
+        "datasetSel.addEventListener('change'",   # a different instrument
+        "viewSel.addEventListener('change'",      # entered without a tile
+    ):
+        after = script[script.index(owner):]
+        assert "exactBounds = null;" in after[: after.index("});")], owner
+    # And editing a date, which makes the visible dates the truth again.
+    assert "exactBounds = null;\n      load();" in script
+
+
+def test_refreshing_the_instrument_moves_only_the_edge_the_fetch_moved(page):
+    """A refresh moves the frame's right edge and nothing else.
+
+    Keeping the old ``end`` draws no new bars -- ``load_candles`` filters
+    ``timestamp <= end`` -- while the status reports the candles just taken, and
+    the board then shows a later bar than the chart it links to. Clearing *both*
+    edges is the other failure: the head bound is what holds the frame off a
+    permanent leading funding gap, and the date input still carries the old day,
+    so the window widens to that day's 23:59:59 -- no newer bars, and up to a
+    full day past the last settlement, which the guard tolerates only to one
+    funding cadence.
+    """
+    script = _script(page)
+
+    body = script[script.index("el('refresh').addEventListener"):]
+    body = body[: body.index("});")]
+    assert "exactBounds = { start: exactBounds && exactBounds.start, end: null };" in body
+    assert "el('end').value = '';" in body
+    assert body.index("end: null };") < body.index("return load();")
+
+
+def test_a_board_refresh_says_nothing_over_the_instrument_view(page):
+    """A refresh chain outlives the view that started it.
+
+    The reload is guarded; the writes before it were not, so each remaining link
+    wrote its progress over the chart being read -- and a failure banner too,
+    which dims the provenance strip of a view the failure says nothing about.
+    """
+    script = _script(page)
+
+    # The writers are guarded, not merely named -- a helper that forwarded
+    # unconditionally would satisfy the call-site check below and change nothing.
+    for writer, wrapped in (("boardStatus", "setStatus"), ("boardError", "setBanner")):
+        body = script[script.index("function " + writer + "(text)"):]
+        body = body[: body.index("\n  }")]
+        assert "if (onBoard()) " + wrapped + "(text)" in body, writer
+    # `setBanner`, never `setError`: the latter also dims `#provenance` and
+    # rewrites the status with "showing the last run that succeeded", which are
+    # claims about the *chart*. A board failure makes neither, and nothing on a
+    # board redraw would have undimmed it.
+    assert "el('provenance').classList.toggle('stale'" not in _within(script, "function setBanner")
+    # Progress is transient and may be dropped; a *failure* is held, because it
+    # is a fact about the data rather than about the view. It has to survive a
+    # trip to the chart *and* a board redraw the user asked for in between --
+    # both of which otherwise wipe the banner, which is the same silence as
+    # never showing it.
+    held = _within(script, "function boardError(text)")
+    assert "heldBoardError = text;" in held
+
+    board = script[script.index("function loadBoard()"):]
+    board = board[: board.index("\n  function ", 1)]
+    assert "setBanner(heldBoardError || '');" in board
+    assert "heldBoardError = null;" not in board, "a redraw does not unfail a fetch"
+
+    # Cleared by the user retrying, which is the one event that makes it stale --
+    # and the visible banner with it, or the previous failure stays up while a
+    # new fetch is in flight and reads as this attempt's.
+    cleared = _within(script, "function clearBoardError()")
+    assert "heldBoardError = null;" in cleared
+    assert "if (onBoard()) setBanner('');" in cleared
+    for owner in ("function refreshOne(", "function refreshAll("):
+        body = script[script.index(owner):]
+        body = body[: body.index("\n  function ", 1)]
+        assert "clearBoardError();" in body, owner
+    for owner in ("function refreshOne(", "function refreshAll("):
+        body = script[script.index(owner):]
+        body = body[: body.index("\n  function ", 1)]
+        assert "setStatus(" not in body, owner
+        assert "setError(" not in body, owner
+
+
+def test_a_refresh_that_outlives_the_board_view_does_not_restart_it(page):
+    """``refreshOne`` and ``refreshAll`` resolve on their own schedule.
+
+    Open a tile while one is in flight and the continuation would start a full
+    board -- a whole-history recompute per row -- against a hidden host, then
+    retitle the page over the chart the user is looking at. ``setView`` aborts
+    the *stream*; it cannot abort a POST that has not resolved yet.
+    """
+    script = _script(page)
+
+    body = script[script.index("function reloadBoardIfShown()"):]
+    body = body[: body.index("\n  }")]
+    assert "onBoard()" in body and "loadBoard()" in body
+    assert "Promise.resolve()" in body
+    # Both refresh paths go through it rather than calling loadBoard directly.
+    for owner in ("function refreshOne(", "function refreshAll("):
+        body = script[script.index(owner):]
+        body = body[: body.index("\n  function ", 1)]
+        assert "reloadBoardIfShown()" in body, owner
+        assert "return loadBoard();" not in body, owner
+
+
+def _within(script: str, marker: str) -> str:
+    """One function body, from its declaration to the next one at file scope."""
+    body = script[script.index(marker):]
+    return body[: body.index("\n  }")]
+
+
+def test_refresh_all_is_refused_while_the_board_is_still_arriving(page):
+    """``boardIdentities`` fills as the rows land, and ``refreshAll`` snapshots it.
+
+    Clicked mid-stream it fetches only the datasets already drawn, then reports
+    "N of N" for a partial N -- and the reload after it recomputes the untouched
+    ones from unchanged candles, so nothing on screen says a dataset was
+    skipped. Disabled for the duration instead: a board you cannot see yet is
+    not one you can refresh.
+    """
+    script = _script(page)
+
+    board = script[script.index("function loadBoard()"):]
+    board = board[: board.index("\n  function ", 1)]
+    assert "el('refresh-all').disabled = true;" in board
+    assert board.index("disabled = true;") < board.index("disabled = false;")
+
+    # Re-enabled on the *success* path only, and after its own token guard, so
+    # neither a superseded load nor a truncated one lifts the disable: a stream
+    # that ended early leaves `boardIdentities` partial, and "refresh all" over
+    # a partial list reports it as the whole batch. Each tile keeps its own
+    # button, which is the escape hatch that stays honest.
+    done = board[board.index("}, signal).then(function () {"):]
+    done = done[: done.index("}).catch(")]
+    assert "el('refresh-all').disabled = false;" in done
+    assert done.index("if (token !== boardPending) return;") < done.index("disabled = false;")
+    caught = board[board.index("}).catch("):]
+    assert "disabled = false;" not in caught, "a truncated board must stay unrefreshable"
