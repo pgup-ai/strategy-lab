@@ -311,7 +311,15 @@ Key design decisions that span multiple files:
   `storage/migrations.py`). The same cast fires on *every write* that binds a
   Python `float` to a `NUMERIC` column, so `normalize_candle_frame` emits
   `Decimal(str(float(x)))`; binding a bare `float` there quietly re-corrupts
-  what the migration fixed, on every re-fetch.
+  what the migration fixed, on every re-fetch. **The `(38,18)` *scale* is a
+  second and independent limit, and no test covers it**: a scale counts decimal
+  *places* where a float64 needs up to 17 *significant digits*, so anything
+  below ~0.1 is truncated. Measured — `1.234567890123456e-05` loses digits in a
+  `NUMERIC(38,18)` column and a BTC-scale price does not, which is why
+  `bar_reasons` stores its 0..1 feature values as unconstrained `NUMERIC`
+  (M34). `market_candles` still carries the scale, so it would bite on an asset
+  priced below roughly 0.1; the repo has never stored one, which is the only
+  reason it has never shown.
 - **Funding and open interest are their own tables, not candle columns.**
   Funding is a cash flow settled on the venue's own schedule and OI is a
   point-in-time snapshot, so `funding_rates` and `open_interest`
