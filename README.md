@@ -27,10 +27,10 @@ strategy-lab/
     strategies/      # strategy modules
     backtests/       # vectorbt runner and report writer
     feeds/           # MarketDataFeed protocol and the Postgres replay feed
-    engine/          # event-driven runners, bar buffers, market clock
+    engine/          # one runner per contract, bar buffers, market clock
     features/        # cross-sectional reads over a market snapshot
-    api/             # the research browser's read-only endpoints
-    browser/         # the research browser's one page
+    api/             # the browser's read-only endpoints, incl. the board
+    browser/         # the browser's one page: board + instrument view
     cli.py
 ```
 
@@ -296,7 +296,21 @@ the vectorized `backtest` command calls — but once per closed bar over an
 expanding buffer, reading only the last row, instead of once over the whole
 range. It is the execution path live trading will use, and
 `tests/test_replay_determinism.py` proves the two paths agree exactly, signal
-for signal.
+for signal — on **funded** frames, so it can see a crowding difference rather
+than comparing crowding-neutral against crowding-neutral.
+
+**Funding is attached automatically on a perp**, through the same function the
+backtest uses, so the alignment rule and the coverage guard are shared rather
+than duplicated. Coverage is *required* only when the strategy actually reads a
+funding-derived feature — otherwise BTC's permanent 40-hour leading gap would
+make its own range unreplayable for `donchian`, which reads none. `--no-funding`
+opts out; a crowding-reading strategy over an uncovered range is refused with the
+same message `backtest` gives.
+
+There is **one runner per strategy contract**, and each refuses the other's
+strategies at construction rather than a warmup later: `StrategyRunner` drives
+`SignalSet` and takes an optional `--exit-mode`-equivalent, `ExposureRunner`
+drives `TargetExposure` and emits a signed level.
 
 `replay` persists to `runs`/`signals` tables that only `strategy-lab migrate`
 creates — `init-db` does not. Run `migrate` once; on a brand-new database run
@@ -478,6 +492,39 @@ recomputed per request and **persisted nowhere**:
 strategy-lab browse --port 8760      # loopback only; a routable host is refused
 ```
 
+### It opens on the board
+
+The landing view is a grid: **one tile per (candle set, strategy)**, carrying the
+latest fill, a sparkline, the bar it is as of — and, for a strategy that has a
+state machine, its current state and the feature values behind it. Pick the strategies from the selector, filter by market type,
+and click any tile to open the single-instrument chart behind it.
+
+Rows arrive **as each finishes** rather than as one blob — `GET /api/board`
+streams newline-delimited JSON — because a warm analysis costs ~300–500 ms per
+instrument and sixteen of them serially is ~6 s. First tile lands in ~100 ms.
+
+**A tile never derives its own answer.** It slices the same `build_analysis` call
+the chart uses, so a tile cannot quietly disagree with the chart it links to.
+Nothing is cached between requests: `POST /api/refresh` rewrites overlapping
+recent candles by design, so any stamp cheap enough to cache on is a stamp that
+cannot see that.
+
+**Each market type states the staleness that applies to it, and not the other's:**
+
+| | what can go stale | what the tile shows |
+|---|---|---|
+| perp | the **right edge**, up to one funding cadence — the frame is bounded by its own stored settlements | `as of` against the newest stored bar, orange when they differ |
+| equity | the **whole history** — the Yahoo fetcher rescales every past bar on a dividend | `candles written`, orange past 31 days |
+
+That equity caveat is measured, not hypothetical: **333 of 333 stored SPY weekly
+bars moved** against a fresh fetch (median 0.257%), and `donchian` differed on 3
+of them where two ratio-based strategies differed on none. The board opens on
+`perp` so that caveat is something you choose to look at rather than inherit.
+
+Refresh is **explicit** — per tile or all tiles — and never on a timer. A
+background poll that talks to a venue on its own schedule is a different thing
+from a page you refreshed, and only the second is honest about when it last did.
+
 Signals are computed by the same whole-history `generate_signals(df)` call
 `run_backtest` makes over the same stored candles — never read from the `signals`
 table and never from the event path — so the browser cannot disagree with a
@@ -529,10 +576,11 @@ strategy-lab backtest --exchange binance --market-type perp --symbols BTC/USDT \
 `state_machine_v1` needs perp candles *and* stored funding — funding is what `crowding`
 reads, and a perp backtest refuses to run without it. The `--start` is the venue's first
 funding settlement; earlier bars would be charged zero carry, which reads exactly like
-free carry. **`replay` cannot supply `crowding` at all** — `Bar` and `BarBuffer` carry
-OHLCV and nothing else — so replaying a perp range runs that feature at a neutral 0.5 and
-emits different signals from the backtest above. Every run records which it was, as
-`crowding_measured` in `config.json`. It clears the R0 baseline out of sample on risk-adjusted terms — Sharpe +0.896
+free carry. **`replay` supplies `crowding` too**, since `Bar` carries a funding rate and
+`ReplayFeed` attaches it through the engine's own function — so a perp replay and the
+backtest above now agree bar for bar, where before they differed on all 6,048 of them.
+Every run still records which it was, as `crowding_measured` in `config.json`. It clears
+the R0 baseline out of sample on risk-adjusted terms — Sharpe +0.896
 against `donchian` 40/10's +0.072 over the same held-out 6,048 bars — while returning far
 less than buy-and-hold. Read
 [STRATEGIES.md](STRATEGIES.md#state_machine_v1) before quoting any of that.
