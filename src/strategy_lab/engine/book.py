@@ -51,8 +51,8 @@ from dataclasses import dataclass, field
 
 from strategy_lab.backtests.conflicts import resolve_conflicts
 from strategy_lab.core.types import Side, Signal
+from strategy_lab.backtests.costs import CostModel
 from strategy_lab.engine.fills import (
-    CostModel,
     Direction,
     Fill,
     build_fill,

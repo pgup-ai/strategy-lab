@@ -23,7 +23,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from strategy_lab.engine.fills import CostModel, Direction, Fill, build_fill, fill_price
+from strategy_lab.backtests.costs import CostModel
+from strategy_lab.engine.fills import Direction, Fill, build_fill, fill_price
 
 
 @dataclass

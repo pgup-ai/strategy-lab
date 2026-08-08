@@ -29,6 +29,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import Enum
 
+from strategy_lab.backtests.costs import CostModel
+
 
 class Direction(str, Enum):
     """Which way the order goes, which is all the pricing depends on.
@@ -62,20 +64,6 @@ class Fill:
         return self.quantity * self.price
 
 
-@dataclass(frozen=True, slots=True)
-class CostModel:
-    """The two rates a fill is priced with.
-
-    A separate type from ``backtests.costs.CostModel`` on purpose: that one also
-    carries ``cash`` and ``position_pct``, which are a *backtest's* configuration,
-    while a book is handed its cash once and sizes from it. Sharing the class
-    would put fields on this path that mean nothing here.
-    """
-
-    fee: float = 0.0005
-    slippage: float = 0.0005
-
-
 def fill_price(close: float, direction: Direction, slippage: float) -> float:
     """The price a market order at this bar's close actually gets.
 
@@ -104,12 +92,16 @@ def build_fill(
     close: float,
     costs: CostModel,
 ) -> Fill:
-    if quantity < 0:
-        # ``Fill.quantity`` is unsigned by contract and ``direction`` carries the
-        # sign. A negative one settles as a credit and moves the position the
-        # wrong way, which is silent -- so it is refused where it can still be
-        # attributed to its caller.
-        raise ValueError(f"quantity must be unsigned, got {quantity!r}; direction carries the sign")
+    # ``not >= 0`` rather than ``< 0`` because ``NaN < 0`` is False: a NaN would
+    # otherwise pass a guard written to keep exactly this out, then poison the
+    # balance and the position for the rest of the run. ``Fill.quantity`` is
+    # unsigned by contract and ``direction`` carries the sign; a negative one
+    # settles as a credit and moves the position the wrong way, silently.
+    if not quantity >= 0:
+        raise ValueError(
+            f"quantity must be a non-negative number, got {quantity!r}; "
+            f"direction carries the sign"
+        )
     price = fill_price(close, direction, costs.slippage)
     return Fill(
         ts_bar_ms=ts_bar_ms,
@@ -120,4 +112,4 @@ def build_fill(
     )
 
 
-__all__ = ["CostModel", "Direction", "Fill", "build_fill", "entry_quantity", "fill_price"]
+__all__ = ["Direction", "Fill", "build_fill", "entry_quantity", "fill_price"]

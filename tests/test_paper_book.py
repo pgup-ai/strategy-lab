@@ -20,7 +20,6 @@ import pandas as pd
 import pytest
 
 from strategy_lab.backtests import ExitMode, run_backtest
-from strategy_lab.backtests.costs import CostModel as EngineCosts
 from strategy_lab.backtests.engine import _exit_signals, _mask_warmup, _warmup_bars
 from strategy_lab.backtests.exposure_engine import (
     _banded,
@@ -34,7 +33,8 @@ from strategy_lab.db import load_candles
 from strategy_lab.db.funding import funding_span
 from strategy_lab.engine.book import PaperBook
 from strategy_lab.engine.exposure_book import ExposureBook
-from strategy_lab.engine.fills import CostModel, Direction
+from strategy_lab.backtests.costs import CostModel
+from strategy_lab.engine.fills import Direction
 from strategy_lab.market_data.base import MarketDataIdentity
 from strategy_lab.strategies.exposure_registry import get_exposure_strategy
 from strategy_lab.strategies.registry import get_strategy
@@ -275,7 +275,7 @@ def test_the_exposure_book_reproduces_the_exposure_engines_orders():
         cash=CASH,
         position_pct=PCT,
         rebalance_threshold=0.05,
-        cost_model=EngineCosts(fee=FEE, slippage=SLIP),
+        cost_model=CostModel(fee=FEE, slippage=SLIP),
         funding=funding,
     )
     target = _flat_through_warmup(
@@ -418,12 +418,85 @@ def test_an_account_that_cannot_pay_at_all_fills_nothing_rather_than_going_short
     assert book.position == 0.0
 
 
-def test_a_negative_quantity_is_refused_where_it_can_still_be_attributed():
-    """``Fill.quantity`` is unsigned by contract; a negative one settles as a
-    credit and moves the position the wrong way, silently."""
+def test_a_negative_or_non_finite_quantity_is_refused_where_it_can_be_attributed():
+    """``Fill.quantity`` is unsigned by contract; a negative one settles as a credit
+    and moves the position the wrong way, and a NaN poisons the balance for the
+    rest of the run. ``NaN < 0`` is False, so the guard is written ``not >= 0``."""
     from strategy_lab.engine.fills import build_fill
 
-    with pytest.raises(ValueError, match="unsigned"):
-        build_fill(
-            ts_bar_ms=0, direction=Direction.BUY, quantity=-1.0, close=100.0, costs=COSTS
+    for bad in (-1.0, float("nan"), float("-inf")):
+        with pytest.raises(ValueError, match="non-negative"):
+            build_fill(
+                ts_bar_ms=0, direction=Direction.BUY, quantity=bad, close=100.0, costs=COSTS
+            )
+
+
+@pytest.mark.parametrize("book_cash", [10_000.0])
+def test_the_exposure_clip_matches_from_orders_where_it_actually_binds(book_cash, tmp_path):
+    """The gate never exercised this: 938 of 938 orders match over the full stored
+    history *because* the bound never binds there. The divisor was copied from
+    ``PaperBook``, where it was measured against ``from_signals`` -- a different
+    vectorbt path -- so it is verified here against ``from_orders`` on a frame
+    built to force it.
+    """
+    from dataclasses import dataclass
+
+    from strategy_lab.strategies.exposure import TargetExposure
+
+    @dataclass(frozen=True)
+    class _Scripted:
+        name: str = "scripted"
+        version: str = "1.0.0"
+        warmup_bars: int = 0
+
+        def compute_target(self, frame):
+            wanted = [1.0, 1.0, 1.0, 1.0, 0.0, 1.0, 1.0, 1.0, 1.0, 1.0][: len(frame)]
+            return TargetExposure(target=pd.Series(wanted, index=frame.index, dtype="float64"))
+
+    # Max long held through an 85% crash, then max long asked for again.
+    close = pd.Series([100.0, 100.0, 60.0, 30.0, 15.0, 15.0, 15.0, 15.0, 15.0, 15.0])
+    index = pd.date_range("2024-01-01", periods=len(close), freq="4h", tz="UTC")
+    frame = pd.DataFrame(
+        {"open": close.values, "high": close.values, "low": close.values,
+         "close": close.values, "volume": 1.0},
+        index=index,
+    )
+    costs = CostModel(fee=0.001, slippage=0.002)
+    strategy = _Scripted()
+    result = run_exposure_backtest(
+        df=frame,
+        strategy=strategy,
+        identity=MarketDataIdentity(
+            exchange="x", market_type="spot", symbol="P/Q", timeframe="4h"
+        ),
+        cash=book_cash,
+        position_pct=PCT,
+        rebalance_threshold=0.05,
+        cost_model=costs,
+    )
+    submitted = _banded(
+        _flat_through_warmup(strategy.compute_target(frame).target, warmup_bars=0, strategy=strategy),
+        threshold=0.05,
+    )
+
+    book = ExposureBook(cash=book_cash, position_pct=PCT, costs=costs)
+    filled = [
+        fill
+        for timestamp, value in submitted.dropna().items()
+        if (
+            fill := book.on_target(
+                float(value),
+                close=float(frame.loc[timestamp, "close"]),
+                ts_bar_ms=int(timestamp.value // 10**6),
+            )
         )
+        is not None
+    ]
+
+    engine = result.orders
+    assert len(filled) == len(engine) == 3
+    # The clip has to actually bind, or this compares two unclipped numbers.
+    last = engine.iloc[-1]
+    assert last["Size"] < book_cash * PCT / 15.0 / 2
+    for fill, (_, row) in zip(filled, engine.iterrows(), strict=True):
+        assert fill.quantity == pytest.approx(row["Size"])
