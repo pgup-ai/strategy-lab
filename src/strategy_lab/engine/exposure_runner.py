@@ -29,7 +29,7 @@ not say what replaced it.
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
 from decimal import Decimal
 
 import pandas as pd
@@ -116,11 +116,22 @@ class ExposureRunner:
         """The last target submitted, which is what the band measures against."""
         return self._held
 
+    def prime_bars(self, bars: Iterable[Bar]) -> None:
+        """Load warmup history without emitting, the same as ``StrategyRunner``.
+
+        Takes ``Bar`` so it composes with ``MarketDataFeed.backfill``; ``prime``
+        below is the stored-candles adapter over it.
+        """
+        for bar in bars:
+            self.buffer.append(bar)
+
     def prime(self, history: pd.DataFrame) -> None:
-        """Load warmup history without emitting, the same as ``StrategyRunner``."""
+        """Load warmup history from stored candles, without emitting."""
         bar_ms = timeframe_to_millis(self.timeframe)
-        for timestamp, row in history.sort_index(kind="stable").iterrows():
-            self.buffer.append(_row_to_bar(timestamp, row, self.instrument, self.timeframe, bar_ms))
+        self.prime_bars(
+            _row_to_bar(timestamp, row, self.instrument, self.timeframe, bar_ms)
+            for timestamp, row in history.sort_index(kind="stable").iterrows()
+        )
 
     def on_event(self, event: BarEvent) -> Sequence[ExposureSignal]:
         return self.on_bar(event.bar)

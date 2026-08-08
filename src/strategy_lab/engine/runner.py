@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
 from decimal import Decimal
 
 import pandas as pd
@@ -146,8 +146,22 @@ class StrategyRunner:
         """
         return tuple(self._reasons.values())
 
-    def prime(self, history: pd.DataFrame) -> None:
+    def prime_bars(self, bars: Iterable[Bar]) -> None:
         """Load warmup history without emitting signals.
+
+        The smaller of the two priming primitives, and the one that composes with
+        the feed protocol: ``MarketDataFeed.backfill`` yields ``Bar``, so a live
+        process warms itself with ``runner.prime_bars(await collect(feed.backfill(
+        ...)))``. Before R10 the only entry point took a DataFrame, and the two
+        did not meet -- which was fatal rather than awkward, since
+        ``state_machine_v1`` emits nothing for its first 2,192 bars and a freshly
+        started process would have waited a year at 4h to say anything.
+        """
+        for bar in bars:
+            self.buffer.append(bar)
+
+    def prime(self, history: pd.DataFrame) -> None:
+        """Load warmup history from stored candles, without emitting signals.
 
         Rows become bars through the same ``_row_to_bar`` the replay feed uses, so
         a primed bar and a streamed bar are byte-identical for the same row --
@@ -159,8 +173,10 @@ class StrategyRunner:
         ``normalize_candle_frame``.
         """
         bar_ms = timeframe_to_millis(self.timeframe)
-        for timestamp, row in history.sort_index(kind="stable").iterrows():
-            self.buffer.append(_row_to_bar(timestamp, row, self.instrument, self.timeframe, bar_ms))
+        self.prime_bars(
+            _row_to_bar(timestamp, row, self.instrument, self.timeframe, bar_ms)
+            for timestamp, row in history.sort_index(kind="stable").iterrows()
+        )
 
     def on_event(self, event: BarEvent) -> Sequence[Signal]:
         return self.on_bar(event.bar)
