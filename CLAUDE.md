@@ -318,7 +318,22 @@ Key design decisions that span multiple files:
   replacing a fallback that is *correct* off-perp with a silent wrong answer.
   (2) **A stream cannot change its mind**: bars that stop settling raise rather
   than silently narrowing the frame, which would run a different strategy from
-  the one the earlier bars ran. (3) **Coverage is required only when the strategy
+  the one the earlier bars ran. `BarBuffer` is where that raise lives and it
+  stays there — but **a polling feed reaches it for a reason that resolves
+  itself**, so `LiveFeed` never lets it get that far. The venue serves candles
+  in real time while stored settlements advance only when a funding fetch runs,
+  so the polled window outgrows its coverage every cadence and `funding_rates`
+  drops the column entirely rather than returning it partial; raising there
+  kills a paper run over a lag. `_conform_funding` therefore **withholds the
+  poll** — no unfunded bar ever reaches the buffer, so the rule's claim holds —
+  warns once per stall, counts `funding_withheld_polls`, and stops advancing
+  `last_event_ms`. Nothing is lost, because the cursor advances only on an
+  emitted event. And **which frame settles the question is itself a decision**:
+  an absent column on a perp's recent tail is a lag, while an absent column over
+  its *history* is permanent (BTC's ~40 h leading gap), so `backfill` may settle
+  a stream unfunded — warning, because that is a process running `crowding`
+  neutral for its whole life — and a poll on an undecided subscription may not.
+  Off-perp there is nothing to decide and nothing to say. (3) **Coverage is required only when the strategy
   reads funding**, the same question `sweep` asks — otherwise BTC's permanent 40 h
   leading gap would make its own range unreplayable for `donchian`, which reads
   no funding-derived feature. The determinism suite now runs on **funded** frames,
