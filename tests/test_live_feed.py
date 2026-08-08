@@ -450,3 +450,46 @@ def test_a_bar_carrying_a_gap_is_still_deduplicated(frame):
     stamps = [e.bar.ts_open_ms for e in events]
 
     assert len(stamps) == len(set(stamps))
+
+
+def test_a_cold_start_asks_for_a_lookback_not_for_1970():
+    """Without a cursor the window used to open at the epoch, so the client would
+    paginate from 1970 to the present before yielding a single event. History is
+    `backfill`'s job; a first poll wants the same lookback every later one does."""
+    now = 1_700_000_000_000
+    bar_ms = 14_400_000
+    feed = LiveFeed(fetch=_Venue(pd.DataFrame(), first=0), sleep=_noop, now_ms=lambda: now)
+
+    assert feed._since_ms(SUB, bar_ms) == now - bar_ms * feed.lookback_bars
+
+
+def test_a_far_future_bound_means_no_bound_rather_than_a_crash(monkeypatch):
+    """`backfill(sub, start, 2**62)` is how a cold start says "up to now", and
+    `pd.Timestamp` raises `OutOfBoundsDatetime` past 2262 — so the sentinel has to
+    reach the client as "no upper bound"."""
+    from strategy_lab.feeds import live as live_module
+
+    seen: list[str | None] = []
+
+    class _Client:
+        def __init__(self, **kwargs):
+            pass
+
+        def fetch_ohlcv(self, *args, until=None, **kwargs):
+            seen.append(until)
+            return pd.DataFrame()
+
+    monkeypatch.setattr("strategy_lab.market_data.binance.CryptoOhlcvClient", _Client)
+    monkeypatch.setattr(
+        "strategy_lab.backtests.funding_frame.with_funding_column",
+        lambda identity, frame, **kwargs: (frame, None),
+    )
+    identity = MarketDataIdentity(
+        exchange="binance", market_type="perp", symbol="BTC/USDT", timeframe=TIMEFRAME
+    )
+
+    live_module._fetch_recent(identity, 0, 2**62)
+    live_module._fetch_recent(identity, 0, 1_700_000_000_000)
+
+    assert seen[0] is None, "a far-future sentinel should mean no bound"
+    assert seen[1] is not None, "a real bound must still reach the client"

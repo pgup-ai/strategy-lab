@@ -56,6 +56,10 @@ def _wall_clock_ms() -> int:
 
 DEFAULT_LOOKBACK_BARS = 5
 
+# Beyond this ``pd.Timestamp`` raises rather than saturating; a bound past it is
+# a sentinel for "no bound" rather than a date anyone meant.
+_MAX_TIMESTAMP_MS = pd.Timestamp.max.value // 1_000_000
+
 # The default cadence, as a fraction of the bar being polled. See ``_interval``.
 POLLS_PER_BAR = 60
 MIN_POLL_SECONDS = 5.0
@@ -92,7 +96,12 @@ def _fetch_recent(
     # ``until`` is passed through rather than filtered locally: without it the
     # client paginates forward to the present, so a bounded backfill over a narrow
     # window far in the past would fetch years and discard nearly all of it.
-    until = None if until_ms is None else pd.Timestamp(until_ms, unit="ms", tz="UTC").isoformat()
+    # A caller's far-future sentinel means "no upper bound", not a crash:
+    # ``pd.Timestamp`` raises ``OutOfBoundsDatetime`` past 2262, and
+    # ``backfill(sub, start, 2**62)`` is exactly how a cold start says "up to now".
+    until = None if until_ms is None or until_ms > _MAX_TIMESTAMP_MS else (
+        pd.Timestamp(until_ms, unit="ms", tz="UTC").isoformat()
+    )
     frame = client.fetch_ohlcv(identity.symbol, identity.timeframe, since=since, until=until)
     frame, _ = with_funding_column(identity, frame, enabled=True, required=False)
     return frame
@@ -228,7 +237,13 @@ class LiveFeed:
         identity rule ``MarketSnapshot`` and ``ReplayFeed.frames`` key on, and for
         the same reason.
         """
-        newest = self._cursors.get(sub.candle, 0)
+        newest = self._cursors.get(sub.candle)
+        if newest is None:
+            # Cold start: without this the window opens at the epoch and the
+            # client paginates from 1970 to the present before a single event is
+            # yielded. A first poll wants the same lookback every later one does;
+            # history is ``backfill``'s job, not the poll's.
+            newest = self.now_ms()
         return max(0, newest - bar_ms * self.lookback_bars)
 
     async def backfill(self, sub: Subscription, start_ms: int, end_ms: int) -> AsyncIterator[Bar]:
