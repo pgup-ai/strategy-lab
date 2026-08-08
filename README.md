@@ -312,10 +312,15 @@ strategies at construction rather than a warmup later: `StrategyRunner` drives
 `SignalSet` and takes an optional `--exit-mode`-equivalent, `ExposureRunner`
 drives `TargetExposure` and emits a signed level.
 
-`replay` persists to `runs`/`signals` tables that only `strategy-lab migrate`
-creates — `init-db` does not. Run `migrate` once; on a brand-new database run
-`init-db` first, since `migrate` widens `market_candles` to `NUMERIC` and needs
-the table to already exist. `migrate` is idempotent and safe to re-run:
+`replay` persists to the `runs`/`signals`/`bar_reasons` tables that only
+`strategy-lab migrate` creates — `init-db` does not. `bar_reasons` is one row per bar
+past warmup for any strategy that can explain itself, carrying the state and the
+feature values behind it, which is what only this path can record: a backtest and the
+browser recompute those on demand from immutable candles.
+
+Run `migrate` once; on a brand-new database run `init-db` first, since `migrate`
+widens `market_candles` to `NUMERIC` and needs the table to already exist. `migrate`
+is idempotent and safe to re-run:
 
 ```bash
 strategy-lab init-db      # fresh database only
@@ -579,10 +584,13 @@ funding settlement; earlier bars would be charged zero carry, which reads exactl
 free carry. **`replay` supplies `crowding` too**, since `Bar` carries a funding rate and
 `ReplayFeed` attaches it through the engine's own function — so a perp replay and the
 backtest above now agree bar for bar, where before they differed on all 6,048 of them.
-Every run still records which it was, as `crowding_measured` in `config.json`. It clears
-the R0 baseline out of sample on risk-adjusted terms — Sharpe +0.896
-against `donchian` 40/10's +0.072 over the same held-out 6,048 bars — while returning far
-less than buy-and-hold. Read
+A **backtest** records which it was as `crowding_measured` in `config.json`; a **replay**
+writes no such file and stores the per-bar `crowding` values themselves, in the
+`bar_reasons` rows it writes for every bar past warmup.
+
+`state_machine_v1` clears the R0 baseline out of sample on risk-adjusted terms — Sharpe
++0.896 against `donchian` 40/10's +0.072 over the same held-out 6,048 bars — while
+returning far less than buy-and-hold. Read
 [STRATEGIES.md](STRATEGIES.md#state_machine_v1) before quoting any of that.
 
 **There are two strategy contracts.** `SignalSet` says enter, exit and how big to *start*;
