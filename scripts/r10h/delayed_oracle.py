@@ -226,13 +226,14 @@ def main() -> int:
     )
 
     failed = False
+    exercised = {"bars", "signals", "reasons"}
 
     print("\n[1] live bars against the stored candles fetched afterwards")
     if bars_csv is None:
         print("  NOT PERFORMED: no --bars-csv log from the run.")
         print("  Reading 2 is undecidable without it: a venue revision and a")
         print("  closed-bar error both surface only as a derived difference.")
-        failed = True
+        exercised.remove("bars")
     else:
         compared, counts = _compare_bars(header, bars_csv)
         print(f"  {compared} closed bars compared")
@@ -249,6 +250,15 @@ def main() -> int:
     print("\n[3] signals")
     count, differing = _compare_signals(live_signals, replay_signals)
     print(f"  {count} live signals, {differing} differing")
+    if not count and not replay_signals:
+        # Reading 4 applied to one section rather than to the run. Over a window
+        # this short a real strategy emits nothing -- `state_machine_v1` fired
+        # 325 times in 6,048 bars -- so "0 differing" here is the absence of a
+        # comparison, not the result of one, and section [4] is what carries the
+        # gate: it compares the features and the state that *produce* signals, on
+        # every bar rather than on the rare ones that acted.
+        print("  NOT EXERCISED: neither path emitted over this window.")
+        exercised.remove("signals")
     failed = failed or bool(differing)
 
     print("\n[4] per-bar reasons")
@@ -261,12 +271,20 @@ def main() -> int:
         print("    0 differing on the state and on every feature")
     failed = failed or bool(counts) or compared == 0
 
-    print(
-        "\nREADING 1: the gate passes."
-        if not failed
-        else "\nA reading other than 1 applies -- see the counts above."
-    )
-    return 1 if failed else 0
+    if failed:
+        print("\nA reading other than 1 applies -- see the counts above.")
+        return 1
+    if exercised != {"bars", "signals", "reasons"}:
+        skipped = ", ".join(sorted({"bars", "signals", "reasons"} - exercised))
+        print(
+            f"\nREADING 1 on what ran, but NOT on everything: {skipped} was not "
+            f"exercised. Nothing below disagreed; that is a weaker claim than the "
+            f"gate, and reporting it as the gate is exactly what reading 4 warns "
+            f"about."
+        )
+        return 3
+    print("\nREADING 1: the gate passes.")
+    return 0
 
 
 if __name__ == "__main__":
