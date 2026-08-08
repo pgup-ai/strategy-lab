@@ -71,6 +71,20 @@ measured at **2,192 bars, 365 days at 4h**, before the check existed.
 `engine._exit_signals` **over the buffer** rather than reimplementing it; without
 one it emits the strategy's own exits, which is what it did before R10e.
 
+**A decision becomes a position in `engine/book.py`** (`SignalSet`) and
+`engine/exposure_book.py` (`TargetExposure`), pricing fills through
+`engine/fills.py`. Its correctness claim is that it **agrees with the
+backtest**, checked against a real `trades.csv` rather than asserted, which is
+why it was built before any live feed — a book has an oracle and a feed does
+not. Two rules a reader has to carry, both measured. **A short entry while
+long reverses without an exit signal**: one bar, two trades, both at the sell
+price. And **sizing is non-compounding in the request but clipped by cash in
+the fill** — `min(requested, balance / (price × (1 + fee)))` (M43) — so a
+doubled account still asks for the original size while a halved one gets less
+than it asks for. A book modelling only the first half diverges permanently
+after the first drawdown, which is how it was caught: one wrong size in
+nineteen trades.
+
 The event-driven flow also runs many instruments at once: `stream()` k-way
 merges every subscription into one time-ordered stream, `MarketClock`
 (`engine/market_clock.py`) groups it into `MarketSnapshot`s, and
