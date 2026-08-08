@@ -61,7 +61,9 @@ MIN_POLL_SECONDS = 5.0
 MAX_POLL_SECONDS = 300.0
 
 
-def _fetch_recent(identity: MarketDataIdentity, since_ms: int) -> pd.DataFrame:
+def _fetch_recent(
+    identity: MarketDataIdentity, since_ms: int, until_ms: int | None = None
+) -> pd.DataFrame:
     """The venue's recent candles, with a perp's stored funding attached.
 
     **The funding half is not optional.** The venue's OHLCV endpoint returns no
@@ -86,7 +88,11 @@ def _fetch_recent(identity: MarketDataIdentity, since_ms: int) -> pd.DataFrame:
         exchange_id=identity.exchange, market_type=identity.market_type
     )
     since = pd.Timestamp(since_ms, unit="ms", tz="UTC").isoformat()
-    frame = client.fetch_ohlcv(identity.symbol, identity.timeframe, since=since)
+    # ``until`` is passed through rather than filtered locally: without it the
+    # client paginates forward to the present, so a bounded backfill over a narrow
+    # window far in the past would fetch years and discard nearly all of it.
+    until = None if until_ms is None else pd.Timestamp(until_ms, unit="ms", tz="UTC").isoformat()
+    frame = client.fetch_ohlcv(identity.symbol, identity.timeframe, since=since, until=until)
     frame, _ = with_funding_column(identity, frame, enabled=True, required=False)
     return frame
 
@@ -104,7 +110,7 @@ class LiveFeed:
     name: str = "live"
     lookback_bars: int = DEFAULT_LOOKBACK_BARS
     poll_seconds: float | None = None
-    fetch: Callable[[MarketDataIdentity, int], pd.DataFrame] = _fetch_recent
+    fetch: Callable[..., pd.DataFrame] = _fetch_recent
     sleep: Callable[[float], object] = asyncio.sleep
     now_ms: Callable[[], int] = _wall_clock_ms
 
@@ -166,7 +172,8 @@ class LiveFeed:
     def _poll(self, sub: Subscription) -> list[BarEvent]:
         identity = _identity(sub)
         bar_ms = timeframe_to_millis(sub.timeframe)
-        frame = self.fetch(identity, self._since_ms(sub, bar_ms))
+        # No upper bound on a poll: it always wants everything up to now.
+        frame = self.fetch(identity, self._since_ms(sub, bar_ms), None)
         if frame is None or frame.empty:
             return []
 
@@ -228,7 +235,7 @@ class LiveFeed:
         """
         identity = _identity(sub)
         bar_ms = timeframe_to_millis(sub.timeframe)
-        frame = self.fetch(identity, start_ms)
+        frame = self.fetch(identity, start_ms, end_ms)
         if frame is None or frame.empty:
             return
         now = self.now_ms()

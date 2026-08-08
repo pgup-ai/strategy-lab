@@ -72,7 +72,7 @@ class _Venue:
         self.calls: list[int] = []
         self.stop_after: int | None = None
 
-    def __call__(self, identity, since_ms: int) -> pd.DataFrame:
+    def __call__(self, identity, since_ms: int, until_ms: int | None = None) -> pd.DataFrame:
         if self.stop_after is not None and len(self.calls) >= self.stop_after:
             raise _Stopped
         self.calls.append(since_ms)
@@ -261,7 +261,7 @@ def test_a_cold_start_primes_from_backfill_and_reaches_the_replays_state(frame):
     # A bounded historical request: every row in it closed long ago, so the
     # clock says so and none is withheld as forming.
     feed = LiveFeed(
-        fetch=lambda identity, since: long_frame.iloc[:split],
+        fetch=lambda identity, since, until=None: long_frame.iloc[:split],
         sleep=_noop,
         now_ms=lambda: 2**62,
     )
@@ -416,3 +416,21 @@ def test_a_non_positive_or_non_finite_cadence_is_refused():
     for bad in (0, -1.0, float("nan"), float("inf") * -1):
         with pytest.raises(ValueError, match="poll_seconds"):
             LiveFeed(poll_seconds=bad)
+
+
+def test_a_bounded_backfill_asks_the_venue_for_the_bound():
+    """Without `until` the client paginates forward to the present, so a narrow
+    window far in the past would fetch years and discard nearly all of it."""
+    asked: list[tuple[int, int | None]] = []
+
+    def _fetch(identity, since_ms, until_ms=None):
+        asked.append((since_ms, until_ms))
+        return pd.DataFrame()
+
+    feed = LiveFeed(fetch=_fetch, sleep=_noop)
+
+    async def _run():
+        return [bar async for bar in feed.backfill(SUB, 1_000, 2_000)]
+
+    asyncio.run(_run())
+    assert asked == [(1_000, 2_000)]
