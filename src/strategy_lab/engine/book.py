@@ -6,14 +6,22 @@ written to Postgres and nothing consumed them -- which is the gap
 ``StrategyRunner._extract`` has named since Phase 1a.
 
 **Its correctness claim is that it agrees with ``run_backtest``**, and that is
-checkable rather than asserted: ``tests/test_paper_book.py`` drives it from
-``ReplayFeed`` over a stored range and compares every trade against the
-backtest's own ``trades.csv``. Where the two could differ, the engine wins by
-definition -- see ``engine.fills`` for the pricing rules, which are derived from
-the installed vectorbt rather than chosen.
+checkable rather than asserted: ``tests/test_paper_book.py`` feeds it the same
+``SignalSet`` the engine resolved, over a stored range, and compares every closed
+trade against the backtest's own ``trades.csv``. It does **not** drive the book
+through ``ReplayFeed`` and ``StrategyRunner`` -- that the streamed and vectorized
+signals are identical is ``tests/test_replay_determinism.py``'s claim, and
+restating it here would test that suite rather than this book. Where the two
+could differ, the engine wins by definition -- see ``engine.fills`` for the
+pricing rules, which are derived from the installed vectorbt rather than chosen.
 
 Four rules carry the behaviour, and three of them are easy to get wrong:
 
+0. **Contradictory signals on one bar cancel.** An entry and an exit on the
+   same side, or both entry directions, leave the bar doing nothing -- vectorbt's
+   ``ConflictMode.Ignore`` drops *both* rather than picking a winner. Shared with
+   ``backtests.sweep`` through ``backtests.conflicts`` so the two paths cannot
+   resolve a contradictory bar differently.
 1. **A repeated same-side entry does nothing.** ``from_signals`` defaults to
    ``accumulate=False``, so a strategy signalling *enter long* on ten consecutive
    bars opens one position. A book that added to it would report a size the
@@ -41,6 +49,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 
+from strategy_lab.backtests.conflicts import resolve_conflicts
 from strategy_lab.core.types import Side, Signal
 from strategy_lab.engine.fills import (
     CostModel,
@@ -119,11 +128,27 @@ class PaperBook:
         """
         emitted: list[Fill] = []
         sides = {signal.side for signal in signals}
-
-        opening = next((side for side in sides if side in _OPENS), None)
-        closing_by_exit = any(
-            _CLOSES[side] == self._sign for side in sides if side in _CLOSES
-        ) and not self.is_flat
+        # Contradictory pairs cancel *before* anything is decided, through the
+        # engine's own rule rather than a second reading of it: a bar carrying an
+        # entry and an exit on one side, or both entry directions, does nothing.
+        # Without this the set below is also unordered, so a bar carrying both
+        # entries would have opened whichever side iteration happened to yield.
+        resolved = resolve_conflicts(
+            Side.ENTER_LONG in sides,
+            Side.EXIT_LONG in sides,
+            Side.ENTER_SHORT in sides,
+            Side.EXIT_SHORT in sides,
+        )
+        opening = (
+            Side.ENTER_LONG
+            if resolved.long_entry
+            else Side.ENTER_SHORT
+            if resolved.short_entry
+            else None
+        )
+        closing_by_exit = not self.is_flat and (
+            (resolved.long_exit and self._sign > 0) or (resolved.short_exit and self._sign < 0)
+        )
         # An opposite-side entry closes what is held without an exit signal.
         reversing = opening is not None and not self.is_flat and _OPENS[opening] != self._sign
 
@@ -131,9 +156,9 @@ class PaperBook:
             emitted.append(self._close(close=close, ts_bar_ms=ts_bar_ms))
 
         if opening is not None and self.is_flat:
-            emitted.append(
-                self._open(_OPENS[opening], close=close, ts_bar_ms=ts_bar_ms, scale=scale)
-            )
+            opened = self._open(_OPENS[opening], close=close, ts_bar_ms=ts_bar_ms, scale=scale)
+            if opened is not None:
+                emitted.append(opened)
 
         self.fills.extend(emitted)
         return tuple(emitted)
@@ -142,7 +167,7 @@ class PaperBook:
     def _sign(self) -> int:
         return 1 if self.position > 0 else -1 if self.position < 0 else 0
 
-    def _open(self, sign: int, *, close: float, ts_bar_ms: int, scale: float) -> Fill:
+    def _open(self, sign: int, *, close: float, ts_bar_ms: int, scale: float) -> Fill | None:
         direction = Direction.BUY if sign > 0 else Direction.SELL
         quantity = entry_quantity(
             close=close, cash=self.cash, position_pct=self.position_pct, scale=scale
@@ -150,9 +175,14 @@ class PaperBook:
         if direction is Direction.BUY:
             # Requested off *initial* cash, filled out of the *balance*. See the
             # class docstring: the engine does not refuse an unaffordable entry,
-            # it fills what the account can pay for.
+            # it fills what the account can pay for. Floored at zero because a
+            # balance can go negative -- a short bought back far above where it
+            # was sold -- and a negative "quantity" would settle as a credit and
+            # open the *opposite* side of the one the signal asked for.
             price = fill_price(close, direction, self.costs.slippage)
-            quantity = min(quantity, self.balance / (price * (1.0 + self.costs.fee)))
+            quantity = max(0.0, min(quantity, self.balance / (price * (1.0 + self.costs.fee))))
+        if quantity == 0.0:
+            return None
         fill = build_fill(
             ts_bar_ms=ts_bar_ms,
             direction=direction,

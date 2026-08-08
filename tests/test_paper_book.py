@@ -120,10 +120,11 @@ def test_a_fill_the_account_cannot_pay_for_is_clipped_rather_than_refused():
     assert book.position < requested, "the clip has to actually bind here"
 
 
-def test_a_target_that_does_not_move_issues_no_order():
-    """The band lives in the runner, so an unchanged *submitted* target reaching
-    the book still has to issue nothing -- applying a band here too would apply
-    it twice."""
+def test_a_target_whose_quantity_already_matches_issues_no_order():
+    """The rule is about the *held quantity*, not the target: a repeated target at
+    a different close asks for a different quantity and does trade, which is what
+    ``targetvalue`` means. The band that suppresses a repeated *target* lives in
+    the runner, and applying one here too would apply it twice."""
     book = ExposureBook(cash=CASH, position_pct=PCT, costs=COSTS)
 
     assert book.on_target(0.5, close=100.0, ts_bar_ms=0) is not None
@@ -360,3 +361,69 @@ def test_the_synthetic_probe_that_derived_the_rules_still_holds(tmp_path):
     # The reversal: the long's exit and the short's entry share a bar and a price.
     assert trades["Exit Timestamp"].iloc[1] == trades["Entry Timestamp"].iloc[2]
     assert trades["Avg Exit Price"].iloc[1] == pytest.approx(trades["Avg Entry Price"].iloc[2])
+
+
+def test_a_repeated_target_at_a_moved_price_still_rebalances():
+    """The other half of the rule above, and the reason it is not "suppress a
+    repeated target": ``from_orders(size_type="targetvalue")`` holds a currency
+    value, so the same target at half the price is twice the quantity."""
+    book = ExposureBook(cash=CASH, position_pct=PCT, costs=COSTS)
+    book.on_target(0.5, close=100.0, ts_bar_ms=0)
+    held = book.position
+
+    fill = book.on_target(0.5, close=50.0, ts_bar_ms=1)
+
+    assert fill is not None
+    assert book.position == pytest.approx(2 * held)
+
+
+@pytest.mark.parametrize(
+    ("sides", "label"),
+    [
+        ([Side.ENTER_LONG, Side.EXIT_LONG], "entry and exit on one side"),
+        ([Side.ENTER_LONG, Side.ENTER_SHORT], "both entry directions"),
+    ],
+)
+def test_contradictory_signals_on_one_bar_do_nothing(sides, label):
+    """``ConflictMode.Ignore`` drops *both* signals rather than picking a winner,
+    so the bar is a no-op -- and without this the side set is unordered, so a bar
+    carrying both entries opened whichever iteration happened to yield."""
+    book = PaperBook(cash=CASH, position_pct=PCT, costs=COSTS)
+
+    assert _signals_at(sides, 100.0, 0, book) == (), label
+    assert book.position == 0.0
+
+
+def test_a_contradictory_bar_leaves_an_open_position_alone():
+    book = PaperBook(cash=CASH, position_pct=PCT, costs=COSTS)
+    _signals_at([Side.ENTER_LONG], 100.0, 0, book)
+    held = book.position
+
+    assert _signals_at([Side.ENTER_LONG, Side.EXIT_LONG], 110.0, 1, book) == ()
+    assert book.position == held
+
+
+def test_an_account_that_cannot_pay_at_all_fills_nothing_rather_than_going_short():
+    """A balance can go negative -- a short bought back far above where it was
+    sold -- and the clip is floored at zero because a negative quantity would
+    settle as a credit and open the *opposite* side of the one requested."""
+    book = PaperBook(cash=CASH, position_pct=PCT, costs=COSTS)
+    _signals_at([Side.ENTER_SHORT], 100.0, 0, book)
+    _signals_at([Side.EXIT_SHORT], 100_000.0, 1, book)  # catastrophic buy-back
+    assert book.balance < 0
+
+    fills = _signals_at([Side.ENTER_LONG], 100.0, 2, book)
+
+    assert fills == ()
+    assert book.position == 0.0
+
+
+def test_a_negative_quantity_is_refused_where_it_can_still_be_attributed():
+    """``Fill.quantity`` is unsigned by contract; a negative one settles as a
+    credit and moves the position the wrong way, silently."""
+    from strategy_lab.engine.fills import build_fill
+
+    with pytest.raises(ValueError, match="unsigned"):
+        build_fill(
+            ts_bar_ms=0, direction=Direction.BUY, quantity=-1.0, close=100.0, costs=COSTS
+        )

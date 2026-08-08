@@ -23,7 +23,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from strategy_lab.engine.fills import CostModel, Direction, Fill, build_fill
+from strategy_lab.engine.fills import CostModel, Direction, Fill, build_fill, fill_price
 
 
 @dataclass
@@ -39,8 +39,12 @@ class ExposureBook:
     position_pct: float = 0.95
     costs: CostModel = field(default_factory=CostModel)
 
+    balance: float = field(default=0.0, init=False)
     position: float = field(default=0.0, init=False)
     fills: list[Fill] = field(default_factory=list, init=False)
+
+    def __post_init__(self) -> None:
+        self.balance = self.cash
 
     def on_target(self, target: float, *, close: float, ts_bar_ms: int) -> Fill | None:
         """Move the book to ``target``, and return the order that did it.
@@ -59,14 +63,32 @@ class ExposureBook:
             return None
 
         direction = Direction.BUY if delta > 0 else Direction.SELL
+        quantity = abs(delta)
+        if direction is Direction.BUY:
+            # The same clip ``PaperBook`` applies, and for the same reason: this
+            # book's whole claim is that it agrees with ``from_orders``, whose own
+            # module docstring says a drawdown deep enough "fills what cash
+            # covers". Measured, it does not currently bind -- 938 of 938 orders
+            # over the full 15,128-bar stored history match either way -- so this
+            # buys agreement *by construction* rather than by the data never
+            # having drawn down far enough.
+            price = fill_price(close, direction, self.costs.slippage)
+            quantity = max(0.0, min(quantity, self.balance / (price * (1.0 + self.costs.fee))))
+            if quantity == 0.0:
+                return None
         fill = build_fill(
             ts_bar_ms=ts_bar_ms,
             direction=direction,
-            quantity=abs(delta),
+            quantity=quantity,
             close=close,
             costs=self.costs,
         )
-        self.position = wanted_quantity
+        self.balance += (
+            -(fill.notional + fill.fee)
+            if direction is Direction.BUY
+            else fill.notional - fill.fee
+        )
+        self.position += quantity if direction is Direction.BUY else -quantity
         self.fills.append(fill)
         return fill
 

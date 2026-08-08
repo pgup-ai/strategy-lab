@@ -104,6 +104,12 @@ def build_fill(
     close: float,
     costs: CostModel,
 ) -> Fill:
+    if quantity < 0:
+        # ``Fill.quantity`` is unsigned by contract and ``direction`` carries the
+        # sign. A negative one settles as a credit and moves the position the
+        # wrong way, which is silent -- so it is refused where it can still be
+        # attributed to its caller.
+        raise ValueError(f"quantity must be unsigned, got {quantity!r}; direction carries the sign")
     price = fill_price(close, direction, costs.slippage)
     return Fill(
         ts_bar_ms=ts_bar_ms,

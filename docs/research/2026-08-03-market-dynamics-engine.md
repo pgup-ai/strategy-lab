@@ -2115,8 +2115,18 @@ warning describes, reached from the other side.
    `backtests/funding_frame` owns.
 3. **Market-on-close only.** The oracle cannot check a limit order, so modelling one would be
    reproducing something unverifiable.
-4. **Nothing is persisted.** What a paper run should write is a question for the phase that
-   has a live feed to write *from*.
+4. **Nothing is persisted durably.** The book keeps its fills in memory for the run and
+   writes none of them; what a paper run *should* write is a question for the phase that has a
+   live feed to write from.
+5. **Three review findings changed the code after the gate first passed**, and none moved a
+   number. Contradictory signals on one bar now cancel through `backtests.conflicts` — shared
+   with `sweep` rather than restated, since two paths resolving a contradictory bar
+   differently disagree about trades neither reports as an error. An unaffordable buy is
+   floored at zero rather than going negative and opening the opposite side. And
+   `ExposureBook` now clips to its balance the way `PaperBook` does: measured, that clip does
+   **not** bind — 938 of 938 orders over the full 15,128-bar history match either way — so it
+   buys agreement *by construction* rather than by the data never having drawn down far
+   enough.
 
 ---
 
