@@ -851,8 +851,17 @@ def replay_command(
     instrument = InstrumentId(exchange, market_type, symbol)
     subscription = Subscription(instrument, timeframe)
 
+    # The same question ``sweep`` asks, asked the same way: the strategy declares
+    # its own inputs, so a run that *needs* funding refuses an uncovered range the
+    # way a backtest of it would, and one that does not keeps replaying BTC's
+    # permanent leading gap as it always has.
+    needs_funding = "crowding" in getattr(strategy, "features", ())
     feed = ReplayFeed.from_database(
-        [subscription], start=start, end=end, limit_bars=limit_bars
+        [subscription],
+        start=start,
+        end=end,
+        limit_bars=limit_bars,
+        required=needs_funding,
     )
     runner = StrategyRunner(
         strategy=strategy, instrument=instrument, timeframe=timeframe, clock=SimClock()

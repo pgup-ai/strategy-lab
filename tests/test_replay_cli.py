@@ -150,7 +150,45 @@ def test_replay_builds_the_subscription_from_the_options(monkeypatch, feed_calls
     assert subscription.instrument.market_type == "spot"
     assert subscription.instrument.symbol == "ETH/USDT"
     assert subscription.timeframe == "1h"
-    assert call["kwargs"] == {"start": "2024-01-01", "end": "2024-02-01", "limit_bars": 500}
+    assert call["kwargs"] == {
+        "start": "2024-01-01",
+        "end": "2024-02-01",
+        "limit_bars": 500,
+        # ``_EveryBar`` declares no ``features``, so it reads no funding-derived
+        # one and an uncovered perp must not refuse for it -- BTC's permanent 40 h
+        # leading gap would otherwise make its own range unreplayable.
+        "required": False,
+    }
+
+
+def test_a_crowding_reading_strategy_requires_its_funding_to_be_covered(
+    monkeypatch, feed_calls
+):
+    """The same question ``sweep`` asks, asked the same way. A strategy that reads
+    ``crowding`` on an uncovered perp range would fall back to neutral and run a
+    different strategy than the backtest of that range does (M20), so the feed is
+    told to refuse instead."""
+
+    @dataclass(frozen=True)
+    class _ReadsCrowding:
+        name: str = "reads_crowding"
+        version: str = "1.0.0"
+        warmup_bars: int = 3
+        features: tuple[str, ...] = ("energy", "crowding")
+
+        def generate_signals(self, df: pd.DataFrame) -> SignalSet:
+            flat = pd.Series(False, index=df.index)
+            return SignalSet(flat, flat, flat, flat)
+
+    use_strategy(monkeypatch, _ReadsCrowding())
+    result = runner.invoke(
+        cli.app,
+        ["replay", "--symbol", "BTC/USDT", "--market-type", "perp", "--no-persist"],
+    )
+
+    assert result.exit_code == 0, result.output
+    [call] = feed_calls
+    assert call["kwargs"]["required"] is True
 
 
 def test_replay_persists_the_run_header_and_every_signal(
