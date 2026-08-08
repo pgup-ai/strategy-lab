@@ -32,6 +32,7 @@ values, and ``replaced_duplicates`` counts it.
 from __future__ import annotations
 
 import asyncio
+import math
 import time
 from collections.abc import AsyncIterator, Callable, Sequence
 from dataclasses import dataclass, field, replace
@@ -114,6 +115,12 @@ class LiveFeed:
     sleep: Callable[[float], object] = asyncio.sleep
     now_ms: Callable[[], int] = _wall_clock_ms
 
+    # Never pruned, deliberately. Pruning below the fetch watermark was tried and
+    # reverted: it assumes the venue returns nothing older than it was asked for,
+    # and a venue that over-returns would then re-emit pruned bars on every poll
+    # -- a correctness property traded for a non-problem. Measured, a key is ~330
+    # bytes: 0.6 MB/year at 4h and 9.5 MB/year at 15m, for a process meant to be
+    # restarted rather than run forever.
     _seen: set[tuple[str, int, bool, tuple]] = field(default_factory=set, init=False)
     _cursors: dict[CandleId, int] = field(default_factory=dict, init=False, repr=False)
     _last_event_ms: int | None = field(default=None, init=False, repr=False)
@@ -122,9 +129,15 @@ class LiveFeed:
         # A knob an operator sets by hand, unlike the values flowing through
         # `build_fill`: zero busy-loops, and a NaN compares false against every
         # bound so it would silently become "as fast as fetch returns".
-        if self.poll_seconds is not None and not self.poll_seconds > 0:
+        if self.poll_seconds is not None and not (
+            math.isfinite(self.poll_seconds) and self.poll_seconds > 0
+        ):
+            # ``> 0`` alone lets ``inf`` through, and a feed that sleeps forever
+            # has stopped without saying so -- the quietest way for a live
+            # process to fail.
             raise ValueError(
-                f"poll_seconds must be a positive number of seconds, got {self.poll_seconds!r}"
+                f"poll_seconds must be a finite positive number of seconds, "
+                f"got {self.poll_seconds!r}"
             )
 
     async def stream(self, subs: Sequence[Subscription]) -> AsyncIterator[BarEvent]:
@@ -254,13 +267,22 @@ class LiveFeed:
         return FeedHealth(connected=True, last_event_ms=self._last_event_ms)
 
 
-def _values(row: pd.Series) -> tuple[float, ...]:
+def _values(row: pd.Series) -> tuple[float | None, ...]:
     """What a bar says, for deciding whether a re-read is the same bar.
 
     Rounded, because a venue re-serving an unchanged bar can still round the last
     digit differently between responses and that is not a correction.
+
+    ``NaN`` becomes ``None`` because ``NaN != NaN``: left as a float, a bar
+    carrying one would never match its own earlier key, so it would re-emit on
+    every poll and grow ``_seen`` without bound -- a gap in the data turning into
+    a leak and a signal storm.
     """
-    return tuple(round(float(row[name]), 10) for name in ("open", "high", "low", "close", "volume"))
+    values = []
+    for name in ("open", "high", "low", "close", "volume"):
+        value = float(row[name])
+        values.append(None if value != value else round(value, 10))
+    return tuple(values)
 
 
 def _identity(sub: Subscription) -> MarketDataIdentity:

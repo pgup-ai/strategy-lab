@@ -413,7 +413,9 @@ def test_the_real_fetch_attaches_a_perps_funding(monkeypatch):
 def test_a_non_positive_or_non_finite_cadence_is_refused():
     """An operator sets this by hand: zero busy-loops, and a NaN compares false
     against every bound so it would silently mean "as fast as fetch returns"."""
-    for bad in (0, -1.0, float("nan"), float("inf") * -1):
+    # `+inf` is the one a `> 0` guard lets through, and a feed that sleeps
+    # forever has stopped without saying so.
+    for bad in (0, -1.0, float("nan"), float("inf"), float("-inf")):
         with pytest.raises(ValueError, match="poll_seconds"):
             LiveFeed(poll_seconds=bad)
 
@@ -434,3 +436,17 @@ def test_a_bounded_backfill_asks_the_venue_for_the_bound():
 
     asyncio.run(_run())
     assert asked == [(1_000, 2_000)]
+
+
+def test_a_bar_carrying_a_gap_is_still_deduplicated(frame):
+    """`NaN != NaN`, so a NaN left in the dedup key would never match its own
+    earlier entry: the bar would re-emit on every poll and `_seen` would grow
+    without bound — a gap in the data turning into a leak and a signal storm."""
+    holed = frame.copy()
+    holed.iloc[2, holed.columns.get_loc("volume")] = float("nan")
+    feed = LiveFeed(fetch=_Venue(holed, first=10, step=0), sleep=_noop)
+
+    events = drain(feed, [SUB], polls=4)
+    stamps = [e.bar.ts_open_ms for e in events]
+
+    assert len(stamps) == len(set(stamps))
