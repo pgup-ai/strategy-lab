@@ -7,9 +7,9 @@ from decimal import Decimal
 
 import pandas as pd
 
-from strategy_lab.features.flow import FUNDING_COLUMN
 from strategy_lab.core.types import Bar, BarEvent, CandleId, InstrumentId
 from strategy_lab.feeds.base import FeedHealth, Subscription
+from strategy_lab.features.flow import FUNDING_COLUMN
 from strategy_lab.timeframes import timeframe_to_millis
 
 

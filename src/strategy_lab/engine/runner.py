@@ -9,6 +9,7 @@ from strategy_lab.backtests.engine import ExitMode, _exit_signals
 from strategy_lab.core.clock import Clock
 from strategy_lab.core.types import Bar, BarEvent, BarReason, InstrumentId, Side, Signal
 from strategy_lab.engine.context import BarBuffer
+from strategy_lab.engine.reasons import reason_for
 from strategy_lab.feeds.replay import _row_to_bar
 from strategy_lab.strategies.base import SignalSet, Strategy, require_warmup_bars
 from strategy_lab.timeframes import timeframe_to_millis
@@ -89,7 +90,7 @@ class StrategyRunner:
     ``--limit-bars`` exists on ``replay``.
 
     It also accumulates a :class:`BarReason` per bar for any strategy that can
-    explain itself -- see :meth:`_reason_for` -- which costs a second pass over
+    explain itself -- see ``engine.reasons.reason_for`` -- which costs a second pass over
     the buffer, because the feature frame and the state walk are recomputed
     rather than read out of the ``SignalSet``, which carries neither. Measured on
     ``state_machine_v1`` over 1,000 emitting bars of BTC/USDT perp 4h: **6.8 s
@@ -141,7 +142,7 @@ class StrategyRunner:
         """One reason per bar seen past warmup, in bar order.
 
         Empty for a strategy that cannot explain itself, and that is a claim
-        rather than an oversight -- see :meth:`_reason_for`.
+        rather than an oversight -- see ``engine.reasons.reason_for``.
         """
         return tuple(self._reasons.values())
 
@@ -193,64 +194,17 @@ class StrategyRunner:
 
         signal_set = self.strategy.generate_signals(self.buffer.frame())
         if self.record_reasons:
-            reason = self._reason_for(bar)
+            reason = reason_for(
+                self.strategy,
+                bar=bar,
+                frame=self.buffer.frame(),
+                instrument=self.instrument,
+                timeframe=self.timeframe,
+                clock=self.clock,
+            )
             if reason is not None:
                 self._reasons[bar.ts_open_ms] = reason
         return self._extract(signal_set, bar)
-
-    def _reason_for(self, bar: Bar) -> BarReason | None:
-        """The state and feature values behind this bar, for a strategy that has them.
-
-        Found by ``getattr(strategy, "feature_frame"/"machine")`` -- the same
-        introspection ``api/analysis._why_layer`` uses, deliberately rather than
-        matching a list of state machines, so a strategy that grows a
-        ``feature_frame`` later is explained on both paths without anyone editing
-        either. A strategy with neither returns ``None`` and writes **no** rows:
-        an absent explanation and an empty one are different claims, and the four
-        original strategies genuinely have nothing to say here.
-
-        Recomputed rather than read off the ``generate_signals`` call above,
-        because a ``SignalSet`` carries entries, exits and a size and none of the
-        state behind them. The two are still one computation in the sense that
-        matters -- the same frame, the same feature functions, the same machine,
-        and the last row of each -- and the only alternative is a strategy-side
-        return-value change, which would touch every strategy in the repo to
-        serve the one path that cannot recompute.
-
-        **A raise here is fatal to the bar, deliberately, and it costs a signal
-        the strategy had already produced.** ``generate_signals`` has returned by
-        the time this runs, so catching would let the decision through and drop
-        only its explanation. It is not caught because this calls the strategy's
-        *own* ``feature_frame`` and ``machine``: for a state machine, a raise
-        means it could not compute the state it trades on, and a book that does
-        not know its own state should stop rather than trade on the half of the
-        computation that happened to succeed. That is the rule ``Crowding``
-        already follows by raising instead of returning a neutral 0.5. A caller
-        that wants signals without explanations has ``record_reasons=False``
-        rather than a swallowed exception. **Worth revisiting when a live feed
-        exists** -- losing a live decision to a diagnostic failure is a different
-        trade-off from losing a replayed one, and this path is replay-only today.
-        """
-        feature_frame = getattr(self.strategy, "feature_frame", None)
-        machine = getattr(self.strategy, "machine", None)
-        if feature_frame is None or machine is None:
-            return None
-
-        frame, _ = feature_frame(self.buffer.frame())
-        # The machine answers on every bar, warmup included: an unmeasurable row
-        # is a failure to it rather than a gap, so there is no missing state.
-        state = machine.run(frame).iloc[-1]
-        return BarReason(
-            instrument=self.instrument,
-            timeframe=self.timeframe,
-            strategy_id=self.strategy.name,
-            strategy_version=self.strategy.version,
-            ts_bar_ms=bar.ts_open_ms,
-            ts_emit_ms=self.clock.now_ms(),
-            bar_is_closed=bar.is_closed,
-            state=str(state.value),
-            features={str(name): _last_float(frame[name]) for name in frame.columns},
-        )
 
     def _sides(self, signal_set: SignalSet) -> dict[str, pd.Series]:
         """The four side series this bar is read from, after the exit mode.

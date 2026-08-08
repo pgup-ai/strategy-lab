@@ -7,8 +7,8 @@ import pandas as pd
 import pytest
 
 from strategy_lab.core.types import Bar, InstrumentId
-from strategy_lab.features.flow import FUNDING_COLUMN
 from strategy_lab.engine.context import BarBuffer
+from strategy_lab.features.flow import FUNDING_COLUMN
 from strategy_lab.feeds.replay import _row_to_bar
 from tests.conftest import synthetic_ohlcv
 

@@ -40,13 +40,12 @@ _SIDES = (
     ("short_exits", Side.EXIT_SHORT),
 )
 
-# One per class of exit ownership, which is what the parity claim ranges over:
-# a strategy the engine exits for, one that owns its own exits, and one that
-# provides none at all -- the case R10d measured at 7,331 differing bars.
+# One per class of exit ownership: a pass-through mode, the engine adding exits
+# on top of a strategy's own, the 984-bar case, and a strategy that owns all of
+# its exits. The one that provides *none* has its own test below.
 PARITY = [
     ("donchian", ExitMode.OPPOSITE_SIGNAL_ONLY),
     ("donchian", ExitMode.CONTINUATION_FAILURE),
-    ("tsmom", ExitMode.CONTINUATION_FAILURE),
     ("turnaround_v1", ExitMode.CONTINUATION_FAILURE),
     ("trend_rider_v1_deepseek_v4_pro", ExitMode.OPPOSITE_SIGNAL_ONLY),
 ]
