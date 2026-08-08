@@ -154,6 +154,7 @@ def test_replay_builds_the_subscription_from_the_options(monkeypatch, feed_calls
         "start": "2024-01-01",
         "end": "2024-02-01",
         "limit_bars": 500,
+        "funding": True,
         # ``_EveryBar`` declares no ``features``, so it reads no funding-derived
         # one and an uncovered perp must not refuse for it -- BTC's permanent 40 h
         # leading gap would otherwise make its own range unreplayable.
@@ -324,3 +325,37 @@ def test_unknown_strategy_exits_non_zero(feed_calls):
     assert result.exit_code != 0
     assert isinstance(result.exception, ValueError)
     assert "does_not_exist" in str(result.exception)
+
+
+def test_an_uncovered_funding_range_is_a_clean_error_rather_than_a_traceback(
+    monkeypatch, feed_calls
+):
+    """``backtest`` and ``sweep`` route the guard's refusal through
+    ``typer.BadParameter``; before R10f ``replay`` could not raise it at all, and
+    passing ``required`` without the translation would have made the first perp
+    range with a leading gap exit on a traceback."""
+    from strategy_lab.backtests.funding_frame import FundingUnavailable
+
+    def refuse(cls, subscriptions, **kwargs):
+        raise FundingUnavailable("does not cover ...\nstrategy-lab fetch-funding --symbol BTC/USDT")
+
+    monkeypatch.setattr(ReplayFeed, "from_database", classmethod(refuse))
+    use_strategy(monkeypatch, _Silent())
+
+    result = runner.invoke(cli.app, ["replay", "--no-persist"])
+
+    assert result.exit_code != 0
+    assert "fetch-funding" in result.output
+    assert "Traceback" not in result.output
+
+
+def test_no_funding_is_reachable_from_the_command(monkeypatch, feed_calls):
+    """The documented fallback -- no column, crowding neutral, recorded as such --
+    had no way to be asked for until this flag existed."""
+    use_strategy(monkeypatch, _Silent())
+
+    result = runner.invoke(cli.app, ["replay", "--no-funding", "--no-persist"])
+
+    assert result.exit_code == 0, result.output
+    [call] = feed_calls
+    assert call["kwargs"]["funding"] is False

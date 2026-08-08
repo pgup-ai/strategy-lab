@@ -207,3 +207,18 @@ def test_a_redelivered_bar_replaces_its_funding_with_the_corrected_copy():
 
     assert list(buffer.frame()[FUNDING_COLUMN]) == [0.0009]
     assert buffer.replaced_duplicates == 1
+
+
+def test_a_stale_bar_is_dropped_before_its_funding_is_judged():
+    """A stale reconnect bar never joins the history, so its funding cannot make
+    the *frame* inconsistent -- and raising on one would turn a feed pathology
+    this class exists to absorb into a crash that stops the runner."""
+    buffer = BarBuffer()
+    buffer.append(_bar(1_000, funding="0.0001"))
+    buffer.append(_bar(2_000, funding="0.0002"))
+
+    buffer.append(_bar(500))  # older than the newest, and carries no funding
+
+    assert buffer.dropped_out_of_order == 1
+    assert len(buffer) == 2
+    assert list(buffer.frame()[FUNDING_COLUMN]) == [0.0001, 0.0002]

@@ -54,18 +54,22 @@ class BarBuffer:
 
     def append(self, bar: Bar) -> None:
         timestamp = pd.Timestamp(bar.ts_open_ms, unit="ms", tz="UTC")
+
+        # Discarded before validated, deliberately: a stale bar never joins the
+        # history, so its funding cannot make the *frame* inconsistent, and
+        # raising on one would turn a feed pathology this class exists to absorb
+        # into a crash.
+        if self._timestamps and timestamp < self._timestamps[-1]:
+            self.dropped_out_of_order += 1
+            return  # stale replay after a reconnect
+
         self._require_consistent_funding(bar)
 
-        if self._timestamps:
-            last = self._timestamps[-1]
-            if timestamp < last:
-                self.dropped_out_of_order += 1
-                return  # stale replay after a reconnect
-            if timestamp == last:
-                self._write(-1, bar)
-                self.replaced_duplicates += 1
-                self._frame = None
-                return
+        if self._timestamps and timestamp == self._timestamps[-1]:
+            self._write(-1, bar)
+            self.replaced_duplicates += 1
+            self._frame = None
+            return
 
         self._timestamps.append(timestamp)
         for name in _COLUMNS:

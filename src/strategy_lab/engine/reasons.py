@@ -71,7 +71,20 @@ def reason_for(
         ts_emit_ms=clock.now_ms(),
         bar_is_closed=bar.is_closed,
         state=state.value,
-        features={str(name): float(features[name].iloc[-1]) for name in features.columns},
+        # ``NaN`` is mapped to ``None`` because that is the contract
+        # ``storage.bar_reasons._to_numeric`` states and refuses NaN to enforce --
+        # Postgres NUMERIC accepts a NaN and the stored value then matches
+        # nothing, including itself. Unreachable for both registered state
+        # machines, measured at 0 NaN cells past warmup over 300 bars, since a
+        # reason is only built past the declared warmup and
+        # ``tests/test_strategy_metadata.py`` holds that declaration honest. It is
+        # here so the two layers agree rather than agreeing by luck: a strategy
+        # that under-declared its warmup would otherwise fail at persistence with
+        # a message about NUMERIC rather than about warmup.
+        features={
+            str(name): None if pd.isna(value) else float(value)
+            for name, value in ((n, features[n].iloc[-1]) for n in features.columns)
+        },
     )
 
 

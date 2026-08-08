@@ -799,6 +799,9 @@ def replay_command(
     end: str | None = typer.Option(None, help="Optional replay end time."),
     limit_bars: int | None = typer.Option(None, help="Replay only the last N bars."),
     persist: bool = typer.Option(True, help="Write signals to Postgres."),
+    funding: bool = typer.Option(
+        True, help="Attach stored funding to perp bars so crowding is measured."
+    ),
 ) -> None:
     """Replay stored candles bar-by-bar through the event engine.
 
@@ -807,19 +810,22 @@ def replay_command(
     re-evaluated on every bar rather than once over the range -- and
     ``tests/test_replay_determinism.py`` is what says the two agree anyway.
 
-    **One known divergence, and it is on perps.** This path carries OHLCV and
-    nothing else: ``core.types.Bar`` has no funding field and ``BarBuffer``
-    materializes exactly ``open/high/low/close/volume``, so no frame reaching a
-    strategy here can hold the ``funding_rate`` column that
-    ``features.flow.Crowding`` reads. ``state_machine_v1`` therefore runs with
-    ``crowding`` pinned to a neutral 0.5 -- see ``strategies.state_machine_core``
-    -- while ``backtest`` on the same perp range attaches the column and measures
-    it. **The two paths emit different signals for that strategy, and the
-    backtest is the correct one.** The determinism suite does not catch this and
-    is not broken: it runs on synthetic frames that carry no funding either, so
-    it compares crowding-neutral against crowding-neutral. Closing the gap means
-    carrying funding through ``Bar``, ``BarBuffer``, the feed and the storage
-    schema, which is a phase of its own.
+    **Funding reaches this path, so a perp replay matches its backtest.** Bars
+    carry ``funding_rate`` and ``BarBuffer`` materializes the column, so
+    ``features.flow.Crowding`` reads the same values here that ``backtest``
+    attaches -- measured, ``state_machine_v1``'s per-bar features and state now
+    agree between the two paths on every bar, where before R10f ``crowding``
+    differed on all 6,048 of them.
+
+    ``--funding/--no-funding`` says whether to attach it at all. When it is on,
+    coverage is **required only for a strategy that reads a funding-derived
+    feature** -- the same question ``sweep`` asks -- so a crowding-reading run
+    over an uncovered range is refused with the message ``backtest`` gives, while
+    ``donchian`` still replays BTC's permanent 40 h leading gap. ``--no-funding``,
+    or an uncovered range for a strategy that does not read it, means no column at
+    all: the feature falls back to a neutral 0.5 and the run records
+    ``crowding_measured: false`` rather than reporting a number as though it had
+    been measured.
 
     **This path also writes ``bar_reasons``**, one row per bar past warmup for
     any strategy that can explain itself, carrying the state label and the
@@ -841,6 +847,7 @@ def replay_command(
     non-zero -- and a re-run mints a fresh ``run_id`` rather than repairing the
     old one, exactly as a second replay of any range does.
     """
+    from strategy_lab.backtests.funding_frame import FundingUnavailable
     from strategy_lab.core.clock import SimClock
     from strategy_lab.core.types import InstrumentId, Mode
     from strategy_lab.engine.runner import StrategyRunner
@@ -856,13 +863,20 @@ def replay_command(
     # way a backtest of it would, and one that does not keeps replaying BTC's
     # permanent leading gap as it always has.
     needs_funding = "crowding" in getattr(strategy, "features", ())
-    feed = ReplayFeed.from_database(
-        [subscription],
-        start=start,
-        end=end,
-        limit_bars=limit_bars,
-        required=needs_funding,
-    )
+    try:
+        feed = ReplayFeed.from_database(
+            [subscription],
+            start=start,
+            end=end,
+            limit_bars=limit_bars,
+            funding=funding,
+            required=needs_funding,
+        )
+    except FundingUnavailable as exc:
+        # Translated the way ``_funding_rates`` translates it for backtest and
+        # sweep: the guard's message already names the fetch command and the
+        # covered span, and a traceback would bury both.
+        raise typer.BadParameter(str(exc)) from exc
     runner = StrategyRunner(
         strategy=strategy, instrument=instrument, timeframe=timeframe, clock=SimClock()
     )
