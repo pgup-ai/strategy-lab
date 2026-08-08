@@ -12,16 +12,15 @@ bar that *opens* a position and never again -- see ``strategies.exposure`` for
 what R2 measured. The state on the entry bar therefore picks the size for the
 whole trade; a later state can close the position but cannot scale it.
 
-A second: **this is the one strategy whose ``backtest`` and ``replay`` signals
-differ, and only on perps.** ``crowding`` needs a ``funding_rate`` column;
-``backtest`` and ``sweep`` attach one on a perp, and the event path cannot --
-``core.types.Bar`` carries no funding and ``BarBuffer`` materializes OHLCV only.
-So a replay of a perp range runs with ``crowding`` at the neutral 0.5 and emits
-signals a backtest of the same range does not. The published figures are the
-backtest's. ``tests/test_replay_determinism.py`` passes for this strategy
-because its synthetic frames carry no funding on either side, which is a real
-limit of that suite rather than a reason to doubt this note; the fix is to carry
-funding through the event path, not to weaken the suite.
+A second: **this was the one strategy whose ``backtest`` and ``replay`` signals
+differed, and R10f closed it.** ``crowding`` needs a ``funding_rate`` column,
+which the event path could not carry until ``Bar`` gained a funding field -- so a
+perp replay ran with ``crowding`` at a neutral 0.5 and emitted signals a backtest
+of the same range did not, measured at 6,048 of 6,048 bars. Both paths now read
+the same values and the diff is 0 on every feature and on the state. The suite
+that could not see it now can: ``tests/test_replay_determinism.py`` runs on
+funded frames, and a mutation there proves it fails when funding is stripped from
+one side.
 """
 
 from __future__ import annotations

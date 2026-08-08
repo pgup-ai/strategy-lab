@@ -10,6 +10,15 @@ the check that the assumption actually holds.
 
 A failure here is a bug in the engine or the strategy, never a reason to relax
 the comparison: the whole point of the equality is that it is exact.
+
+**The frames carry funding, and that is census item (e) closed.** Until R10f they
+did not, so a funding-reading strategy ran ``crowding`` at ``NEUTRAL_CROWDING`` on
+*both* sides and this suite proved crowding-neutral equals crowding-neutral --
+structurally incapable of seeing the one difference that existed (M20, measured
+by R10a at 6,048 of 6,048 bars). A funded frame is what gives the equality
+something to be wrong about, and
+``test_the_comparison_can_see_a_crowding_difference`` is the mutation that proves
+it rather than assuming it.
 """
 
 from __future__ import annotations
@@ -25,8 +34,9 @@ from strategy_lab.engine import runner as runner_module
 from strategy_lab.engine.runner import StrategyRunner
 from strategy_lab.feeds.base import Subscription
 from strategy_lab.feeds.replay import ReplayFeed
+from strategy_lab.features.flow import FUNDING_COLUMN
 from strategy_lab.strategies.registry import get_strategy, list_strategies
-from tests.conftest import synthetic_ohlcv
+from tests.conftest import synthetic_ohlcv_with_funding
 
 INSTRUMENT = InstrumentId("binance", "perp", "BTC/USDT")
 SUB = Subscription(INSTRUMENT, "15m")
@@ -69,7 +79,7 @@ MIN_SIGNALS = 10
 
 
 def frame_for(strategy, span: int) -> pd.DataFrame:
-    return synthetic_ohlcv(n=strategy.warmup_bars + span)
+    return synthetic_ohlcv_with_funding(n=strategy.warmup_bars + span)
 
 
 # Declared independently of the runner so this stays an oracle rather than a
@@ -194,7 +204,9 @@ def test_a_primed_runner_agrees_with_the_backtest_it_started_late_for(name):
     declaring a bigger number here.
     """
     strategy = get_strategy(name)
-    df = synthetic_ohlcv(n=PRIME_OFFSET + strategy.warmup_bars + REPEAT_SPAN, seed=PRIME_SEED)
+    df = synthetic_ohlcv_with_funding(
+        n=PRIME_OFFSET + strategy.warmup_bars + REPEAT_SPAN, seed=PRIME_SEED
+    )
     first_streamed = PRIME_OFFSET + strategy.warmup_bars
 
     runner = StrategyRunner(
@@ -239,7 +251,7 @@ def test_the_determinism_check_can_fail():
             return SignalSet(longs, flat, flat, flat)
 
     strategy = _Cheat()
-    df = synthetic_ohlcv(n=200)
+    df = synthetic_ohlcv_with_funding(n=200)
     assert vectorized_signals(strategy, df), "the cheat must fire at least once"
     assert streamed_signals(strategy, df) != vectorized_signals(strategy, df)
 
@@ -292,3 +304,33 @@ def test_streaming_matches_vectorized_on_real_stored_candles():
         f"{strategy.warmup_bars}; the equality would be vacuous"
     )
     assert asyncio.run(_run()) == expected
+
+
+def test_the_comparison_can_see_a_crowding_difference():
+    """Census item (e), closed by mutation rather than by assertion.
+
+    Before R10f these frames carried no funding, so a funding-reading strategy ran
+    ``crowding`` at ``NEUTRAL_CROWDING`` on *both* sides and every equality above
+    was crowding-neutral against crowding-neutral -- true, and blind to the only
+    difference that existed. A funded frame is only an improvement if the suite
+    can now *fail* on that difference, so this strips funding from the streamed
+    side alone and asserts the signals move.
+
+    ``state_machine_v1`` is the subject because it is the one registered strategy
+    that reads a funding-derived feature; if that ever stops being true this test
+    should be pointed at whichever does.
+    """
+    strategy = get_strategy("state_machine_v1")
+    assert "crowding" in getattr(strategy, "features", ()), (
+        "state_machine_v1 no longer reads crowding; this test is measuring nothing"
+    )
+    df = frame_for(strategy, span=STREAM_SPAN)
+    assert FUNDING_COLUMN in df.columns, "the frame carries no funding to strip"
+
+    funded = streamed_signals(strategy, df)
+    starved = streamed_signals(strategy, df.drop(columns=[FUNDING_COLUMN]))
+
+    assert len(funded) >= MIN_SIGNALS
+    assert funded != starved, (
+        "removing funding changed nothing, so this suite still cannot see census item (a)"
+    )

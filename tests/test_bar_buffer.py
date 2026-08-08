@@ -4,9 +4,11 @@ from dataclasses import replace
 from decimal import Decimal
 
 import pandas as pd
+import pytest
 
-from strategy_lab.core.types import InstrumentId
+from strategy_lab.core.types import Bar, InstrumentId
 from strategy_lab.engine.context import BarBuffer
+from strategy_lab.features.flow import FUNDING_COLUMN
 from strategy_lab.feeds.replay import _row_to_bar
 from tests.conftest import synthetic_ohlcv
 
@@ -130,3 +132,93 @@ def test_replacing_a_bar_invalidates_the_cached_frame():
 
     assert fresh is not stale
     assert fresh["close"].iloc[-1] == 12345.0
+
+
+# --------------------------------------------------------------------------
+# Funding, and why the column's *presence* is the claim (R10f).
+# --------------------------------------------------------------------------
+
+
+def _bar(ts_open_ms: int, *, funding=None, close="100") -> Bar:
+    return Bar(
+        instrument=InstrumentId("binance", "perp", "BTC/USDT"),
+        timeframe="4h",
+        ts_open_ms=ts_open_ms,
+        ts_close_ms=ts_open_ms + 1,
+        open=Decimal(close),
+        high=Decimal(close),
+        low=Decimal(close),
+        close=Decimal(close),
+        volume=Decimal("1"),
+        is_closed=True,
+        funding_rate=None if funding is None else Decimal(funding),
+    )
+
+
+def test_bars_that_settle_nothing_produce_no_funding_column():
+    """The load-bearing half. ``build_feature_frame`` decides whether crowding is
+    real with ``FUNDING_COLUMN in df.columns``, so an always-present NaN column
+    would report ``crowding_measured=True`` on a spot frame and feed the feature
+    garbage -- replacing a fallback that is *correct* off-perp with a silent wrong
+    answer."""
+    buffer = BarBuffer()
+    buffer.append(_bar(0))
+    buffer.append(_bar(1_000))
+
+    assert FUNDING_COLUMN not in buffer.frame().columns
+    assert buffer.carries_funding is False
+
+
+def test_bars_that_settle_carry_the_rate_into_the_frame():
+    buffer = BarBuffer()
+    buffer.append(_bar(0, funding="0.0001"))
+    buffer.append(_bar(1_000, funding="0"))
+
+    frame = buffer.frame()
+    assert buffer.carries_funding is True
+    assert list(frame[FUNDING_COLUMN]) == [0.0001, 0.0]
+
+
+def test_a_stream_that_stops_settling_is_refused_rather_than_silently_narrowed():
+    """Dropping the column mid-run would run a *different strategy* from the one
+    the earlier bars ran -- M20 in a feed rather than in a flag."""
+    buffer = BarBuffer()
+    buffer.append(_bar(0, funding="0.0001"))
+
+    with pytest.raises(ValueError, match="changes its mind"):
+        buffer.append(_bar(1_000))
+
+
+def test_a_stream_that_starts_settling_midway_is_refused_too():
+    buffer = BarBuffer()
+    buffer.append(_bar(0))
+
+    with pytest.raises(ValueError, match="changes its mind"):
+        buffer.append(_bar(1_000, funding="0.0001"))
+
+
+def test_a_redelivered_bar_replaces_its_funding_with_the_corrected_copy():
+    """The same last-wins rule the prices already follow: a redelivered bar is the
+    corrected one, and leaving its old funding behind would pair a corrected price
+    with a stale rate."""
+    buffer = BarBuffer()
+    buffer.append(_bar(0, funding="0.0001"))
+    buffer.append(_bar(0, funding="0.0009"))
+
+    assert list(buffer.frame()[FUNDING_COLUMN]) == [0.0009]
+    assert buffer.replaced_duplicates == 1
+
+
+def test_a_stale_bar_is_dropped_before_its_funding_is_judged():
+    """A stale reconnect bar never joins the history, so its funding cannot make
+    the *frame* inconsistent -- and raising on one would turn a feed pathology
+    this class exists to absorb into a crash that stops the runner."""
+    buffer = BarBuffer()
+    buffer.append(_bar(1_000, funding="0.0001"))
+    buffer.append(_bar(2_000, funding="0.0002"))
+
+    buffer.append(_bar(500))  # older than the newest, and carries no funding
+
+    assert buffer.dropped_out_of_order == 1
+    assert len(buffer) == 2
+    assert list(buffer.frame()[FUNDING_COLUMN]) == [0.0001, 0.0002]

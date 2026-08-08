@@ -58,6 +58,19 @@ runner or to strategy code. See
 [the Phase 1a design doc](docs/design/2026-08-02-realtime-trading-framework.md)
 for the full rationale.
 
+**There is one runner per strategy contract, and each refuses the other's
+strategies at construction.** `StrategyRunner` drives `SignalSet`;
+`ExposureRunner` (`engine/exposure_runner.py`) drives `TargetExposure` and emits
+`ExposureSignal`. Two classes rather than one dispatching on contract, for the
+reason there are three registries — a shared class runs both and says nothing
+when one half breaks. **The refusal is at construction rather than first use**
+(M40): `on_bar` returns before touching the strategy while the buffer is inside
+warmup, so a contract mismatch is invisible for exactly as long as the warmup —
+measured at **2,192 bars, 365 days at 4h**, before the check existed.
+`StrategyRunner` also takes an optional `ExitMode`, and applies it by calling
+`engine._exit_signals` **over the buffer** rather than reimplementing it; without
+one it emits the strategy's own exits, which is what it did before R10e.
+
 The event-driven flow also runs many instruments at once: `stream()` k-way
 merges every subscription into one time-ordered stream, `MarketClock`
 (`engine/market_clock.py`) groups it into `MarketSnapshot`s, and
@@ -246,7 +259,12 @@ Key design decisions that span multiple files:
 - **Exit ownership is split between strategies and the engine.** Strategies return a
   `SignalSet` of exit ingredients (opposite-signal exits, setup stop levels,
   trend-failure series, optional per-bar `position_size` scale); the engine's `ExitMode`
-  decides which ingredients fire. Not every strategy supports every mode — see the
+  decides which ingredients fire, and since R10e `StrategyRunner` takes the same
+  `ExitMode` and resolves it through the engine's own function. Two modes do not
+  reach the event path: `setup_invalidation_stop` is **refused** there, because
+  the engine applies it as an intrabar `sl_stop` that no bar-close `Signal`
+  encodes, and `trend_structure` can begin raising **mid-run** once a growing
+  buffer acquires the short entries it refuses. Not every strategy supports every mode — see the
   exit-mode × strategy matrix in [STRATEGIES.md](STRATEGIES.md) before changing exit
   behavior or comparing runs. Two strategies invert the usual pattern:
   `trend_rider_v1_deepseek_v4_pro` bakes all exits into its own signals (run with
@@ -268,21 +286,30 @@ Key design decisions that span multiple files:
   signals; `tests/test_lookahead.py` poisons every bar after *t* and asserts
   row *t* is unchanged, which is the direct causality proof. **A strategy that
   fails either test is not safe to trade.**
-- **One known exception to that, and it is the data the paths carry rather than
-  the code they run: `state_machine_v1` on a perp.** `crowding` reads a
-  `funding_rate` column, which `backtest` and `sweep` attach on a perp
-  (`cli._with_funding_column`) and the event path structurally cannot —
-  `core.types.Bar` has no funding field and `BarBuffer` materializes
-  `open/high/low/close/volume` and nothing else. So a replay of a perp range
-  runs that feature at `NEUTRAL_CROWDING` and emits different signals from a
-  backtest of the same range; **the backtest is the published one**, and the
-  charter's R5 figures are its. Measured on BTC/USDT perp 4h over R5's test half,
-  trained cell: +16.44% / Sharpe +0.801 crowding-neutral against +15.45% /
-  +0.896 measured. The determinism suite does not catch this and is not broken —
-  `synthetic_ohlcv` carries no funding, so it compares crowding-neutral against
-  crowding-neutral, and a suite weakened to hide the gap would be worse than the
-  gap. Closing it means carrying funding through `Bar`, `BarBuffer`, the feed and
-  the storage schema, which is a phase and not a patch.
+- **Funding reaches the event path, and the column's *presence* is the claim.**
+  `crowding` reads a `funding_rate` column. Until R10f the event path
+  structurally could not carry one, so a replay of a perp ran that feature at
+  `NEUTRAL_CROWDING` and emitted different signals from a backtest of the same
+  range — measured by R10a at **6,048 of 6,048 bars** and by M20 at +16.44% /
+  Sharpe +0.801 crowding-neutral against the published +15.45% / +0.896. `Bar`
+  now carries `funding_rate: Decimal | None`, `BarBuffer` materializes it, and
+  `ReplayFeed.from_database` attaches it through **`with_funding_column` — the
+  engine's own function**, so the alignment rule and the coverage guard are
+  shared rather than duplicated. R10a's diff now reads **0 differing on every
+  feature and 0 on the state**. Three rules hold it together. (1) **The buffer
+  materializes the column only when a bar actually carried one**, because
+  `build_feature_frame` decides whether crowding is real with `FUNDING_COLUMN in
+  df.columns` — an always-present NaN column would report
+  `crowding_measured=True` on a spot frame and feed the feature garbage,
+  replacing a fallback that is *correct* off-perp with a silent wrong answer.
+  (2) **A stream cannot change its mind**: bars that stop settling raise rather
+  than silently narrowing the frame, which would run a different strategy from
+  the one the earlier bars ran. (3) **Coverage is required only when the strategy
+  reads funding**, the same question `sweep` asks — otherwise BTC's permanent 40 h
+  leading gap would make its own range unreplayable for `donchian`, which reads
+  no funding-derived feature. The determinism suite now runs on **funded** frames,
+  which is what lets it see any of this; `test_the_comparison_can_see_a_crowding_difference`
+  is the mutation that proves the suite can fail rather than assuming it.
 - **Every percentile, rank and z-score in `features/` is rolling or expanding —
   never full-sample.** This is the lookahead that has no `shift(-1)` to grep
   for. Measured on a 200-bar ramp poisoned downward from row 121,

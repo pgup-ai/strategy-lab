@@ -5,9 +5,11 @@ from decimal import Decimal
 
 import pandas as pd
 
+from strategy_lab.backtests.engine import ExitMode, _exit_signals
 from strategy_lab.core.clock import Clock
 from strategy_lab.core.types import Bar, BarEvent, BarReason, InstrumentId, Side, Signal
 from strategy_lab.engine.context import BarBuffer
+from strategy_lab.engine.reasons import reason_for
 from strategy_lab.feeds.replay import _row_to_bar
 from strategy_lab.strategies.base import SignalSet, Strategy, require_warmup_bars
 from strategy_lab.timeframes import timeframe_to_millis
@@ -20,6 +22,50 @@ _SIDE_BY_FIELD: tuple[tuple[str, Side], ...] = (
     ("short_entries", Side.ENTER_SHORT),
     ("short_exits", Side.EXIT_SHORT),
 )
+
+# The engine's own default, imported rather than retyped so a change there
+# reaches the two paths together.
+DEFAULT_FAILURE_BARS = 4
+
+
+def require_signal_set_contract(strategy: object) -> None:
+    """Refuse a strategy this runner cannot call, at construction (M40).
+
+    Measured before this existed: ``StrategyRunner`` accepted
+    ``state_machine_v2`` and survived **2,192 bars -- 365.3 days at 4h** before
+    raising ``AttributeError``, because :meth:`StrategyRunner.on_bar` returns
+    before touching the strategy while the buffer is inside warmup. A contract
+    mismatch was therefore invisible for exactly as long as the warmup, and the
+    deeper the warmup the longer the lie.
+
+    Beside ``require_warmup_bars`` because it is the same rule: every
+    precondition a runner depends on is checked here rather than at first use,
+    since "first use" on a warmup-gated path is a year away.
+    """
+    if not hasattr(strategy, "generate_signals"):
+        name = getattr(strategy, "name", type(strategy).__name__)
+        raise TypeError(
+            f"{name} has no generate_signals: it is a TargetExposure strategy, which "
+            f"StrategyRunner cannot drive. Use engine.exposure_runner.ExposureRunner."
+        )
+
+
+def _resolve_exit_mode(exit_mode: ExitMode | str) -> ExitMode:
+    """The mode this runner will apply, refusing the one no signal stream carries.
+
+    ``setup_invalidation_stop`` is not expressible as a signal stream at all:
+    ``engine._stop_kwargs`` hands ``from_signals`` an ``sl_stop`` series, and a
+    stop that fires intrabar is not a bar-close decision any ``Signal`` encodes.
+    Refused rather than approximated, because approximating it is how a replay
+    quietly stops matching the backtest it claims to reproduce.
+    """
+    mode = ExitMode(exit_mode)
+    if mode is ExitMode.SETUP_INVALIDATION_STOP:
+        raise ValueError(
+            "setup_invalidation_stop cannot be driven from a signal stream: the engine "
+            "applies it as an intrabar sl_stop, which no bar-close Signal encodes."
+        )
+    return mode
 
 
 class StrategyRunner:
@@ -44,7 +90,7 @@ class StrategyRunner:
     ``--limit-bars`` exists on ``replay``.
 
     It also accumulates a :class:`BarReason` per bar for any strategy that can
-    explain itself -- see :meth:`_reason_for` -- which costs a second pass over
+    explain itself -- see ``engine.reasons.reason_for`` -- which costs a second pass over
     the buffer, because the feature frame and the state walk are recomputed
     rather than read out of the ``SignalSet``, which carries neither. Measured on
     ``state_machine_v1`` over 1,000 emitting bars of BTC/USDT perp 4h: **6.8 s
@@ -62,6 +108,8 @@ class StrategyRunner:
         instrument: InstrumentId,
         timeframe: str,
         clock: Clock,
+        exit_mode: ExitMode | str | None = None,
+        failure_bars: int = DEFAULT_FAILURE_BARS,
         allow_forming_bars: bool = False,
         record_reasons: bool = True,
     ) -> None:
@@ -71,10 +119,13 @@ class StrategyRunner:
         # would raise while replay traded from bar one, and the two paths
         # agreeing is what tests/test_replay_determinism.py exists to defend.
         require_warmup_bars(strategy.name, strategy.warmup_bars)
+        require_signal_set_contract(strategy)
         self.strategy = strategy
         self.instrument = instrument
         self.timeframe = timeframe
         self.clock = clock
+        self.exit_mode = None if exit_mode is None else _resolve_exit_mode(exit_mode)
+        self.failure_bars = failure_bars
         self.allow_forming_bars = allow_forming_bars
         self.record_reasons = record_reasons
         self.buffer = BarBuffer()
@@ -91,7 +142,7 @@ class StrategyRunner:
         """One reason per bar seen past warmup, in bar order.
 
         Empty for a strategy that cannot explain itself, and that is a claim
-        rather than an oversight -- see :meth:`_reason_for`.
+        rather than an oversight -- see ``engine.reasons.reason_for``.
         """
         return tuple(self._reasons.values())
 
@@ -143,64 +194,54 @@ class StrategyRunner:
 
         signal_set = self.strategy.generate_signals(self.buffer.frame())
         if self.record_reasons:
-            reason = self._reason_for(bar)
+            reason = reason_for(
+                self.strategy,
+                bar=bar,
+                frame=self.buffer.frame(),
+                instrument=self.instrument,
+                timeframe=self.timeframe,
+                clock=self.clock,
+            )
             if reason is not None:
                 self._reasons[bar.ts_open_ms] = reason
         return self._extract(signal_set, bar)
 
-    def _reason_for(self, bar: Bar) -> BarReason | None:
-        """The state and feature values behind this bar, for a strategy that has them.
+    def _sides(self, signal_set: SignalSet) -> dict[str, pd.Series]:
+        """The four side series this bar is read from, after the exit mode.
 
-        Found by ``getattr(strategy, "feature_frame"/"machine")`` -- the same
-        introspection ``api/analysis._why_layer`` uses, deliberately rather than
-        matching a list of state machines, so a strategy that grows a
-        ``feature_frame`` later is explained on both paths without anyone editing
-        either. A strategy with neither returns ``None`` and writes **no** rows:
-        an absent explanation and an empty one are different claims, and the four
-        original strategies genuinely have nothing to say here.
+        Without an ``exit_mode`` these are the strategy's own, which is what this
+        runner emitted before R10e and still emits by default: exit *ingredients*
+        withheld, because which of them fire is an engine decision and emitting
+        them unconditionally matches no single backtest configuration.
 
-        Recomputed rather than read off the ``generate_signals`` call above,
-        because a ``SignalSet`` carries entries, exits and a size and none of the
-        state behind them. The two are still one computation in the sense that
-        matters -- the same frame, the same feature functions, the same machine,
-        and the last row of each -- and the only alternative is a strategy-side
-        return-value change, which would touch every strategy in the repo to
-        serve the one path that cannot recompute.
+        With one, the exits come from ``engine._exit_signals`` -- **the engine's
+        function, over the buffer, not a reimplementation of it**. That is M36
+        reaching a third path: a cheaper route here is a fourth answer free to
+        drift from the backtest, the browser and the board, and R10d measured
+        exactly what the drift was worth (``trend_following_deepseek_v4`` emits no
+        exits of its own, so 7,331 of 15,128 BTC bars).
 
-        **A raise here is fatal to the bar, deliberately, and it costs a signal
-        the strategy had already produced.** ``generate_signals`` has returned by
-        the time this runs, so catching would let the decision through and drop
-        only its explanation. It is not caught because this calls the strategy's
-        *own* ``feature_frame`` and ``machine``: for a state machine, a raise
-        means it could not compute the state it trades on, and a book that does
-        not know its own state should stop rather than trade on the half of the
-        computation that happened to succeed. That is the rule ``Crowding``
-        already follows by raising instead of returning a neutral 0.5. A caller
-        that wants signals without explanations has ``record_reasons=False``
-        rather than a swallowed exception. **Worth revisiting when a live feed
-        exists** -- losing a live decision to a diagnostic failure is a different
-        trade-off from losing a replayed one, and this path is replay-only today.
+        **``trend_structure`` can begin raising mid-run**, and that is the engine's
+        behaviour rather than a defect here: it refuses a frame whose
+        ``short_entries`` are non-empty, which on a growing buffer is a claim that
+        can become true on any bar. It raises on the first bar a short entry
+        appears, which is the earliest it is knowable.
         """
-        feature_frame = getattr(self.strategy, "feature_frame", None)
-        machine = getattr(self.strategy, "machine", None)
-        if feature_frame is None or machine is None:
-            return None
+        if self.exit_mode is None:
+            return {field: getattr(signal_set, field) for field, _ in _SIDE_BY_FIELD}
 
-        frame, _ = feature_frame(self.buffer.frame())
-        # The machine answers on every bar, warmup included: an unmeasurable row
-        # is a failure to it rather than a gap, so there is no missing state.
-        state = machine.run(frame).iloc[-1]
-        return BarReason(
-            instrument=self.instrument,
-            timeframe=self.timeframe,
-            strategy_id=self.strategy.name,
-            strategy_version=self.strategy.version,
-            ts_bar_ms=bar.ts_open_ms,
-            ts_emit_ms=self.clock.now_ms(),
-            bar_is_closed=bar.is_closed,
-            state=str(state.value),
-            features={str(name): _last_float(frame[name]) for name in frame.columns},
+        long_exits, short_exits = _exit_signals(
+            df=self.buffer.frame(),
+            signals=signal_set,
+            exit_mode=self.exit_mode,
+            failure_bars=self.failure_bars,
         )
+        return {
+            "long_entries": signal_set.long_entries,
+            "long_exits": long_exits.fillna(False),
+            "short_entries": signal_set.short_entries,
+            "short_exits": short_exits.fillna(False),
+        }
 
     def _extract(self, signal_set: SignalSet, bar: Bar) -> Sequence[Signal]:
         """Read the last row of every side series.
@@ -208,22 +249,13 @@ class StrategyRunner:
         All four are read, not the first that matches: strategies that wire
         ``long_exits = short_entries`` reverse on a single bar, and collapsing
         that into one signal would lose either the flatten or the reversal.
-
-        The remaining ``SignalSet`` fields -- ``trend_failure_long_exits``,
-        ``trend_failure_short_exits``, ``position_size`` -- are deliberately not
-        emitted. They are exit *ingredients*, and which of them fire is an
-        ``ExitMode`` decision the backtest engine makes, not a property of the
-        strategy: ``trend_following_deepseek_v4`` needs ``trend_structure`` while
-        ``trend_rider_v1_deepseek_v4_pro`` needs ``opposite_signal_only``.
-        Emitting them unconditionally here would produce a signal stream matching
-        no single backtest configuration. The runner gains an ``ExitMode`` in
-        Phase 1b, when signals start driving positions rather than being recorded.
         """
         stop_fraction = _last_float(signal_set.setup_stop_loss)
+        sides = self._sides(signal_set)
         emitted: list[Signal] = []
 
         for field_name, side in _SIDE_BY_FIELD:
-            if not bool(getattr(signal_set, field_name).iloc[-1]):
+            if not bool(sides[field_name].iloc[-1]):
                 continue
             emitted.append(
                 Signal(

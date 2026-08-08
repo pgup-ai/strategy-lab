@@ -29,12 +29,9 @@ catches that the others do not:
 The strategies proved are every entry in ``strategies/exposure_registry.py``
 plus two local tapers kept for shapes the registry does not currently contain.
 
-There is no production exposure runner yet, so the streaming driver here is
-local. It is not a mirror of the thing it tests: bars arrive through the real
-``ReplayFeed``, accumulate in the real ``BarBuffer``, and the strategy is called
-over the full buffer and read at the last row -- the same three pieces, and the
-same warmup rule, as ``engine.runner.StrategyRunner``. When an exposure runner
-lands, point ``streamed_targets`` at it rather than keeping two.
+The streaming driver is ``engine.exposure_runner.ExposureRunner`` itself, so
+these three comparisons test the class a live process would run rather than a
+local stand-in for it. It was a stand-in until R10e shipped the runner.
 """
 
 from __future__ import annotations
@@ -46,16 +43,16 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from strategy_lab.core.clock import SimClock
 from strategy_lab.core.types import InstrumentId
-from strategy_lab.engine.context import BarBuffer
+from strategy_lab.engine.exposure_runner import ExposureRunner
 from strategy_lab.feeds.base import Subscription
-from strategy_lab.feeds.replay import ReplayFeed, _row_to_bar
+from strategy_lab.feeds.replay import ReplayFeed
 from strategy_lab.strategies.exposure import TargetExposure
 from strategy_lab.strategies.exposure_registry import (
     get_exposure_strategy,
     list_exposure_strategies,
 )
-from strategy_lab.timeframes import timeframe_to_millis
 from tests.conftest import synthetic_ohlcv
 
 TIMEFRAME = "15m"
@@ -167,20 +164,35 @@ def streamed_targets(
 ) -> pd.Series:
     """What the same strategy holds when the same bars arrive one at a time.
 
+    **This drives the production ``ExposureRunner``**, which is what this file's
+    header asked for while there was none. The local driver it replaces was a
+    deliberate mirror -- real ``ReplayFeed``, real ``BarBuffer``, the strategy
+    over the full buffer, the last row read -- and a mirror proves the mirror.
+    Every comparison below now tests the class a live process would run.
+
+    ``rebalance_threshold=0.0`` is what turns emissions back into one value per
+    post-warmup bar: the band submits whenever the move is at least the
+    threshold, so zero submits always. That is the engine's own reading of a zero
+    band (``exposure_engine._banded``), which is why it is the right knob rather
+    than a way around the runner.
+
     The identity is a parameter so a caller on a different instrument or bar size
     gets bars labelled with its own -- ``scripts/r10d`` runs this on 4h perp
-    frames. Measured before it was added: the label reaches ``Bar.timeframe`` and
-    ``ts_close_ms`` and **nothing else**, since ``BarBuffer.frame()`` carries
-    bar-open timestamps and OHLCV, so 400 bars of ``state_machine_v2`` on BTC and
-    ETH gave an identical index and 0 differing targets either way. It is
-    parameterised so the caller's claim about its own timeframe is true, not
-    because a number moved.
+    frames. Measured: the label reaches ``Bar.timeframe`` and ``ts_close_ms`` and
+    **nothing else**, since ``BarBuffer.frame()`` carries bar-open timestamps and
+    OHLCV, so 400 bars of ``state_machine_v2`` gave an identical index and 0
+    differing targets either way.
     """
-    buffer = BarBuffer()
+    runner = ExposureRunner(
+        strategy=strategy,
+        instrument=instrument,
+        timeframe=timeframe,
+        clock=SimClock(),
+        rebalance_threshold=0.0,
+        record_reasons=False,
+    )
     if prime is not None:
-        bar_ms = timeframe_to_millis(timeframe)
-        for timestamp, row in prime.sort_index(kind="stable").iterrows():
-            buffer.append(_row_to_bar(timestamp, row, instrument, timeframe, bar_ms))
+        runner.prime(prime)
 
     feed = ReplayFeed(frames={instrument.at(timeframe): df})
     sub = Subscription(instrument, timeframe)
@@ -188,11 +200,9 @@ def streamed_targets(
     async def _run() -> pd.Series:
         held: dict[pd.Timestamp, float] = {}
         async for event in feed.stream([sub]):
-            buffer.append(event.bar)
-            if len(buffer) <= strategy.warmup_bars:
-                continue
-            frame = buffer.frame()
-            held[frame.index[-1]] = float(strategy.compute_target(frame).target.iloc[-1])
+            for emitted in runner.on_event(event):
+                stamp = pd.Timestamp(emitted.ts_bar_ms, unit="ms", tz="UTC")
+                held[stamp] = float(emitted.target_exposure)
         return pd.Series(held, dtype="float64")
 
     return asyncio.run(_run())

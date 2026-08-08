@@ -9,6 +9,7 @@ import pandas as pd
 
 from strategy_lab.core.types import Bar, BarEvent, CandleId, InstrumentId
 from strategy_lab.feeds.base import FeedHealth, Subscription
+from strategy_lab.features.flow import FUNDING_COLUMN
 from strategy_lab.timeframes import timeframe_to_millis
 
 
@@ -33,23 +34,56 @@ class ReplayFeed:
         start: str | None = None,
         end: str | None = None,
         limit_bars: int | None = None,
+        funding: bool = True,
+        required: bool = False,
         database_url: str | None = None,
     ) -> ReplayFeed:
+        """Stored candles as a feed, with a perp's funding attached to its bars.
+
+        Funding goes on through ``backtests.funding_frame.with_funding_column`` --
+        **the engine's own function, not a second implementation** -- so the
+        alignment rule is shared rather than duplicated: settlements are charged
+        to the bar whose interval *contains* them, because Binance stamps them up
+        to 47 ms past the boundary and an equality join drops 43% of BTC's stored
+        history.
+
+        ``required`` is the caller's, and defaults to **False** for the reason the
+        sweep's attachment does: a feed does not know which strategy will read it,
+        and refusing every perp whose coverage is imperfect would break replaying
+        ``donchian`` -- which reads no funding-derived feature -- over BTC's
+        permanent 40 h leading gap. A caller that *does* know says so, and the
+        ``replay`` CLI asks the strategy the same way ``sweep`` does. Uncovered
+        with ``required=False`` means no column at all rather than a partial one,
+        so a funding-reading strategy falls back to neutral and records it, which
+        is the pre-existing behaviour rather than a silently gross number.
+
+        Attached *after* ``limit_bars``, so the guard is asked about the range that
+        will actually be replayed rather than the one that was loaded.
+        """
+        from strategy_lab.backtests.funding_frame import with_funding_column
         from strategy_lab.db import load_candles
+        from strategy_lab.market_data.base import MarketDataIdentity
 
         frames: dict[CandleId, pd.DataFrame] = {}
         for sub in subscriptions:
-            df = load_candles(
+            identity = MarketDataIdentity(
                 exchange=sub.instrument.exchange,
                 market_type=sub.instrument.market_type,
                 symbol=sub.instrument.symbol,
                 timeframe=sub.timeframe,
+            )
+            df = load_candles(
+                exchange=identity.exchange,
+                market_type=identity.market_type,
+                symbol=identity.symbol,
+                timeframe=identity.timeframe,
                 start=start,
                 end=end,
                 database_url=database_url,
             )
             if limit_bars is not None:
                 df = df.tail(limit_bars)
+            df, _ = with_funding_column(identity, df, enabled=funding, required=required)
             frames[sub.candle] = df
         return cls(frames=frames)
 
@@ -104,6 +138,10 @@ def _row_to_bar(
     bar_ms: int,
 ) -> Bar:
     ts_open_ms = _epoch_ms(timestamp)
+    # Carried only when the frame has it, which is what makes a bar's funding
+    # ``None`` off a perp and a number on one -- and what ``BarBuffer`` reads to
+    # decide whether ``FUNDING_COLUMN`` reaches the strategy at all.
+    funding = row.get(FUNDING_COLUMN) if FUNDING_COLUMN in row.index else None
     return Bar(
         instrument=instrument,
         timeframe=timeframe,
@@ -115,6 +153,7 @@ def _row_to_bar(
         close=_decimal(row["close"]),
         volume=_decimal(row["volume"]),
         is_closed=True,
+        funding_rate=None if funding is None else _decimal(funding),
     )
 
 

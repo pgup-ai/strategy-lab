@@ -89,6 +89,14 @@ class Bar:
     is_closed: bool
     quote_volume: Decimal | None = None
     trades: int | None = None
+    # The funding a unit long paid over this bar, or None where the venue settles
+    # nothing. Optional beside ``quote_volume`` and ``trades`` rather than
+    # required, because "this market has no such thing" is a real answer here and
+    # is not one for a price -- and because ``None`` is what
+    # ``BarBuffer`` reads to decide whether to materialise the column at all,
+    # which is what keeps ``FUNDING_COLUMN in df.columns`` meaning *measured*.
+    # Zero is a different claim: a perp bar containing no settlement paid zero.
+    funding_rate: Decimal | None = None
 
     @property
     def candle(self) -> CandleId:
@@ -99,6 +107,10 @@ class Bar:
             value = getattr(self, field_name)
             if not isinstance(value, Decimal):
                 raise TypeError(f"{field_name} must be Decimal, got {type(value).__name__}")
+        if self.funding_rate is not None and not isinstance(self.funding_rate, Decimal):
+            raise TypeError(
+                f"funding_rate must be Decimal or None, got {type(self.funding_rate).__name__}"
+            )
         if self.ts_close_ms <= self.ts_open_ms:
             raise ValueError("ts_close_ms must be after ts_open_ms")
         if self.high < self.low:
