@@ -18,6 +18,7 @@ from strategy_lab.db.candles import get_engine
 from strategy_lab.db.funding import (
     MAX_FUNDING_ROWS_PER_INSERT,
     funding_span,
+    nth_newest_settlement,
     funding_table,
     load_funding,
     load_open_interest,
@@ -261,3 +262,44 @@ def test_a_write_larger_than_one_statement_is_chunked():
 
     loaded = load_funding(exchange="binance", market_type="perp", symbol="TESTCHUNK/USDT")
     assert len(loaded) == count
+
+
+def test_nth_newest_settlement_counts_back_from_the_newest():
+    """A live poll's window has to hold enough settlements for
+    `funding_coverage_gaps` to certify a cadence, and that is a count rather than
+    a duration -- the interval is per-contract. Measured on BTC/USDT perp 4h
+    before this existed: a 5-bar window held two settlements where three are
+    needed, so no poll at any traded timeframe funded itself."""
+    stamps = [1_700_000_000_000 + i * 8 * 3_600_000 for i in range(5)]
+    upsert_funding(
+        [
+            {**IDENTITY, "funding_time_ms": ts, "funding_rate": Decimal("0.0001"),
+             "mark_price": None, "source": "test"}
+            for ts in stamps
+        ]
+    )
+
+    for count, expected in ((1, stamps[-1]), (3, stamps[-3]), (5, stamps[0])):
+        found = nth_newest_settlement(**IDENTITY, count=count)
+        assert int(found.value // 10**6) == expected, f"count={count}"
+
+
+def test_nth_newest_settlement_is_none_when_there_are_too_few():
+    """Widening toward funding that does not exist would make the request slower
+    before it got the same answer, so the caller has to be able to tell."""
+    upsert_funding(
+        [
+            {**IDENTITY, "funding_time_ms": 1_700_000_000_000,
+             "funding_rate": Decimal("0.0001"), "mark_price": None, "source": "test"}
+        ]
+    )
+
+    assert nth_newest_settlement(**IDENTITY, count=1) is not None
+    assert nth_newest_settlement(**IDENTITY, count=2) is None
+
+
+def test_nth_newest_settlement_refuses_a_count_below_one():
+    """`count=0` would silently offset by -1, which SQL reads as no offset at
+    all -- the newest settlement returned as though it were the zeroth."""
+    with pytest.raises(ValueError, match="at least 1"):
+        nth_newest_settlement(**IDENTITY, count=0)
