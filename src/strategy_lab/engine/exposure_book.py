@@ -70,14 +70,5 @@ class ExposureBook:
         self.fills.append(fill)
         return fill
 
-    def value(self, close: float) -> float:
-        """The position's mark-to-market, for a caller that wants one."""
-        return self.position * close
-
-    def target_quantity(self, target: float, close: float) -> float:
-        """What ``target`` asks the book to hold, exposed for the comparison tests."""
-        return target * self.position_pct * self.cash / close
-
 
 __all__ = ["ExposureBook"]
-

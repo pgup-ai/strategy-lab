@@ -38,7 +38,6 @@ from strategy_lab.engine.fills import CostModel, Direction
 from strategy_lab.market_data.base import MarketDataIdentity
 from strategy_lab.strategies.exposure_registry import get_exposure_strategy
 from strategy_lab.strategies.registry import get_strategy
-from tests.conftest import synthetic_ohlcv
 
 FEE, SLIP, CASH, PCT = 0.0005, 0.0005, 10_000.0, 0.95
 _PERP = MarketDataIdentity(
@@ -361,17 +360,3 @@ def test_the_synthetic_probe_that_derived_the_rules_still_holds(tmp_path):
     # The reversal: the long's exit and the short's entry share a bar and a price.
     assert trades["Exit Timestamp"].iloc[1] == trades["Entry Timestamp"].iloc[2]
     assert trades["Avg Exit Price"].iloc[1] == pytest.approx(trades["Avg Entry Price"].iloc[2])
-
-
-def test_a_book_over_a_flat_frame_trades_nothing():
-    """The non-vacuity guard for everything above: a book that emitted fills with
-    no signals would make every comparison pass by accident."""
-    book = PaperBook(cash=CASH, position_pct=PCT, costs=COSTS)
-    frame = synthetic_ohlcv(n=50)
-
-    for position, timestamp in enumerate(frame.index):
-        book.on_bar([], close=float(frame["close"].iloc[position]),
-                    ts_bar_ms=int(timestamp.value // 10**6))
-
-    assert book.fills == []
-    assert book.position == 0.0

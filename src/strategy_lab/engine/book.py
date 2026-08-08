@@ -31,10 +31,9 @@ Four rules carry the behaviour, and three of them are easy to get wrong:
    ``from_signals`` fills what it can afford rather than refusing: measured,
    ``filled = min(requested, balance / (price x (1 + fee)))``, with the balance
    moved by ``-(qty x price + fee)`` on a buy and ``+(qty x price - fee)`` on a
-   sell. This is why the book carries a cash balance at all. It was found by the
-   oracle rather than by reasoning -- one trade of 19 on a real BTC range
-   differed, at 9,158.96 of requested 9,500 notional -- and it is the same
-   clipping the ``max_weight`` warning describes for the sizing layer.
+   sell. This is the only reason the book carries a cash balance, and it was
+   found by the oracle rather than by reasoning -- one trade of 19 on a real BTC
+   range differed (M43).
 """
 
 from __future__ import annotations
@@ -73,13 +72,6 @@ class Trade:
     exit_ts_ms: int
     exit_price: float
     exit_fee: float
-
-    @property
-    def pnl(self) -> float:
-        gross = (self.exit_price - self.entry_price) * self.quantity
-        if self.direction == "short":
-            gross = -gross
-        return gross - self.entry_fee - self.exit_fee
 
 
 @dataclass
