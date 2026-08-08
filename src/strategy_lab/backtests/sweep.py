@@ -9,6 +9,7 @@ from dataclasses import dataclass
 import numpy as np
 import pandas as pd
 
+from strategy_lab.backtests.conflicts import resolve_conflicts
 from strategy_lab.strategies.base import SignalSet, Strategy, require_warmup_bars
 from strategy_lab.strategies.registry import get_strategy
 from strategy_lab.timeframes import timeframe_to_millis
@@ -157,16 +158,12 @@ def positions_from_signals(signals: SignalSet) -> pd.Series:
     three conflict modes ``ignore``, ``upon_opposite_entry=ReverseReduce``):
 
     1. An entry and an exit on the *same* side cancel each other; so do a long
-       entry and a short entry. ``ConflictMode.Ignore`` drops **both** signals,
-       so neither "entry wins" nor "exit wins" -- the bar does nothing.
+       entry and a short entry -- ``backtests.conflicts.resolve_conflicts``,
+       shared with ``engine.book`` so the two paths cannot resolve a
+       contradictory bar differently.
     2. From a long, a short entry outranks a long exit (reverse, not close);
        from a short, a long entry outranks a short exit. A same-side entry while
        already in that direction is a no-op, because ``accumulate=False``.
-
-    vectorbt guards step 1 with ``if is_long_entry or is_short_entry``. That
-    guard is not reproduced because it is provably inert -- every branch inside
-    it already requires an entry -- and a mutation test confirmed it: adding it
-    kills no mutant, so it would be untestable code.
 
     Deriving the position from entries alone would instead make every exit
     ingredient invisible: measured on 83,348 BTC 15m bars, all four donchian
@@ -211,12 +208,9 @@ def _net_position(
             strict=True,
         )
     ):
-        if long_entry and long_exit:
-            long_entry = long_exit = False
-        if short_entry and short_exit:
-            short_entry = short_exit = False
-        if long_entry and short_entry:
-            long_entry = short_entry = False
+        long_entry, long_exit, short_entry, short_exit = resolve_conflicts(
+            long_entry, long_exit, short_entry, short_exit
+        )
 
         if position > 0:
             if short_entry:
