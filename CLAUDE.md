@@ -28,6 +28,8 @@ strategy-lab features --exchange binance --market-type perp --symbol BTC/USDT \
 strategy-lab backtest --exchange binance --market-type perp --symbols BTC/USDT \
   --timeframe 4h --strategy state_machine_v1 --exit-mode opposite_signal_only \
   --start "2019-09-10 08:00:00" --cost-stress 1,2,3   # the MDE R5 state machine
+strategy-lab paper --symbol BTC/USDT --timeframe 15m --strategy state_machine_v1 \
+  --for-minutes 75 --bars-csv live_bars.csv   # poll the venue, decide, book it; stores no candles
 strategy-lab serve                 # serve the frozen reports/ with the candle-refresh API
 strategy-lab browse                # the research browser: recomputed live, writes nothing
 ```
