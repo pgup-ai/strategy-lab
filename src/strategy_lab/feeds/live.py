@@ -33,15 +33,16 @@ from __future__ import annotations
 
 import asyncio
 import math
-import time
 from collections.abc import AsyncIterator, Callable, Sequence
 from dataclasses import dataclass, field, replace
 
 import pandas as pd
 
+from strategy_lab.core.clock import Clock, LiveClock
 from strategy_lab.core.types import Bar, BarEvent, CandleId
 from strategy_lab.feeds.base import FeedHealth, Subscription
 from strategy_lab.feeds.replay import _epoch_ms, _ordered, _row_to_bar
+from strategy_lab.features.flow import FUNDING_COLUMN
 from strategy_lab.market_data.base import MarketDataIdentity
 from strategy_lab.timeframes import timeframe_to_millis
 
@@ -49,11 +50,6 @@ from strategy_lab.timeframes import timeframe_to_millis
 # it just closed, and a feed that only ever asked for the newest would never see
 # the correction -- the same reason `server.refresh_candles` reaches back rather
 # than fetching the tip.
-def _wall_clock_ms() -> int:
-    """UTC epoch milliseconds, injectable so `backfill` is testable offline."""
-    return int(time.time() * 1000)
-
-
 DEFAULT_LOOKBACK_BARS = 5
 
 # Beyond this ``pd.Timestamp`` raises rather than saturating; a bound past it is
@@ -122,7 +118,7 @@ class LiveFeed:
     poll_seconds: float | None = None
     fetch: Callable[..., pd.DataFrame] = _fetch_recent
     sleep: Callable[[float], object] = asyncio.sleep
-    now_ms: Callable[[], int] = _wall_clock_ms
+    clock: Clock = field(default_factory=LiveClock)
 
     # Never pruned, deliberately. Pruning below the fetch watermark was tried and
     # reverted: it assumes the venue returns nothing older than it was asked for,
@@ -131,6 +127,7 @@ class LiveFeed:
     # bytes: 0.6 MB/year at 4h and 9.5 MB/year at 15m, for a process meant to be
     # restarted rather than run forever.
     _seen: set[tuple[str, int, bool, tuple]] = field(default_factory=set, init=False)
+    _funded: dict[CandleId, bool] = field(default_factory=dict, init=False, repr=False)
     _cursors: dict[CandleId, int] = field(default_factory=dict, init=False, repr=False)
     _last_event_ms: int | None = field(default=None, init=False, repr=False)
 
@@ -191,6 +188,40 @@ class LiveFeed:
         smallest = min(timeframe_to_millis(sub.timeframe) for sub in subs) / 1000.0
         return min(max(smallest / POLLS_PER_BAR, MIN_POLL_SECONDS), MAX_POLL_SECONDS)
 
+    def _conform_funding(self, sub: Subscription, frame: pd.DataFrame) -> pd.DataFrame:
+        """Hold one answer about funding for the life of a subscription.
+
+        ``with_funding_column`` decides per *window*, and a feed asks about two:
+        ``backfill`` over history and ``_poll`` over the recent tail. Those can
+        disagree -- BTC/USDT perp's permanent ~40 h head gap means a full-history
+        request finds a gap and returns no column while a recent window finds none
+        and returns one. Priming unfunded and then polling funded is a stream
+        changing its mind, and ``BarBuffer`` **raises** on exactly that (M42),
+        which is right: measured, a cold start over full BTC history crashed on
+        its first poll.
+
+        The buffer's guard is not the thing to loosen. The feed is what must be
+        consistent, so the first frame for a subscription fixes the answer and
+        later frames are conformed to it: a column is dropped if the stream began
+        without one. The reverse -- funded, then a window that cannot be covered
+        -- is *not* silently filled, because carrying on unfunded would run a
+        different strategy from the one the earlier bars ran; it raises here,
+        where the cause can be named, rather than in the buffer.
+        """
+        has_column = FUNDING_COLUMN in frame.columns
+        settled = self._funded.setdefault(sub.candle, has_column)
+        if settled == has_column:
+            return frame
+        if settled:
+            raise ValueError(
+                f"{sub.candle.key} stopped carrying funding mid-stream. Earlier bars ran "
+                f"with it, so continuing without would run a different strategy than they "
+                f"did. Backfill the settlements, or restart the feed to run unfunded."
+            )
+        # Began unfunded -- usually a history request spanning a coverage gap --
+        # so the tail conforms rather than the stream changing its mind.
+        return frame.drop(columns=[FUNDING_COLUMN])
+
     def _poll(self, sub: Subscription) -> list[BarEvent]:
         identity = _identity(sub)
         bar_ms = timeframe_to_millis(sub.timeframe)
@@ -198,6 +229,7 @@ class LiveFeed:
         frame = self.fetch(identity, self._since_ms(sub, bar_ms), None)
         if frame is None or frame.empty:
             return []
+        frame = self._conform_funding(sub, frame)
 
         events: list[BarEvent] = []
         ordered = _ordered(frame)
@@ -211,17 +243,25 @@ class LiveFeed:
             is_closed = ts_open_ms != newest
             if not is_closed and not sub.include_forming:
                 continue
-            # Keyed on the *values* as well as the identity, deliberately. The
-            # protocol forbids yielding the same bar twice, and a venue that
-            # corrects a bar it already closed is not sending the same bar -- it
-            # is sending a different one under the same timestamp. Suppressing
-            # those would make `lookback_bars` decorative, since re-reading a
-            # window exists precisely to catch them. `BarBuffer` replaces
-            # last-wins and counts it, so a correction lands as a correction.
+            # Keyed on the *values* as well as the identity, deliberately: a
+            # venue correcting a bar it already closed is not re-sending the same
+            # bar, and suppressing those would make ``lookback_bars`` decorative.
             key = (sub.candle.key, ts_open_ms, is_closed, _values(row))
             if key in self._seen:
                 continue
             self._seen.add(key)
+            # **Only a correction to the newest bar can actually land**, so an
+            # older one is recorded as seen and dropped rather than yielded.
+            # ``BarBuffer.append`` replaces on a repeated timestamp but drops
+            # anything *older* than its last as out-of-order -- measured, a
+            # correction four bars back increments ``dropped_out_of_order`` and
+            # changes nothing. Emitting it anyway would inflate that counter, and
+            # bill every downstream consumer for an event none of them can apply.
+            # Such a correction is a real divergence from what storage will later
+            # hold; closing it needs ``BarBuffer`` to accept an in-place
+            # amendment, which is out of scope here and filed in the charter.
+            if ts_open_ms < self._cursors.get(sub.candle, 0):
+                continue
             bar = _row_to_bar(timestamp, row, sub.instrument, sub.timeframe, bar_ms)
             if not is_closed:
                 bar = _forming(bar)
@@ -243,7 +283,7 @@ class LiveFeed:
             # client paginates from 1970 to the present before a single event is
             # yielded. A first poll wants the same lookback every later one does;
             # history is ``backfill``'s job, not the poll's.
-            newest = self.now_ms()
+            newest = self.clock.now_ms()
         return max(0, newest - bar_ms * self.lookback_bars)
 
     async def backfill(self, sub: Subscription, start_ms: int, end_ms: int) -> AsyncIterator[Bar]:
@@ -266,7 +306,8 @@ class LiveFeed:
         frame = self.fetch(identity, start_ms, end_ms)
         if frame is None or frame.empty:
             return
-        now = self.now_ms()
+        frame = self._conform_funding(sub, frame)
+        now = self.clock.now_ms()
         for timestamp, row in _ordered(frame).iterrows():
             ts_open_ms = _epoch_ms(timestamp)
             if not start_ms <= ts_open_ms <= end_ms:

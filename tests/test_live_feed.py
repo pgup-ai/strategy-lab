@@ -29,6 +29,7 @@ from strategy_lab.feeds.live import (
     LiveFeed,
 )
 from strategy_lab.feeds.replay import ReplayFeed, _row_to_bar
+from strategy_lab.features.flow import FUNDING_COLUMN
 from strategy_lab.market_data.base import MarketDataIdentity
 from strategy_lab.strategies.registry import get_strategy
 from strategy_lab.timeframes import timeframe_to_millis
@@ -263,7 +264,7 @@ def test_a_cold_start_primes_from_backfill_and_reaches_the_replays_state(frame):
     feed = LiveFeed(
         fetch=lambda identity, since, until=None: long_frame.iloc[:split],
         sleep=_noop,
-        now_ms=lambda: 2**62,
+        clock=SimClock(2**62),
     )
     warmed = StrategyRunner(
         strategy=strategy,
@@ -318,7 +319,7 @@ def test_an_explicit_cadence_overrides_the_derived_one():
     assert LiveFeed(poll_seconds=1.5)._interval([Subscription(INSTRUMENT, "4h")]) == 1.5
 
 
-def test_a_corrected_closed_bar_reaches_the_caller(frame):
+def test_a_correction_to_the_newest_bar_reaches_the_caller(frame):
     """`lookback_bars` exists to re-read bars a venue may still correct, so
     suppressing the correction would make it decorative. The protocol forbids
     yielding *the same bar* twice; a bar whose values changed is a different bar
@@ -327,15 +328,40 @@ def test_a_corrected_closed_bar_reaches_the_caller(frame):
     feed = LiveFeed(fetch=venue, sleep=_noop)
     first = drain(feed, [SUB], polls=2)
 
+    # The newest bar the caller holds — the one `BarBuffer` can still replace.
+    newest = feed._cursors[SUB.candle]
+    at = frame.index.get_loc(pd.Timestamp(newest, unit="ms", tz="UTC"))
     corrected = frame.copy()
-    corrected.iloc[3, corrected.columns.get_loc("close")] *= 1.5
+    corrected.iloc[at, corrected.columns.get_loc("close")] *= 1.5
     venue.frame = corrected
-    venue.stop_after = None
     again = drain(feed, [SUB], polls=3)
 
-    stamp = int(frame.index[3].value // 10**6)
-    assert any(e.bar.ts_open_ms == stamp for e in first)
-    assert any(e.bar.ts_open_ms == stamp for e in again), "the correction was suppressed"
+    assert any(e.bar.ts_open_ms == newest for e in first)
+    assert any(e.bar.ts_open_ms == newest for e in again), "the correction was suppressed"
+
+
+def test_a_correction_the_buffer_would_drop_is_not_re_emitted(frame):
+    """The bound on the above. `BarBuffer.append` replaces on a repeated
+    timestamp but drops anything *older* than its last as out-of-order —
+    measured, a correction four bars back increments `dropped_out_of_order` and
+    changes nothing. Emitting it would bill every consumer for an event none of
+    them can apply."""
+    venue = _Venue(frame, first=10)
+    feed = LiveFeed(fetch=venue, sleep=_noop)
+    drain(feed, [SUB], polls=2)
+
+    newest = pd.Timestamp(feed._cursors[SUB.candle], unit="ms", tz="UTC")
+    at = frame.index.get_loc(newest) - 4
+    corrected = frame.copy()
+    corrected.iloc[at, corrected.columns.get_loc("close")] *= 1.5
+    venue.frame = corrected
+    again = drain(feed, [SUB], polls=3)
+
+    stale = int(frame.index[at].value // 10**6)
+    assert again, "the venue was never re-polled, so nothing was under test"
+    assert not any(e.bar.ts_open_ms == stale for e in again), (
+        "a correction the buffer would drop as out-of-order was re-emitted anyway"
+    )
 
 
 def test_an_unchanged_re_read_is_not_re_emitted(frame):
@@ -377,7 +403,6 @@ def test_the_real_fetch_attaches_a_perps_funding(monkeypatch):
     R10f closed on the replayed one.
     """
     from strategy_lab.feeds import live as live_module
-    from strategy_lab.features.flow import FUNDING_COLUMN
 
     funded = synthetic_ohlcv_with_funding(n=30, freq=TIMEFRAME)
     settlements = funded[FUNDING_COLUMN][funded[FUNDING_COLUMN] != 0.0]
@@ -458,7 +483,7 @@ def test_a_cold_start_asks_for_a_lookback_not_for_1970():
     `backfill`'s job; a first poll wants the same lookback every later one does."""
     now = 1_700_000_000_000
     bar_ms = 14_400_000
-    feed = LiveFeed(fetch=_Venue(pd.DataFrame(), first=0), sleep=_noop, now_ms=lambda: now)
+    feed = LiveFeed(fetch=_Venue(pd.DataFrame(), first=0), sleep=_noop, clock=SimClock(now))
 
     assert feed._since_ms(SUB, bar_ms) == now - bar_ms * feed.lookback_bars
 
@@ -493,3 +518,60 @@ def test_a_far_future_bound_means_no_bound_rather_than_a_crash(monkeypatch):
 
     assert seen[0] is None, "a far-future sentinel should mean no bound"
     assert seen[1] is not None, "a real bound must still reach the client"
+
+
+def test_a_subscription_holds_one_answer_about_funding_for_its_whole_life():
+    """`with_funding_column` decides per *window*, and a feed asks about two.
+    Measured before this: priming from full BTC history (which spans the venue's
+    permanent ~40h head gap, so no column) and then polling the recent tail (no
+    gap, so a column) crashed on the first poll, because a stream that changes its
+    mind about funding is exactly what `BarBuffer` refuses (M42).
+
+    The buffer's guard is right and stays. The feed is what must be consistent.
+    """
+    funded = synthetic_ohlcv_with_funding(n=60, freq=TIMEFRAME)
+    head = 50
+
+    def fetch(identity, since_ms, until_ms=None):
+        if until_ms is not None:  # `backfill`; a poll passes no bound
+            return funded.iloc[:head].drop(columns=[FUNDING_COLUMN])
+        return funded.iloc[head - 3 :]  # the recent window, funded
+
+    feed = LiveFeed(fetch=fetch, sleep=_noop, clock=SimClock(10**13))
+    runner = StrategyRunner(
+        strategy=get_strategy("donchian"),
+        instrument=INSTRUMENT,
+        timeframe=TIMEFRAME,
+        clock=SimClock(),
+        record_reasons=False,
+    )
+
+    async def _history():
+        return [bar async for bar in feed.backfill(SUB, 0, 2**62)]
+
+    runner.prime_bars(asyncio.run(_history()))
+    assert not runner.buffer.carries_funding
+
+    for event in feed._poll(SUB):
+        runner.on_event(event)  # must not raise
+
+    assert len(runner.buffer) > head, "the poll never reached the buffer"
+    assert not runner.buffer.carries_funding, "the stream changed its mind after all"
+
+
+def test_losing_funding_mid_stream_is_refused_where_the_cause_can_be_named():
+    """The reverse of the above is not conformed away: earlier bars ran with
+    funding, so continuing without it would run a different strategy than they
+    did."""
+    funded = synthetic_ohlcv_with_funding(n=20, freq=TIMEFRAME)
+    calls = {"n": 0}
+
+    def fetch(identity, since_ms, until_ms=None):
+        calls["n"] += 1
+        return funded if calls["n"] == 1 else funded.drop(columns=[FUNDING_COLUMN])
+
+    feed = LiveFeed(fetch=fetch, sleep=_noop, clock=SimClock(10**13))
+    feed._poll(SUB)
+
+    with pytest.raises(ValueError, match="stopped carrying funding"):
+        feed._poll(SUB)
