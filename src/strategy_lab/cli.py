@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import uuid
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import typer
@@ -943,6 +944,288 @@ def _write_bar_reasons(run_id, mode, reasons):
     from strategy_lab.storage.bar_reasons import write_bar_reasons
 
     return write_bar_reasons(run_id, mode, reasons)
+
+
+@app.command("paper")
+def paper_command(
+    exchange: str = typer.Option("binance", help="Venue to poll."),
+    market_type: str = typer.Option("perp", help="spot or perp."),
+    symbol: str = typer.Option("BTC/USDT", help="Symbol to trade on paper."),
+    timeframe: str = typer.Option("15m", help="Candle timeframe."),
+    strategy_name: str = typer.Option("donchian", "--strategy", help="Strategy name."),
+    exit_mode: str | None = typer.Option(None, help="Engine exit mode; the strategy's own if unset."),
+    for_minutes: float = typer.Option(60.0, help="Wall-clock minutes to run for."),
+    cash: float = typer.Option(10_000.0, help="Starting cash for the paper book."),
+    position_pct: float = typer.Option(0.95, help="Fraction of cash an entry sizes against."),
+    poll_seconds: float | None = typer.Option(None, help="Override the derived poll cadence."),
+    persist: bool = typer.Option(True, help="Write signals and reasons to Postgres."),
+    bars_csv: Path | None = typer.Option(
+        None, help="Also log every live bar here, for the delayed oracle to check."
+    ),
+) -> None:
+    """Run a strategy against the live venue on paper, and record what it saw.
+
+    The process R10 and R10g built the parts for: ``LiveFeed`` polls the venue,
+    ``StrategyRunner`` turns closed bars into signals over a buffer primed from
+    ``backfill``, and ``PaperBook`` turns those into positions. Nothing reaches an
+    exchange -- the book is a ledger, and R11 is where real size appears.
+
+    **It writes no candles to ``market_candles``, deliberately.** The delayed
+    oracle this phase exists for compares what the live path saw against what the
+    venue serves for the same range *later*; a process that stored its own bars
+    as the record would be compared against itself, which is not an oracle at
+    all. Fetch the range afterwards with ``fetch-perp`` and replay it.
+
+    ``--bars-csv`` is the other half of that and not a contradiction of it: the
+    live bars have to be written down *somewhere* or there is nothing to hold the
+    later fetch against, and a file beside the run is not the record of a
+    dataset. Without it the oracle can still compare signals and per-bar reasons,
+    but it cannot tell a venue revision from a closed-bar error, because both
+    show up only as a derived difference.
+
+    **A perp run advances its own funding.** Stored settlements move only when a
+    funding fetch runs, so a process that only polls candles watches its window
+    grow past its coverage until ``LiveFeed`` withholds every poll -- measured
+    before this existed, stored funding was 46.6 h stale and no window could be
+    covered at all. The top-up runs at startup and once per poll cycle thereafter,
+    and it is the same fetch ``server.refresh_candles`` performs for the browser.
+
+    **Bounded by the wall clock rather than by a bar count.** ``stream()`` does
+    not terminate, and a bound that waited for bars would hang exactly when the
+    feed had stopped producing them -- which is the condition worth observing.
+
+    **Signals and reasons are written as they happen**, not at the end: a run
+    measured in hours that flushed once would lose everything to the failure it
+    was there to watch. ``write_signals`` is idempotent within a run, so an
+    incremental flush is the same record arriving sooner. The run header is
+    created up front, unlike ``replay``'s -- a paper run that recorded nothing
+    still happened, and that it ran and produced nothing is the thing worth
+    keeping.
+    """
+    from strategy_lab.core.clock import LiveClock
+    from strategy_lab.core.types import InstrumentId, Mode
+    from strategy_lab.engine.book import PaperBook
+    from strategy_lab.engine.runner import StrategyRunner
+    from strategy_lab.feeds.base import Subscription
+    from strategy_lab.timeframes import timeframe_to_millis
+
+    strategy = get_strategy(strategy_name)
+    instrument = InstrumentId(exchange, market_type, symbol)
+    subscription = Subscription(instrument, timeframe)
+    identity = MarketDataIdentity(
+        exchange=exchange, market_type=market_type, symbol=symbol, timeframe=timeframe
+    )
+    bar_ms = timeframe_to_millis(timeframe)
+
+    settlements = _advance_funding(identity)
+    if settlements is not None:
+        typer.echo(f"Funding advanced: {settlements} settlements stored.")
+
+    feed = _live_feed(poll_seconds=poll_seconds, clock=LiveClock())
+    # One "now" in the process, and the feed owns it. The runner, the backfill
+    # window and the funding cadence all read the same clock the polling does, so
+    # anything that substitutes the feed substitutes time coherently rather than
+    # leaving a second wall clock behind -- which is how a test that thought it
+    # had scripted a venue primed zero bars from a window two years wide.
+    clock = feed.clock
+    runner = StrategyRunner(
+        strategy=strategy,
+        instrument=instrument,
+        timeframe=timeframe,
+        clock=clock,
+        exit_mode=exit_mode,
+    )
+
+    # Warmup plus the lookback, so the first poll's re-read overlaps history
+    # rather than landing beside it. `warmup_bars` is what makes a cold start
+    # agree with a whole-history backtest, and for an EWM strategy it is ~20x the
+    # declared span rather than the span.
+    end_ms = clock.now_ms()
+    start_ms = end_ms - bar_ms * (strategy.warmup_bars + feed.lookback_bars)
+
+    async def _prime() -> list:
+        return [bar async for bar in feed.backfill(subscription, start_ms, end_ms)]
+
+    primed = asyncio.run(_prime())
+    runner.prime_bars(primed)
+    if primed:
+        # Tell the feed where history left off, so the widened perp window does
+        # not re-emit bars the buffer would only drop as out-of-order.
+        feed.resume_after(subscription, primed[-1].ts_open_ms)
+    typer.echo(
+        f"Primed {len(primed)} bars ({strategy.name} wants {strategy.warmup_bars}); "
+        f"buffer carries funding: {runner.buffer.carries_funding}."
+    )
+    if len(primed) < strategy.warmup_bars:
+        typer.echo(
+            "Warning: primed below warmup, so early bars emit nothing and the "
+            "first signals will lag the run's start."
+        )
+    _warn_if_sizing_is_dropped(strategy, runner)
+
+    book = PaperBook(cash=cash, position_pct=position_pct)
+    run_id = _create_run(
+        run_id=uuid.uuid4(),
+        mode=Mode.PAPER,
+        strategy_id=strategy.name,
+        strategy_version=strategy.version,
+        config={
+            "exchange": exchange,
+            "market_type": market_type,
+            "symbol": symbol,
+            "timeframe": timeframe,
+            "exit_mode": exit_mode,
+            "for_minutes": for_minutes,
+            "warmup_bars": strategy.warmup_bars,
+            "primed_bars": len(primed),
+            "cash": cash,
+            "position_pct": position_pct,
+            "started_ms": end_ms,
+        },
+    ) if persist else None
+
+    signals: list = []
+    written = {"signals": 0, "reasons": 0}
+    bars = 0
+    bar_log = _open_bar_log(bars_csv)
+
+    async def _run() -> None:
+        nonlocal bars
+        last_funding = clock.now_ms()
+        async for event in feed.stream([subscription]):
+            bars += 1
+            if bar_log is not None:
+                _log_bar(bar_log, event.bar)
+            emitted = runner.on_event(event)
+            signals.extend(emitted)
+            book.on_bar(
+                emitted, close=float(event.bar.close), ts_bar_ms=event.bar.ts_open_ms
+            )
+            if run_id is not None:
+                _flush(run_id, signals, runner.reasons, written)
+            # Once per bar at most: settlements land on the venue's schedule and
+            # the guard tolerates a trailing gap of one cadence, so topping up as
+            # often as the poll would be spending a request to learn nothing.
+            if clock.now_ms() - last_funding >= bar_ms:
+                _advance_funding(identity)
+                last_funding = clock.now_ms()
+
+    try:
+        asyncio.run(asyncio.wait_for(_run(), timeout=for_minutes * 60.0))
+    except TimeoutError:
+        pass  # the bound, not a failure
+    except KeyboardInterrupt:
+        typer.echo("Interrupted.")
+
+    if run_id is not None:
+        _flush(run_id, signals, runner.reasons, written)
+    if bar_log is not None:
+        bar_log.close()
+        typer.echo(f"Live bars logged to {bars_csv}.")
+
+    typer.echo(
+        f"Ran {for_minutes:g} min: {bars} bars, {len(signals)} signals, "
+        f"{len(runner.reasons)} reasons, {len(book.trades)} closed trades. "
+        f"Withheld polls: {feed.funding_withheld_polls}."
+    )
+    if run_id is not None:
+        typer.echo(
+            f"Run {run_id}: wrote {written['signals']} signals, "
+            f"{written['reasons']} reasons."
+        )
+    else:
+        typer.echo("Not persisted.")
+
+
+def _live_feed(**kwargs):
+    """The feed, behind the same kind of seam as the three storage writers.
+
+    ``LiveFeed.fetch`` is a dataclass field whose default is bound when the class
+    is created, so patching either the attribute or the module function leaves
+    the constructed feed pointing at the venue -- measured, a test that thought
+    it had substituted a fixture was fetching from Binance. A factory is the seam
+    that actually holds.
+    """
+    from strategy_lab.feeds.live import LiveFeed
+
+    return LiveFeed(**kwargs)
+
+
+def _open_bar_log(path: Path | None):
+    """A csv of what the live path actually received, or ``None``.
+
+    Flushed per bar rather than buffered: the file exists to survive whatever
+    ends the run, and a bar still in a buffer when the process dies is exactly
+    the bar worth having.
+    """
+    if path is None:
+        return None
+    path.parent.mkdir(parents=True, exist_ok=True)
+    handle = path.open("w", encoding="utf-8")
+    handle.write("ts_open_ms,open,high,low,close,volume,funding_rate,is_closed\n")
+    return handle
+
+
+def _log_bar(handle, bar) -> None:
+    funding = "" if bar.funding_rate is None else bar.funding_rate
+    handle.write(
+        f"{bar.ts_open_ms},{bar.open},{bar.high},{bar.low},{bar.close},"
+        f"{bar.volume},{funding},{bar.is_closed}\n"
+    )
+    handle.flush()
+
+
+def _advance_funding(identity) -> int | None:
+    """Top up stored settlements for a perp. ``None`` off-perp, where none exist.
+
+    The browser's own fetch, called rather than copied, so a paper process cannot
+    advance funding by a rule the rest of the lab does not use.
+    """
+    from strategy_lab.server import _fetch_funding
+
+    if identity.market_type != "perp":
+        return None
+    rows = _fetch_funding(identity, datetime.now(UTC) - timedelta(days=2))
+    if rows is None:
+        return None
+    from strategy_lab.db.funding import upsert_funding
+
+    return upsert_funding(rows)
+
+
+def _warn_if_sizing_is_dropped(strategy, runner) -> None:
+    """Say so when the book cannot size the way a backtest of this would.
+
+    ``StrategyRunner`` emits ``strength=None`` and no ``Signal`` carries a
+    ``position_size``, so the book sizes every entry at scale 1.0. For a strategy
+    whose ``SignalSet`` carries a per-bar scale that is a real divergence from its
+    backtest -- the one property R10g's book was built to have -- and it is worth
+    a sentence rather than a quietly different number.
+    """
+    frame = runner.buffer.frame()
+    if frame.empty:
+        return
+    size = getattr(strategy.generate_signals(frame), "position_size", None)
+    if size is not None:
+        typer.echo(
+            f"Warning: {strategy.name} sizes per bar, and the event path carries no "
+            f"size onto a Signal -- this book fills every entry at scale 1.0, so its "
+            f"trades will not match a backtest of the same range."
+        )
+
+
+def _flush(run_id, signals: list, reasons: list, written: dict) -> None:
+    """Persist whatever has not been persisted yet."""
+    if len(signals) > written["signals"]:
+        from strategy_lab.core.types import Mode
+
+        _write_signals(run_id, Mode.PAPER, signals[written["signals"] :])
+        written["signals"] = len(signals)
+    if len(reasons) > written["reasons"]:
+        from strategy_lab.core.types import Mode
+
+        _write_bar_reasons(run_id, Mode.PAPER, reasons[written["reasons"] :])
+        written["reasons"] = len(reasons)
 
 
 @app.command("serve")
