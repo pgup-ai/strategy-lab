@@ -2314,6 +2314,7 @@ Not blocking, but they will bite during this program.
 | db-marked tests write to the production research database | Will worsen as research volume grows |
 | `backfill()` returns `AsyncIterator[Bar]`, `prime()` takes a DataFrame | **Blocking as of R10**: a live process cannot warm itself from history, and `state_machine_v1` emits nothing for its first 2,192 bars — a year at 4h |
 | `Subscription.include_forming` declared but never read | **Blocking as of R10**: harmless while the only feed yields closed bars, and a poll lands mid-bar routinely |
+| A funding stall stops a live feed silently | **Opened by R10**: `LiveFeed` withholds bars while stored funding lags the polled window rather than dying, and says so once — but nothing escalates a stall that never resolves. Belongs with restart and supervision |
 | `BarBuffer` amends only its newest bar | **Opened by R10**: a venue correcting a bar further back has nowhere to land — `append` drops anything older than its last as out-of-order, so `LiveFeed` does not emit it and the live buffer keeps a value storage will later disagree with |
 | `uq_signals_identity` omits `market_type` | Spot + perp signals on the same bar collapse to one |
 | `ruff` never enforces its own 100-char limit (22 violations) | Cosmetic |

@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import asyncio
 import math
+import warnings
 from collections.abc import AsyncIterator, Callable, Sequence
 from dataclasses import dataclass, field, replace
 
@@ -78,9 +79,9 @@ def _fetch_recent(
     same one ``ReplayFeed.from_database`` uses -- so the alignment rule is shared
     rather than duplicated. ``required=False`` because a live process must not
     die at the right edge: settlements land on the venue's own schedule and the
-    newest bars routinely have none yet. When coverage falls short the column is
-    absent rather than partial, the feature falls back, and the run *records*
-    that as ``crowding_measured: false`` -- visible rather than silent.
+    newest bars routinely have none yet. Coverage falling short drops the column
+    entirely rather than returning it partial, and what the feed does with that
+    depends on whether the stream was ever funded -- see ``_conform_funding``.
     """
     from strategy_lab.backtests.funding_frame import with_funding_column
     from strategy_lab.market_data.binance import CryptoOhlcvClient
@@ -127,7 +128,10 @@ class LiveFeed:
     # bytes: 0.6 MB/year at 4h and 9.5 MB/year at 15m, for a process meant to be
     # restarted rather than run forever.
     _seen: set[tuple[str, int, bool, tuple]] = field(default_factory=set, init=False)
+    # Monotonic, so a stall that resolved itself is still visible afterwards.
+    funding_withheld_polls: int = field(default=0, init=False)
     _funded: dict[CandleId, bool] = field(default_factory=dict, init=False, repr=False)
+    _withholding: set[CandleId] = field(default_factory=set, init=False, repr=False)
     _cursors: dict[CandleId, int] = field(default_factory=dict, init=False, repr=False)
     _last_event_ms: int | None = field(default=None, init=False, repr=False)
 
@@ -202,25 +206,47 @@ class LiveFeed:
 
         The buffer's guard is not the thing to loosen. The feed is what must be
         consistent, so the first frame for a subscription fixes the answer and
-        later frames are conformed to it: a column is dropped if the stream began
-        without one. The reverse -- funded, then a window that cannot be covered
-        -- is *not* silently filled, because carrying on unfunded would run a
-        different strategy from the one the earlier bars ran; it raises here,
-        where the cause can be named, rather than in the buffer.
+        later frames are conformed to it.
+
+        **A stream that began unfunded drops the column; one that began funded
+        withholds the poll rather than dying.** The asymmetry is not a
+        preference, it is what the two directions mean. Beginning unfunded is a
+        property of the *history* -- BTC's head gap is permanent -- so it is
+        settled and the tail conforms. Losing funding mid-stream is a property of
+        the *right edge*, and routine: the venue serves candles in real time
+        while stored settlements only advance when a funding fetch runs, so the
+        window outgrows its coverage every cadence, ``funding_rates`` drops the
+        column entirely rather than returning it partial, and a raise here would
+        kill a paper run on a lag that resolves itself.
+
+        Withholding loses nothing. The cursor advances only on an emitted event,
+        so the next poll re-reads the same window and emits it once coverage
+        catches up -- the bars are late, not gone. It is not silent either: the
+        first withheld poll warns, ``funding_withheld_polls`` counts, and
+        ``health().last_event_ms`` stops advancing. Turning a persistent stall
+        into an alert belongs with restart and supervision, which R10
+        deliberately does not own.
         """
         has_column = FUNDING_COLUMN in frame.columns
         settled = self._funded.setdefault(sub.candle, has_column)
-        if settled == has_column:
-            return frame
-        if settled:
-            raise ValueError(
-                f"{sub.candle.key} stopped carrying funding mid-stream. Earlier bars ran "
-                f"with it, so continuing without would run a different strategy than they "
-                f"did. Backfill the settlements, or restart the feed to run unfunded."
-            )
-        # Began unfunded -- usually a history request spanning a coverage gap --
-        # so the tail conforms rather than the stream changing its mind.
-        return frame.drop(columns=[FUNDING_COLUMN])
+        if settled and not has_column:
+            self.funding_withheld_polls += 1
+            if sub.candle not in self._withholding:
+                # Once per stall rather than once per poll: at the default
+                # cadence a persistent one would warn every five seconds.
+                self._withholding.add(sub.candle)
+                warnings.warn(
+                    f"{sub.candle.key}: stored funding no longer covers the polled window, "
+                    f"so bars are being withheld until it does. Earlier bars ran with "
+                    f"funding and emitting these without it would run a different strategy. "
+                    f"Advance the settlements (strategy-lab fetch-funding) to resume.",
+                    stacklevel=2,
+                )
+            return frame.iloc[:0]
+        self._withholding.discard(sub.candle)
+        if has_column and not settled:
+            return frame.drop(columns=[FUNDING_COLUMN])
+        return frame
 
     def _poll(self, sub: Subscription) -> list[BarEvent]:
         identity = _identity(sub)
@@ -230,6 +256,8 @@ class LiveFeed:
         if frame is None or frame.empty:
             return []
         frame = self._conform_funding(sub, frame)
+        if frame.empty:
+            return []
 
         events: list[BarEvent] = []
         ordered = _ordered(frame)
@@ -307,6 +335,8 @@ class LiveFeed:
         if frame is None or frame.empty:
             return
         frame = self._conform_funding(sub, frame)
+        if frame.empty:
+            return
         now = self.clock.now_ms()
         for timestamp, row in _ordered(frame).iterrows():
             ts_open_ms = _epoch_ms(timestamp)
@@ -334,8 +364,16 @@ def _values(row: pd.Series) -> tuple[float | None, ...]:
     every poll and grow ``_seen`` without bound -- a gap in the data turning into
     a leak and a signal storm.
     """
+    # Funding counts as something the bar says: a settlement stored after the
+    # fact moves a bar's rate and leaves its OHLCV alone, so a price-only
+    # fingerprint files that as unchanged and the buffer keeps a rate the record
+    # will later disagree with. Only when the frame carries it, so an unfunded
+    # stream keys exactly as it did.
+    names = ("open", "high", "low", "close", "volume")
+    if FUNDING_COLUMN in row.index:
+        names += (FUNDING_COLUMN,)
     values = []
-    for name in ("open", "high", "low", "close", "volume"):
+    for name in names:
         value = float(row[name])
         values.append(None if value != value else round(value, 10))
     return tuple(values)

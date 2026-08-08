@@ -14,6 +14,7 @@ class — a feed whose tests need a network is a feed whose tests do not run.
 from __future__ import annotations
 
 import asyncio
+import warnings
 
 import pandas as pd
 import pytest
@@ -559,19 +560,62 @@ def test_a_subscription_holds_one_answer_about_funding_for_its_whole_life():
     assert not runner.buffer.carries_funding, "the stream changed its mind after all"
 
 
-def test_losing_funding_mid_stream_is_refused_where_the_cause_can_be_named():
-    """The reverse of the above is not conformed away: earlier bars ran with
-    funding, so continuing without it would run a different strategy than they
-    did."""
+def test_losing_funding_mid_stream_withholds_rather_than_dying():
+    """The right edge outgrows its coverage every cadence — the venue serves
+    candles in real time while stored settlements advance only when a funding
+    fetch runs — and `funding_rates` drops the column entirely rather than
+    returning it partial. Dying there kills a paper run on a lag that resolves
+    itself; emitting unfunded bars after funded ones is what `BarBuffer` refuses.
+    So the poll is withheld, and the bars arrive once coverage catches up."""
     funded = synthetic_ohlcv_with_funding(n=20, freq=TIMEFRAME)
-    calls = {"n": 0}
 
     def fetch(identity, since_ms, until_ms=None):
-        calls["n"] += 1
-        return funded if calls["n"] == 1 else funded.drop(columns=[FUNDING_COLUMN])
+        return funded.iloc[:15]
 
     feed = LiveFeed(fetch=fetch, sleep=_noop, clock=SimClock(10**13))
-    feed._poll(SUB)
+    first = feed._poll(SUB)
+    assert first, "the funded poll should have emitted"
+    assert any(e.bar.funding_rate is not None for e in first), (
+        "a funded stream must keep its funding — stripping it is M20 on the live path"
+    )
 
-    with pytest.raises(ValueError, match="stopped carrying funding"):
-        feed._poll(SUB)
+    # Candles advance past the last stored settlement: no column at all.
+    feed.fetch = lambda i, s, u=None: funded.drop(columns=[FUNDING_COLUMN])
+    with pytest.warns(UserWarning, match="withheld"):
+        assert feed._poll(SUB) == [], "unfunded bars reached a funded stream"
+
+    # Once per stall, not once per poll: at the 5s floor a persistent one would
+    # warn 720 times an hour, and a log nobody can read is not a signal.
+    with warnings.catch_warnings(record=True) as later:
+        warnings.simplefilter("always")
+        assert feed._poll(SUB) == [] and feed._poll(SUB) == []
+    assert later == [], f"the stall re-warned {len(later)} times"
+    assert feed.funding_withheld_polls == 3
+
+    # The settlements land, and the bars the stall withheld arrive then.
+    feed.fetch = lambda i, s, u=None: funded
+    arrived = {e.bar.ts_open_ms for e in feed._poll(SUB)}
+    withheld = {int(ts.value // 10**6) for ts in funded.index[14:-1]}
+    assert withheld <= arrived, "bars were dropped by the stall rather than deferred"
+
+
+def test_a_funding_only_correction_is_not_an_unchanged_bar():
+    """A settlement stored after the fact changes a bar's rate and leaves its
+    OHLCV alone. Fingerprinting price only files that as "unchanged", and the
+    buffer keeps a rate the record will later disagree with — the live/replay
+    divergence R10f closed, arriving by another door."""
+    funded = synthetic_ohlcv_with_funding(n=20, freq=TIMEFRAME)
+    stale = funded.copy()
+    at = len(stale) - 2  # the newest closed bar, the one the buffer can replace
+    stale.iloc[at, stale.columns.get_loc(FUNDING_COLUMN)] = 0.0
+
+    feed = LiveFeed(fetch=lambda i, s, u=None: stale, sleep=_noop, clock=SimClock(10**13))
+    feed._poll(SUB)
+    feed.fetch = lambda i, s, u=None: funded
+
+    stamp = int(funded.index[at].value // 10**6)
+    corrected = [e for e in feed._poll(SUB) if e.bar.ts_open_ms == stamp]
+    assert corrected, "a funding-only correction was suppressed as a duplicate"
+    assert float(corrected[0].bar.funding_rate) == pytest.approx(
+        funded[FUNDING_COLUMN].iloc[at]
+    )
