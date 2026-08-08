@@ -132,6 +132,7 @@ class LiveFeed:
     funding_withheld_polls: int = field(default=0, init=False)
     _funded: dict[CandleId, bool] = field(default_factory=dict, init=False, repr=False)
     _withholding: set[CandleId] = field(default_factory=set, init=False, repr=False)
+    _window_floors: dict[CandleId, int] = field(default_factory=dict, init=False, repr=False)
     _cursors: dict[CandleId, int] = field(default_factory=dict, init=False, repr=False)
     _last_event_ms: int | None = field(default=None, init=False, repr=False)
 
@@ -325,22 +326,39 @@ class LiveFeed:
         return events
 
     def _since_ms(self, sub: Subscription, bar_ms: int) -> int:
-        """How far back this subscription re-reads, from **its own** cursor.
+        """How far back this subscription re-reads, from **its own** watermark.
 
-        Per ``CandleId`` rather than one cursor for the feed: BTC 4h and BTC 1d
-        advance at different rates, and a shared cursor would let the faster one
-        drag the slower one's window past bars it had not seen. That is the same
-        identity rule ``MarketSnapshot`` and ``ReplayFeed.frames`` key on, and for
-        the same reason.
+        Per ``CandleId`` rather than one watermark for the feed: BTC 4h and BTC 1d
+        advance at different rates, and a shared one would let the faster
+        subscription drag the slower one's window past bars it had not seen. That
+        is the same identity rule ``MarketSnapshot`` and ``ReplayFeed.frames``
+        key on, and for the same reason.
+
+        Once anything has been emitted the cursor is the watermark. Before that
+        it is a **pinned** floor, not ``now - lookback`` recomputed each poll: a
+        sliding window carries the start past bars the feed already fetched and
+        withheld, and measured, 8 stalled polls at 4h moved it 7 bars, dropping 2
+        out of a 5-bar lookback for good. That would make "withholding loses
+        nothing" false exactly when it matters. Pinned, the window grows through
+        a stall and empties in one poll when coverage returns.
+
+        Not by seeding ``_cursors``, which means "newest *emitted*" and gates the
+        correction rule -- the withheld bars would return as stale corrections
+        and be dropped. And deliberately unbounded, because a cap reintroduces
+        the same gap once a stall outlives it, where an unbounded window is only
+        a slower poll that the withholding warning already says how to end.
         """
         newest = self._cursors.get(sub.candle)
-        if newest is None:
-            # Cold start: without this the window opens at the epoch and the
-            # client paginates from 1970 to the present before a single event is
-            # yielded. A first poll wants the same lookback every later one does;
-            # history is ``backfill``'s job, not the poll's.
-            newest = self.clock.now_ms()
-        return max(0, newest - bar_ms * self.lookback_bars)
+        if newest is not None:
+            return max(0, newest - bar_ms * self.lookback_bars)
+        floor = self._window_floors.get(sub.candle)
+        if floor is None:
+            # A cold start wants the same lookback every later poll does; reaching
+            # further back is ``backfill``'s job, and opening at the epoch would
+            # paginate from 1970 before a single event was yielded.
+            floor = max(0, self.clock.now_ms() - bar_ms * self.lookback_bars)
+            self._window_floors[sub.candle] = floor
+        return floor
 
     async def backfill(self, sub: Subscription, start_ms: int, end_ms: int) -> AsyncIterator[Bar]:
         """Every **closed** bar covering ``[start_ms, end_ms]``, ascending.

@@ -666,3 +666,41 @@ def test_a_spot_stream_settles_unfunded_without_a_word():
         warnings.simplefilter("always")
         assert feed._poll(spot), "a spot stream was withheld over funding it can never have"
     assert caught == [], f"spot warned about funding: {[str(w.message) for w in caught]}"
+
+
+def test_a_stall_longer_than_the_lookback_still_loses_no_bars():
+    """"Withholding loses nothing" is only true if the window stops sliding.
+    Before the floor was pinned, 8 stalled polls at 4h moved the fetch start 7
+    bars, so bars fell out of a 5-bar lookback while withheld and could never be
+    emitted — a permanent hole created by the mechanism that exists to avoid one.
+    """
+    funded = synthetic_ohlcv_with_funding(n=40, freq=TIMEFRAME)
+    bar_ms = timeframe_to_millis(TIMEFRAME)
+    clock = SimClock(int(funded.index[10].value // 10**6))
+    covered = {"funding": False}
+
+    def fetch(identity, since_ms, until_ms=None):
+        window = funded[
+            (funded.index >= pd.Timestamp(since_ms, unit="ms", tz="UTC"))
+            & (funded.index <= pd.Timestamp(clock.now_ms(), unit="ms", tz="UTC"))
+        ]
+        return window if covered["funding"] else window.drop(columns=[FUNDING_COLUMN])
+
+    feed = LiveFeed(fetch=fetch, sleep=_noop, clock=clock)
+    first_window = feed._since_ms(SUB, bar_ms)
+
+    with pytest.warns(UserWarning, match="withheld"):
+        for _ in range(8):  # a stall well past `lookback_bars`, a bar closing each poll
+            assert feed._poll(SUB) == []
+            clock.advance_to(clock.now_ms() + bar_ms)
+
+    assert feed._since_ms(SUB, bar_ms) == first_window, "the fetch window slid while stalled"
+
+    covered["funding"] = True
+    arrived = {e.bar.ts_open_ms for e in feed._poll(SUB)}
+    withheld = {
+        int(ts.value // 10**6)
+        for ts in funded.index
+        if first_window <= int(ts.value // 10**6) < clock.now_ms()
+    }
+    assert withheld <= arrived, f"{len(withheld - arrived)} bars fell out of the window"
