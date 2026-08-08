@@ -2196,7 +2196,24 @@ distinguishable.
 3. **No process, no scheduler, no persistence.** The feed exists; nothing runs it in a loop
    for days. Restart, supervision and what a paper run should write belong together in the
    phase that owns operating it.
-4. **The poll cadence is a judgement, not a measurement.** The default is the bar over 60,
+4. **Review found the live path silently undoing R10f, and it is the phase's most serious
+   miss.** `LiveFeed` built bars straight from the venue's OHLCV endpoint, which returns no
+   funding — so a live perp bar carried `funding_rate=None`, the buffer materialised no
+   column, and `crowding` fell back to neutral. That is M20, on the path the whole census
+   was closed for. Measured: a replayed perp bar carried a rate and a live one carried
+   `None`. Now attached through `with_funding_column` — the engine's own function, the same
+   one `ReplayFeed.from_database` uses — with `required=False`, so an uncovered right edge
+   degrades to a recorded `crowding_measured: false` rather than killing a live process.
+   **Nothing tested it**, because every other test injects `fetch`; the mutant survived
+   until a test drove the real `_fetch_recent` with the venue client patched out.
+5. **Two more review findings, both about a re-read.** `_seen` was keyed on identity alone,
+   so a venue *correcting* a bar it had already closed was dropped — which made
+   `lookback_bars` decorative, since re-reading a window exists precisely to catch those.
+   The key now includes the values: the protocol forbids the same bar twice, and a bar whose
+   values moved is a different bar under the same timestamp. And the fetch cursor was one
+   per *feed* rather than one per `CandleId`, so BTC 4h could drag BTC 1d's window past bars
+   it had not seen — the identity rule `MarketSnapshot` already follows.
+6. **The poll cadence is a judgement, not a measurement.** The default is the bar over 60,
    clamped to 5–300 s, so a 4h subscription polls every four minutes. The first version
    polled once per *bar*, which meant a bar closing at *T* was not seen until *T + 4h* — a
    "live" feed a full bar behind, caught in review. Neither bound is measured against a

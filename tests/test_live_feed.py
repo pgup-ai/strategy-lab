@@ -28,10 +28,11 @@ from strategy_lab.feeds.live import (
     MIN_POLL_SECONDS,
     LiveFeed,
 )
-from strategy_lab.feeds.replay import ReplayFeed
+from strategy_lab.feeds.replay import ReplayFeed, _row_to_bar
+from strategy_lab.market_data.base import MarketDataIdentity
 from strategy_lab.strategies.registry import get_strategy
 from strategy_lab.timeframes import timeframe_to_millis
-from tests.conftest import synthetic_ohlcv
+from tests.conftest import synthetic_ohlcv, synthetic_ohlcv_with_funding
 
 TIMEFRAME = "4h"
 INSTRUMENT = InstrumentId("binance", "perp", "BTC/USDT")
@@ -206,10 +207,13 @@ def test_a_live_window_yields_the_bars_a_replay_of_it_yields(frame):
     stored = stored[: len(live)]
 
     assert len(live) > 10
+    fields = ("open", "high", "low", "close", "volume")
     for got, want in zip(live, stored, strict=True):
         assert got.bar.ts_open_ms == want.bar.ts_open_ms
-        assert got.bar.close == want.bar.close
         assert got.bar.is_closed == want.bar.is_closed
+        # Every field, because "identical bars" is what the gate claims and a
+        # defect in `high` or `volume` would pass a close-only comparison.
+        assert [getattr(got.bar, f) for f in fields] == [getattr(want.bar, f) for f in fields]
 
 
 def test_a_live_window_yields_the_signals_a_replay_of_it_yields(frame):
@@ -254,7 +258,13 @@ def test_a_cold_start_primes_from_backfill_and_reaches_the_replays_state(frame):
     long_frame = synthetic_ohlcv(n=strategy.warmup_bars + 200, freq=TIMEFRAME)
     split = strategy.warmup_bars + 100
 
-    feed = LiveFeed(fetch=lambda identity, since: long_frame.iloc[:split], sleep=_noop)
+    # A bounded historical request: every row in it closed long ago, so the
+    # clock says so and none is withheld as forming.
+    feed = LiveFeed(
+        fetch=lambda identity, since: long_frame.iloc[:split],
+        sleep=_noop,
+        now_ms=lambda: 2**62,
+    )
     warmed = StrategyRunner(
         strategy=strategy,
         instrument=INSTRUMENT,
@@ -267,7 +277,7 @@ def test_a_cold_start_primes_from_backfill_and_reaches_the_replays_state(frame):
 
     bars = asyncio.run(_backfilled())
 
-    assert len(bars) == split - 1, "backfill withheld something other than the forming bar"
+    assert len(bars) == split, "a bounded backfill dropped a closed bar"
     warmed.prime_bars(bars)
     assert len(warmed.buffer) == len(bars)
 
@@ -280,7 +290,7 @@ def test_a_cold_start_primes_from_backfill_and_reaches_the_replays_state(frame):
         clock=SimClock(),
         record_reasons=False,
     )
-    from_frame.prime(long_frame.iloc[: split - 1])
+    from_frame.prime(long_frame.iloc[:split])
 
     pd.testing.assert_frame_equal(warmed.buffer.frame(), from_frame.buffer.frame())
 
@@ -306,3 +316,103 @@ def test_an_explicit_cadence_overrides_the_derived_one():
     """The bounds above are judgements, not measurements against a rate limit —
     so an operator who has one says so."""
     assert LiveFeed(poll_seconds=1.5)._interval([Subscription(INSTRUMENT, "4h")]) == 1.5
+
+
+def test_a_corrected_closed_bar_reaches_the_caller(frame):
+    """`lookback_bars` exists to re-read bars a venue may still correct, so
+    suppressing the correction would make it decorative. The protocol forbids
+    yielding *the same bar* twice; a bar whose values changed is a different bar
+    under the same timestamp, and `BarBuffer` lands it last-wins."""
+    venue = _Venue(frame, first=10)
+    feed = LiveFeed(fetch=venue, sleep=_noop)
+    first = drain(feed, [SUB], polls=2)
+
+    corrected = frame.copy()
+    corrected.iloc[3, corrected.columns.get_loc("close")] *= 1.5
+    venue.frame = corrected
+    venue.stop_after = None
+    again = drain(feed, [SUB], polls=3)
+
+    stamp = int(frame.index[3].value // 10**6)
+    assert any(e.bar.ts_open_ms == stamp for e in first)
+    assert any(e.bar.ts_open_ms == stamp for e in again), "the correction was suppressed"
+
+
+def test_an_unchanged_re_read_is_not_re_emitted(frame):
+    """The other half: re-reading the same window must not replay bars that did
+    not move, or every poll would re-emit its whole lookback."""
+    feed = LiveFeed(fetch=_Venue(frame, first=10, step=0), sleep=_noop)
+
+    events = drain(feed, [SUB], polls=4)
+    stamps = [e.bar.ts_open_ms for e in events]
+
+    assert len(stamps) == len(set(stamps))
+
+
+def test_one_subscription_does_not_drag_anothers_fetch_window():
+    """Cursors are per `CandleId`: BTC 4h and BTC 1d advance at different rates,
+    and a shared cursor would let the faster one pull the slower one's window past
+    bars it had not seen.
+
+    Asserted against the *lagging* subscription's own cursor rather than by
+    comparing the two windows — two timeframes give different windows either way,
+    so that comparison cannot see a shared cursor.
+    """
+    slow = Subscription(INSTRUMENT, "1d")
+    bar_4h, bar_1d = 14_400_000, 86_400_000
+    feed = LiveFeed(fetch=_Venue(pd.DataFrame(), first=0), sleep=_noop)
+    feed._cursors = {SUB.candle: 5_000_000_000, slow.candle: 1_000_000_000}
+
+    assert feed._since_ms(slow, bar_1d) == 1_000_000_000 - bar_1d * feed.lookback_bars
+    assert feed._since_ms(SUB, bar_4h) == 5_000_000_000 - bar_4h * feed.lookback_bars
+
+
+def test_the_real_fetch_attaches_a_perps_funding(monkeypatch):
+    """The fix that matters most on this path, and the one every other test here
+    cannot see because they all inject `fetch`.
+
+    A venue's OHLCV endpoint returns no funding, so a live bar built straight from
+    it carries `funding_rate=None`, the buffer materialises no column, and
+    `crowding` falls back to neutral — M20 again, undoing on the live path what
+    R10f closed on the replayed one.
+    """
+    from strategy_lab.feeds import live as live_module
+    from strategy_lab.features.flow import FUNDING_COLUMN
+
+    funded = synthetic_ohlcv_with_funding(n=30, freq=TIMEFRAME)
+    settlements = funded[FUNDING_COLUMN][funded[FUNDING_COLUMN] != 0.0]
+    bare = funded.drop(columns=[FUNDING_COLUMN])
+
+    class _Client:
+        def __init__(self, **kwargs):
+            pass
+
+        def fetch_ohlcv(self, *args, **kwargs):
+            return bare
+
+    monkeypatch.setattr("strategy_lab.market_data.binance.CryptoOhlcvClient", _Client)
+    monkeypatch.setattr(
+        "strategy_lab.backtests.funding_frame.funding_rates",
+        lambda identity, frame, **_: settlements,
+    )
+
+    got = live_module._fetch_recent(
+        MarketDataIdentity(
+            exchange="binance", market_type="perp", symbol="BTC/USDT", timeframe=TIMEFRAME
+        ),
+        0,
+    )
+
+    assert FUNDING_COLUMN in got.columns, "a live perp bar would run crowding-neutral"
+    # And it reaches the bar, which is what BarBuffer reads to decide whether the
+    # column exists at all.
+    bar = _row_to_bar(got.index[0], got.iloc[0], INSTRUMENT, TIMEFRAME, 14_400_000)
+    assert bar.funding_rate is not None
+
+
+def test_a_non_positive_or_non_finite_cadence_is_refused():
+    """An operator sets this by hand: zero busy-loops, and a NaN compares false
+    against every bound so it would silently mean "as fast as fetch returns"."""
+    for bad in (0, -1.0, float("nan"), float("inf") * -1):
+        with pytest.raises(ValueError, match="poll_seconds"):
+            LiveFeed(poll_seconds=bad)

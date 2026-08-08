@@ -151,9 +151,10 @@ class StrategyRunner:
 
         The smaller of the two priming primitives, and the one that composes with
         the feed protocol: ``MarketDataFeed.backfill`` yields ``Bar``, so a live
-        process warms itself with ``runner.prime_bars(await collect(feed.backfill(
-        ...)))``. Before R10 the only entry point took a DataFrame, and the two
-        did not meet -- which was fatal rather than awkward, since
+        process materialises ``feed.backfill(...)`` with an async comprehension
+        and hands the bars straight to this. Before R10 the only entry point
+        took a DataFrame, and the two did not meet -- which was fatal rather
+        than awkward, since
         ``state_machine_v1`` emits nothing for its first 2,192 bars and a freshly
         started process would have waited a year at 4h to say anything.
         """

@@ -32,12 +32,13 @@ values, and ``replaced_duplicates`` counts it.
 from __future__ import annotations
 
 import asyncio
+import time
 from collections.abc import AsyncIterator, Callable, Sequence
 from dataclasses import dataclass, field, replace
 
 import pandas as pd
 
-from strategy_lab.core.types import Bar, BarEvent
+from strategy_lab.core.types import Bar, BarEvent, CandleId
 from strategy_lab.feeds.base import FeedHealth, Subscription
 from strategy_lab.feeds.replay import _epoch_ms, _ordered, _row_to_bar
 from strategy_lab.market_data.base import MarketDataIdentity
@@ -47,6 +48,11 @@ from strategy_lab.timeframes import timeframe_to_millis
 # it just closed, and a feed that only ever asked for the newest would never see
 # the correction -- the same reason `server.refresh_candles` reaches back rather
 # than fetching the tip.
+def _wall_clock_ms() -> int:
+    """UTC epoch milliseconds, injectable so `backfill` is testable offline."""
+    return int(time.time() * 1000)
+
+
 DEFAULT_LOOKBACK_BARS = 5
 
 # The default cadence, as a fraction of the bar being polled. See ``_interval``.
@@ -56,14 +62,33 @@ MAX_POLL_SECONDS = 300.0
 
 
 def _fetch_recent(identity: MarketDataIdentity, since_ms: int) -> pd.DataFrame:
-    """The venue's own recent candles, through the client the fetchers already use."""
+    """The venue's recent candles, with a perp's stored funding attached.
+
+    **The funding half is not optional.** The venue's OHLCV endpoint returns no
+    funding, so a live bar built straight from it carries ``funding_rate=None``,
+    ``BarBuffer`` materialises no column, and ``crowding`` falls back to neutral --
+    which is M20 exactly, and undoes on the live path what R10f closed on the
+    replayed one. Measured before this was here: a replayed perp bar carried a
+    rate and a live one carried ``None``.
+
+    Attached through ``with_funding_column`` -- the engine's own function, the
+    same one ``ReplayFeed.from_database`` uses -- so the alignment rule is shared
+    rather than duplicated. ``required=False`` because a live process must not
+    die at the right edge: settlements land on the venue's own schedule and the
+    newest bars routinely have none yet. When coverage falls short the column is
+    absent rather than partial, the feature falls back, and the run *records*
+    that as ``crowding_measured: false`` -- visible rather than silent.
+    """
+    from strategy_lab.backtests.funding_frame import with_funding_column
     from strategy_lab.market_data.binance import CryptoOhlcvClient
 
     client = CryptoOhlcvClient(
         exchange_id=identity.exchange, market_type=identity.market_type
     )
     since = pd.Timestamp(since_ms, unit="ms", tz="UTC").isoformat()
-    return client.fetch_ohlcv(identity.symbol, identity.timeframe, since=since)
+    frame = client.fetch_ohlcv(identity.symbol, identity.timeframe, since=since)
+    frame, _ = with_funding_column(identity, frame, enabled=True, required=False)
+    return frame
 
 
 @dataclass
@@ -81,9 +106,20 @@ class LiveFeed:
     poll_seconds: float | None = None
     fetch: Callable[[MarketDataIdentity, int], pd.DataFrame] = _fetch_recent
     sleep: Callable[[float], object] = asyncio.sleep
+    now_ms: Callable[[], int] = _wall_clock_ms
 
-    _seen: set[tuple[str, str, int, bool]] = field(default_factory=set, init=False)
+    _seen: set[tuple[str, int, bool, tuple]] = field(default_factory=set, init=False)
+    _cursors: dict[CandleId, int] = field(default_factory=dict, init=False, repr=False)
     _last_event_ms: int | None = field(default=None, init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        # A knob an operator sets by hand, unlike the values flowing through
+        # `build_fill`: zero busy-loops, and a NaN compares false against every
+        # bound so it would silently become "as fast as fetch returns".
+        if self.poll_seconds is not None and not self.poll_seconds > 0:
+            raise ValueError(
+                f"poll_seconds must be a positive number of seconds, got {self.poll_seconds!r}"
+            )
 
     async def stream(self, subs: Sequence[Subscription]) -> AsyncIterator[BarEvent]:
         """Poll each subscription in turn, forever, yielding what is new.
@@ -102,6 +138,9 @@ class LiveFeed:
             for sub in subs:
                 for event in self._poll(sub):
                     self._last_event_ms = event.ts_event_ms
+                    self._cursors[sub.candle] = max(
+                        self._cursors.get(sub.candle, 0), event.bar.ts_open_ms
+                    )
                     yield event
             await self.sleep(self._interval(subs))
 
@@ -127,7 +166,7 @@ class LiveFeed:
     def _poll(self, sub: Subscription) -> list[BarEvent]:
         identity = _identity(sub)
         bar_ms = timeframe_to_millis(sub.timeframe)
-        frame = self.fetch(identity, self._since_ms(bar_ms))
+        frame = self.fetch(identity, self._since_ms(sub, bar_ms))
         if frame is None or frame.empty:
             return []
 
@@ -143,7 +182,14 @@ class LiveFeed:
             is_closed = ts_open_ms != newest
             if not is_closed and not sub.include_forming:
                 continue
-            key = (sub.instrument.key, sub.timeframe, ts_open_ms, is_closed)
+            # Keyed on the *values* as well as the identity, deliberately. The
+            # protocol forbids yielding the same bar twice, and a venue that
+            # corrects a bar it already closed is not sending the same bar -- it
+            # is sending a different one under the same timestamp. Suppressing
+            # those would make `lookback_bars` decorative, since re-reading a
+            # window exists precisely to catch them. `BarBuffer` replaces
+            # last-wins and counts it, so a correction lands as a correction.
+            key = (sub.candle.key, ts_open_ms, is_closed, _values(row))
             if key in self._seen:
                 continue
             self._seen.add(key)
@@ -153,28 +199,45 @@ class LiveFeed:
             events.append(BarEvent(bar=bar, ts_event_ms=bar.ts_close_ms, ts_recv_ms=None))
         return events
 
-    def _since_ms(self, bar_ms: int) -> int:
-        newest = self._last_event_ms or 0
+    def _since_ms(self, sub: Subscription, bar_ms: int) -> int:
+        """How far back this subscription re-reads, from **its own** cursor.
+
+        Per ``CandleId`` rather than one cursor for the feed: BTC 4h and BTC 1d
+        advance at different rates, and a shared cursor would let the faster one
+        drag the slower one's window past bars it had not seen. That is the same
+        identity rule ``MarketSnapshot`` and ``ReplayFeed.frames`` key on, and for
+        the same reason.
+        """
+        newest = self._cursors.get(sub.candle, 0)
         return max(0, newest - bar_ms * self.lookback_bars)
 
     async def backfill(self, sub: Subscription, start_ms: int, end_ms: int) -> AsyncIterator[Bar]:
-        """Every closed bar covering ``[start_ms, end_ms]``, ascending.
+        """Every **closed** bar covering ``[start_ms, end_ms]``, ascending.
 
         This is what a cold start warms itself from, and it yields ``Bar`` because
         ``StrategyRunner.prime_bars`` takes ``Bar`` -- the two compose, which
         before R10 they did not.
+
+        **Closed is decided by the clock, not by position.** ``_poll`` can call
+        the newest row forming because the venue always serves up to now, so
+        there is always a partial row at the tip. A backfill is *bounded*: a
+        request ending last month gets a frame whose last row closed long ago,
+        and dropping it because it happened to be last would silently warm a
+        runner with one bar fewer than a replay of the same range -- an off-by-one
+        that moves the first live signal.
         """
         identity = _identity(sub)
         bar_ms = timeframe_to_millis(sub.timeframe)
         frame = self.fetch(identity, start_ms)
         if frame is None or frame.empty:
             return
-        ordered = _ordered(frame)
-        newest = _epoch_ms(ordered.index[-1])
-        for timestamp, row in ordered.iterrows():
+        now = self.now_ms()
+        for timestamp, row in _ordered(frame).iterrows():
             ts_open_ms = _epoch_ms(timestamp)
-            if ts_open_ms == newest or not start_ms <= ts_open_ms <= end_ms:
+            if not start_ms <= ts_open_ms <= end_ms:
                 continue
+            if ts_open_ms + bar_ms > now:
+                continue  # still forming
             yield _row_to_bar(timestamp, row, sub.instrument, sub.timeframe, bar_ms)
 
     async def server_time_ms(self) -> int:
@@ -182,6 +245,15 @@ class LiveFeed:
 
     def health(self) -> FeedHealth:
         return FeedHealth(connected=True, last_event_ms=self._last_event_ms)
+
+
+def _values(row: pd.Series) -> tuple[float, ...]:
+    """What a bar says, for deciding whether a re-read is the same bar.
+
+    Rounded, because a venue re-serving an unchanged bar can still round the last
+    digit differently between responses and that is not a correction.
+    """
+    return tuple(round(float(row[name]), 10) for name in ("open", "high", "low", "close", "volume"))
 
 
 def _identity(sub: Subscription) -> MarketDataIdentity:
