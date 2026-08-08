@@ -2196,6 +2196,11 @@ distinguishable.
 3. **No process, no scheduler, no persistence.** The feed exists; nothing runs it in a loop
    for days. Restart, supervision and what a paper run should write belong together in the
    phase that owns operating it.
+4. **The poll cadence is a judgement, not a measurement.** The default is the bar over 60,
+   clamped to 5–300 s, so a 4h subscription polls every four minutes. The first version
+   polled once per *bar*, which meant a bar closing at *T* was not seen until *T + 4h* — a
+   "live" feed a full bar behind, caught in review. Neither bound is measured against a
+   venue rate limit; `poll_seconds` is the override for an operator who has one.
 
 ---
 

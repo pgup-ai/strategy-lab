@@ -23,15 +23,31 @@ from strategy_lab.core.types import InstrumentId, Side
 from strategy_lab.engine.context import BarBuffer
 from strategy_lab.engine.runner import StrategyRunner
 from strategy_lab.feeds.base import Subscription
-from strategy_lab.feeds.live import LiveFeed, collect
+from strategy_lab.feeds.live import (
+    MAX_POLL_SECONDS,
+    MIN_POLL_SECONDS,
+    LiveFeed,
+)
 from strategy_lab.feeds.replay import ReplayFeed
 from strategy_lab.strategies.registry import get_strategy
+from strategy_lab.timeframes import timeframe_to_millis
 from tests.conftest import synthetic_ohlcv
 
 TIMEFRAME = "4h"
 INSTRUMENT = InstrumentId("binance", "perp", "BTC/USDT")
 SUB = Subscription(INSTRUMENT, TIMEFRAME)
 FORMING_SUB = Subscription(INSTRUMENT, TIMEFRAME, include_forming=True)
+
+
+class _Stopped(Exception):
+    """The venue going away, which is how a test stops an endless stream.
+
+    ``LiveFeed.stream`` does not terminate -- the protocol says "until exhausted
+    (replay) or cancelled (live)" -- so a bound has to come from outside it.
+    Stopping the *venue* rather than giving the feed a poll counter keeps test
+    scaffolding out of the production class, and it is also the more faithful
+    shape: a live process ends because something external ended it.
+    """
 
 
 class _Venue:
@@ -53,8 +69,11 @@ class _Venue:
         self.rows = first
         self.step = step
         self.calls: list[int] = []
+        self.stop_after: int | None = None
 
     def __call__(self, identity, since_ms: int) -> pd.DataFrame:
+        if self.stop_after is not None and len(self.calls) >= self.stop_after:
+            raise _Stopped
         self.calls.append(since_ms)
         window = self.frame.iloc[: self.rows].copy()
         drift = 1.0 + 0.01 * len(self.calls)
@@ -69,10 +88,22 @@ async def _noop(_seconds: float) -> None:
 
 
 def drain(feed: LiveFeed, subs, *, polls: int) -> list:
-    feed.max_polls = polls
+    """Everything the feed yields over `polls` polls of the venue.
+
+    Bounded by the venue rather than by the event count, because a poll that
+    yields nothing new is still a poll -- and that is the steady state a live
+    process spends nearly all of its time in.
+    """
+    feed.fetch.stop_after = polls
 
     async def _run():
-        return [event async for event in feed.stream(subs)]
+        events = []
+        try:
+            async for event in feed.stream(subs):
+                events.append(event)
+        except _Stopped:
+            pass
+        return events
 
     return asyncio.run(_run())
 
@@ -231,7 +262,10 @@ def test_a_cold_start_primes_from_backfill_and_reaches_the_replays_state(frame):
         clock=SimClock(),
         record_reasons=False,
     )
-    bars = asyncio.run(collect(feed.backfill(SUB, 0, 2**62)))
+    async def _backfilled():
+        return [bar async for bar in feed.backfill(SUB, 0, 2**62)]
+
+    bars = asyncio.run(_backfilled())
 
     assert len(bars) == split - 1, "backfill withheld something other than the forming bar"
     warmed.prime_bars(bars)
@@ -249,3 +283,26 @@ def test_a_cold_start_primes_from_backfill_and_reaches_the_replays_state(frame):
     from_frame.prime(long_frame.iloc[: split - 1])
 
     pd.testing.assert_frame_equal(warmed.buffer.frame(), from_frame.buffer.frame())
+
+
+def test_the_poll_cadence_is_a_fraction_of_the_bar_rather_than_the_bar():
+    """A feed polling once per bar sees a bar that closed at *T* only at the next
+    poll — up to a whole bar late, which on 4h is four hours. Latency is bounded
+    by the gap, so the gap is what decides whether "live" means anything."""
+    feed = LiveFeed()
+    subs = {tf: Subscription(INSTRUMENT, tf) for tf in ("15m", "1h", "4h", "1w")}
+
+    for timeframe, sub in subs.items():
+        gap = feed._interval([sub])
+        bar_seconds = timeframe_to_millis(timeframe) / 1000.0
+        assert gap < bar_seconds, timeframe
+        assert MIN_POLL_SECONDS <= gap <= MAX_POLL_SECONDS, timeframe
+
+    # The smallest bar in a mixed set decides, since it closes first.
+    assert feed._interval(list(subs.values())) == feed._interval([subs["15m"]])
+
+
+def test_an_explicit_cadence_overrides_the_derived_one():
+    """The bounds above are judgements, not measurements against a rate limit —
+    so an operator who has one says so."""
+    assert LiveFeed(poll_seconds=1.5)._interval([Subscription(INSTRUMENT, "4h")]) == 1.5

@@ -49,6 +49,11 @@ from strategy_lab.timeframes import timeframe_to_millis
 # than fetching the tip.
 DEFAULT_LOOKBACK_BARS = 5
 
+# The default cadence, as a fraction of the bar being polled. See ``_interval``.
+POLLS_PER_BAR = 60
+MIN_POLL_SECONDS = 5.0
+MAX_POLL_SECONDS = 300.0
+
 
 def _fetch_recent(identity: MarketDataIdentity, since_ms: int) -> pd.DataFrame:
     """The venue's own recent candles, through the client the fetchers already use."""
@@ -76,11 +81,9 @@ class LiveFeed:
     poll_seconds: float | None = None
     fetch: Callable[[MarketDataIdentity, int], pd.DataFrame] = _fetch_recent
     sleep: Callable[[float], object] = asyncio.sleep
-    max_polls: int | None = None
 
     _seen: set[tuple[str, str, int, bool]] = field(default_factory=set, init=False)
     _last_event_ms: int | None = field(default=None, init=False, repr=False)
-    _polls: int = field(default=0, init=False, repr=False)
 
     async def stream(self, subs: Sequence[Subscription]) -> AsyncIterator[BarEvent]:
         """Poll each subscription in turn, forever, yielding what is new.
@@ -90,9 +93,12 @@ class LiveFeed:
         holding one subscription's bar back to interleave it with another's would
         be inventing latency. ``MarketClock`` is what groups a live cross-section,
         exactly as it does a replayed one.
+
+        It does not terminate. A caller stops it by breaking out of the
+        iteration or cancelling the task, which is what ``until exhausted
+        (replay) or cancelled (live)`` in the protocol means.
         """
-        while self.max_polls is None or self._polls < self.max_polls:
-            self._polls += 1
+        while True:
             for sub in subs:
                 for event in self._poll(sub):
                     self._last_event_ms = event.ts_event_ms
@@ -100,15 +106,23 @@ class LiveFeed:
             await self.sleep(self._interval(subs))
 
     def _interval(self, subs: Sequence[Subscription]) -> float:
-        """Seconds between polls: the smallest bar in the set, unless told otherwise.
+        """Seconds between polls, derived from the smallest bar in the set.
 
-        Polling faster than the bar closes buys nothing without
-        ``include_forming``, and with it buys a partial bar the caller has already
-        said it wants -- so the cadence follows the data rather than a constant.
+        **A fraction of the bar rather than the bar itself.** Polling once per bar
+        would mean a bar that closed at *T* is not seen until the next poll, i.e.
+        up to a whole bar late -- four hours, on the timeframe this program
+        trades. Latency is bounded by the poll gap, so the gap is what decides
+        whether "live" means anything.
+
+        Clamped at both ends: the floor keeps a 15m subscription from hammering a
+        venue, and the ceiling keeps a weekly one from being a day late. Neither
+        bound is measured against a rate limit -- ``poll_seconds`` is the override
+        for an operator who has one.
         """
         if self.poll_seconds is not None:
             return self.poll_seconds
-        return min(timeframe_to_millis(sub.timeframe) for sub in subs) / 1000.0
+        smallest = min(timeframe_to_millis(sub.timeframe) for sub in subs) / 1000.0
+        return min(max(smallest / POLLS_PER_BAR, MIN_POLL_SECONDS), MAX_POLL_SECONDS)
 
     def _poll(self, sub: Subscription) -> list[BarEvent]:
         identity = _identity(sub)
@@ -189,13 +203,4 @@ def _forming(bar: Bar) -> Bar:
     return replace(bar, is_closed=False)
 
 
-async def collect(bars: AsyncIterator[Bar]) -> list[Bar]:
-    """Drain a backfill into a list, for a caller priming a runner.
-
-    Named because "warm this runner from history" deserves a verb, and because
-    the alternative at every call site is an inline async comprehension.
-    """
-    return [bar async for bar in bars]
-
-
-__all__ = ["DEFAULT_LOOKBACK_BARS", "LiveFeed", "collect"]
+__all__ = ["DEFAULT_LOOKBACK_BARS", "MAX_POLL_SECONDS", "MIN_POLL_SECONDS", "LiveFeed"]
