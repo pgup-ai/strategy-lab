@@ -113,7 +113,14 @@ def drain(feed: LiveFeed, subs, *, polls: int) -> list:
 
 @pytest.fixture
 def frame() -> pd.DataFrame:
-    return synthetic_ohlcv(n=40, freq=TIMEFRAME)
+    """Funded, because the subscription under test is a perp.
+
+    An unfunded frame on a perp is not a neutral fixture — it is the shape of
+    "stored funding does not cover this window", which `_conform_funding` now
+    reads as a coverage stall rather than as a stream that has no funding. The
+    determinism suite made the same move for the same reason.
+    """
+    return synthetic_ohlcv_with_funding(n=40, freq=TIMEFRAME)
 
 
 # --------------------------------------------------------------------------
@@ -222,7 +229,7 @@ def test_a_live_window_yields_the_signals_a_replay_of_it_yields(frame):
     """The same oracle one level up, which is what the gate actually claims: the
     runner cannot tell the two feeds apart."""
     strategy = get_strategy("donchian")
-    long_frame = synthetic_ohlcv(n=strategy.warmup_bars + 200, freq=TIMEFRAME)
+    long_frame = synthetic_ohlcv_with_funding(n=strategy.warmup_bars + 200, freq=TIMEFRAME)
 
     def _signals(events) -> list[tuple[int, Side]]:
         runner = StrategyRunner(
@@ -257,7 +264,7 @@ def test_a_cold_start_primes_from_backfill_and_reaches_the_replays_state(frame):
     they did not — so a live process can warm itself from history rather than
     waiting out a 2,192-bar warmup in real time."""
     strategy = get_strategy("donchian")
-    long_frame = synthetic_ohlcv(n=strategy.warmup_bars + 200, freq=TIMEFRAME)
+    long_frame = synthetic_ohlcv_with_funding(n=strategy.warmup_bars + 200, freq=TIMEFRAME)
     split = strategy.warmup_bars + 100
 
     # A bounded historical request: every row in it closed long ago, so the
@@ -550,7 +557,8 @@ def test_a_subscription_holds_one_answer_about_funding_for_its_whole_life():
     async def _history():
         return [bar async for bar in feed.backfill(SUB, 0, 2**62)]
 
-    runner.prime_bars(asyncio.run(_history()))
+    with pytest.warns(UserWarning, match="crowding stays neutral"):
+        runner.prime_bars(asyncio.run(_history()))
     assert not runner.buffer.carries_funding
 
     for event in feed._poll(SUB):
@@ -619,3 +627,42 @@ def test_a_funding_only_correction_is_not_an_unchanged_bar():
     assert float(corrected[0].bar.funding_rate) == pytest.approx(
         funded[FUNDING_COLUMN].iloc[at]
     )
+
+
+def test_a_first_poll_that_finds_no_funding_does_not_decide_for_the_process():
+    """An absent column means two unrelated things and only one is a verdict. On
+    a perp's recent tail it is a lag — settlements advance only when a funding
+    fetch runs — so committing there would pin a whole process crowding-neutral
+    (M20: +16.44% / 0.801 against the published +15.45% / 0.896) on the timing of
+    its first poll. History is where the permanent answer lives; the tail waits.
+    """
+    funded = synthetic_ohlcv_with_funding(n=20, freq=TIMEFRAME)
+    feed = LiveFeed(
+        fetch=lambda i, s, u=None: funded.drop(columns=[FUNDING_COLUMN]),
+        sleep=_noop,
+        clock=SimClock(10**13),
+    )
+    with pytest.warns(UserWarning, match="withheld"):
+        assert feed._poll(SUB) == []
+    assert SUB.candle not in feed._funded, "an uncovered tail settled the question"
+
+    feed.fetch = lambda i, s, u=None: funded
+    resumed = feed._poll(SUB)
+    assert resumed, "the stream never recovered once funding arrived"
+    assert all(e.bar.funding_rate is not None for e in resumed)
+
+
+def test_a_spot_stream_settles_unfunded_without_a_word():
+    """The converse: off-perp there is nothing to decide. Spot never carries the
+    column, so withholding would stall forever and warning would cry wolf on
+    every non-perp subscription."""
+    spot = Subscription(InstrumentId("binance", "spot", "BTC/USDT"), TIMEFRAME)
+    feed = LiveFeed(
+        fetch=lambda i, s, u=None: synthetic_ohlcv(n=20, freq=TIMEFRAME),
+        sleep=_noop,
+        clock=SimClock(10**13),
+    )
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        assert feed._poll(spot), "a spot stream was withheld over funding it can never have"
+    assert caught == [], f"spot warned about funding: {[str(w.message) for w in caught]}"

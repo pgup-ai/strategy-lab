@@ -192,32 +192,42 @@ class LiveFeed:
         smallest = min(timeframe_to_millis(sub.timeframe) for sub in subs) / 1000.0
         return min(max(smallest / POLLS_PER_BAR, MIN_POLL_SECONDS), MAX_POLL_SECONDS)
 
-    def _conform_funding(self, sub: Subscription, frame: pd.DataFrame) -> pd.DataFrame:
+    def _conform_funding(
+        self, sub: Subscription, frame: pd.DataFrame, *, from_history: bool
+    ) -> pd.DataFrame:
         """Hold one answer about funding for the life of a subscription.
 
         ``with_funding_column`` decides per *window*, and a feed asks about two:
         ``backfill`` over history and ``_poll`` over the recent tail. Those can
         disagree -- BTC/USDT perp's permanent ~40 h head gap means a full-history
-        request finds a gap and returns no column while a recent window finds none
-        and returns one. Priming unfunded and then polling funded is a stream
-        changing its mind, and ``BarBuffer`` **raises** on exactly that (M42),
-        which is right: measured, a cold start over full BTC history crashed on
-        its first poll.
+        request finds a gap and returns no column while a recent window finds one.
+        Priming unfunded and then polling funded is a stream changing its mind,
+        and ``BarBuffer`` **raises** on exactly that (M42), which is right:
+        measured, a cold start over full BTC history crashed on its first poll.
 
-        The buffer's guard is not the thing to loosen. The feed is what must be
-        consistent, so the first frame for a subscription fixes the answer and
-        later frames are conformed to it.
+        The buffer's guard is not the thing to loosen; the feed is what must be
+        consistent. So one answer is settled per subscription and later frames
+        conform to it -- but **which frame gets to settle it matters**, because an
+        absent column means two unrelated things and only one of them is a
+        verdict.
 
-        **A stream that began unfunded drops the column; one that began funded
-        withholds the poll rather than dying.** The asymmetry is not a
-        preference, it is what the two directions mean. Beginning unfunded is a
-        property of the *history* -- BTC's head gap is permanent -- so it is
-        settled and the tail conforms. Losing funding mid-stream is a property of
-        the *right edge*, and routine: the venue serves candles in real time
-        while stored settlements only advance when a funding fetch runs, so the
-        window outgrows its coverage every cadence, ``funding_rates`` drops the
-        column entirely rather than returning it partial, and a raise here would
-        kill a paper run on a lag that resolves itself.
+        - **History says something permanent.** BTC's head gap does not close, so
+          an uncovered ``backfill`` settles the stream unfunded and the tail
+          conforms. It warns, because that is a process running ``crowding``
+          neutral for its whole life (M20: +16.44% / 0.801 against the published
+          +15.45% / 0.896) and an operator should not have to infer it.
+        - **The tail says something transient.** The venue serves candles in real
+          time while stored settlements advance only when a funding fetch runs, so
+          the polled window outgrows its coverage every cadence. On a perp that is
+          a lag, not a verdict, so an undecided subscription **withholds instead
+          of deciding** -- committing there would silently pin the whole process
+          unfunded on the timing of its first poll.
+        - **Off-perp there is nothing to decide.** Spot never carries the column
+          and never will, so it settles unfunded silently.
+
+        Losing funding after the stream is already funded withholds too, for the
+        same reason and by the same path: a raise would kill a paper run on a lag
+        that resolves itself.
 
         Withholding loses nothing. The cursor advances only on an emitted event,
         so the next poll re-reads the same window and emits it once coverage
@@ -228,22 +238,40 @@ class LiveFeed:
         deliberately does not own.
         """
         has_column = FUNDING_COLUMN in frame.columns
-        settled = self._funded.setdefault(sub.candle, has_column)
-        if settled and not has_column:
+        settled = self._funded.get(sub.candle)
+        undecided_tail = (
+            settled is None
+            and not has_column
+            and not from_history
+            and sub.instrument.market_type == "perp"
+        )
+        if undecided_tail or (settled and not has_column):
             self.funding_withheld_polls += 1
             if sub.candle not in self._withholding:
                 # Once per stall rather than once per poll: at the default
                 # cadence a persistent one would warn every five seconds.
                 self._withholding.add(sub.candle)
                 warnings.warn(
-                    f"{sub.candle.key}: stored funding no longer covers the polled window, "
-                    f"so bars are being withheld until it does. Earlier bars ran with "
-                    f"funding and emitting these without it would run a different strategy. "
-                    f"Advance the settlements (strategy-lab fetch-funding) to resume.",
+                    f"{sub.candle.key}: stored funding does not cover the polled window, "
+                    f"so bars are withheld until it does. Emitting them unfunded would run "
+                    f"a different strategy than the funded bars around them. Advance the "
+                    f"settlements (strategy-lab fetch-funding) to resume.",
                     stacklevel=2,
                 )
             return frame.iloc[:0]
+
         self._withholding.discard(sub.candle)
+        if settled is None:
+            self._funded[sub.candle] = has_column
+            if not has_column and sub.instrument.market_type == "perp":
+                warnings.warn(
+                    f"{sub.candle.key}: stored funding does not cover this perp's history, "
+                    f"so the stream runs unfunded and crowding stays neutral for the life "
+                    f"of the process. BTC/USDT's ~40h leading gap is permanent and this is "
+                    f"expected there; otherwise fetch funding and restart.",
+                    stacklevel=2,
+                )
+            return frame
         if has_column and not settled:
             return frame.drop(columns=[FUNDING_COLUMN])
         return frame
@@ -255,7 +283,7 @@ class LiveFeed:
         frame = self.fetch(identity, self._since_ms(sub, bar_ms), None)
         if frame is None or frame.empty:
             return []
-        frame = self._conform_funding(sub, frame)
+        frame = self._conform_funding(sub, frame, from_history=False)
         if frame.empty:
             return []
 
@@ -334,7 +362,7 @@ class LiveFeed:
         frame = self.fetch(identity, start_ms, end_ms)
         if frame is None or frame.empty:
             return
-        frame = self._conform_funding(sub, frame)
+        frame = self._conform_funding(sub, frame, from_history=True)
         if frame.empty:
             return
         now = self.clock.now_ms()
