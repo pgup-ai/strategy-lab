@@ -1089,9 +1089,8 @@ def paper_command(
     bars = 0
     bar_log = _open_bar_log(bars_csv)
 
-    async def _run() -> None:
+    async def _consume() -> None:
         nonlocal bars
-        last_funding = clock.now_ms()
         async for event in feed.stream([subscription]):
             bars += 1
             if bar_log is not None:
@@ -1103,12 +1102,41 @@ def paper_command(
             )
             if run_id is not None:
                 _flush(run_id, signals, runner.reasons, written)
-            # Once per bar at most: settlements land on the venue's schedule and
-            # the guard tolerates a trailing gap of one cadence, so topping up as
-            # often as the poll would be spending a request to learn nothing.
-            if clock.now_ms() - last_funding >= bar_ms:
+
+    async def _keep_funding_current() -> None:
+        """Advance settlements beside the stream, never inside it.
+
+        This ran in the consumer loop first, and that is a deadlock by
+        construction: a withheld poll yields no event, the loop body is what
+        fetches funding, so the fetch that would end a stall can only happen
+        while there is no stall. Measured on the first two real runs -- coverage
+        lapsed at 00:00, one cadence past the 16:00 settlement, and both stalled
+        for every remaining poll (27 and 26) and lost the bar that closed there.
+
+        **A withheld poll is the signal to fetch.** The feed saying it cannot
+        cover its window is better evidence that funding is behind than any
+        timer, so the counter drives this and the timer is only the floor that
+        keeps settlements roughly current when nothing is stalling. The fetch
+        blocks the loop for its duration, which at these timeframes costs a
+        poll's latency and is why it is not worth a thread.
+        """
+        withheld = feed.funding_withheld_polls
+        elapsed = 0.0
+        while True:
+            await asyncio.sleep(FUNDING_CHECK_SECONDS)
+            elapsed += FUNDING_CHECK_SECONDS
+            stalling = feed.funding_withheld_polls > withheld
+            withheld = feed.funding_withheld_polls
+            if stalling or elapsed * 1000 >= bar_ms:
                 _advance_funding(identity)
-                last_funding = clock.now_ms()
+                elapsed = 0.0
+
+    async def _run() -> None:
+        funding = asyncio.create_task(_keep_funding_current())
+        try:
+            await _consume()
+        finally:
+            funding.cancel()
 
     try:
         asyncio.run(asyncio.wait_for(_run(), timeout=for_minutes * 60.0))
@@ -1135,6 +1163,12 @@ def paper_command(
         )
     else:
         typer.echo("Not persisted.")
+
+
+# How often the funding task looks at whether it is needed. Not how often it
+# fetches: it fetches when the feed says it cannot cover its window, or once per
+# bar, whichever comes first.
+FUNDING_CHECK_SECONDS = 20.0
 
 
 def _live_feed(**kwargs):

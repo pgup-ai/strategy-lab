@@ -2139,6 +2139,84 @@ warning describes, reached from the other side.
 
 ---
 
+### 9.18 R10h the paper process — the delayed oracle performed, and three bugs only running could find
+
+**A design plan** ([docs/plans/2026-08-08-r10h-running-the-paper-process.md](../plans/2026-08-08-r10h-running-the-paper-process.md)),
+committed before any number. R10 shipped `LiveFeed` and R10g shipped the book, and
+**nothing ran either** — `grep "LiveFeed(" src/` outside its own module returned
+nothing, and so did the same grep for `PaperBook`. R10's gate was passed against a
+scripted venue, and the `db`-marked venue test its plan promised does not exist.
+
+**Preparing to run found the first bug, and it was the largest.** No perp poll had
+ever carried funding. `funding_coverage_gaps` certifies a cadence rather than
+assuming 8h, so it needs the interval observed twice — three settlements inside
+the window — and a `lookback_bars = 5` poll at 4h is 16 hours holding two.
+Measured against the real database: **5 bars → 2 settlements → no column, 8 bars →
+5 → covered**; at 15m five bars is 75 minutes and holds none. So under R10f's
+withholding rule the process stalls on its first poll, and before it the same
+window ran `crowding` neutral in silence — M20 on the live path, reached through
+the request size rather than through a flag. `_fetch_recent` now reaches back
+until the window can answer its own coverage question, in settlements because the
+interval is per-contract. Verified against the venue: a 5-bar request returns **8
+funded bars at 4h and 123 at 15m**, where both returned none. That is **M45**.
+
+**Two paper runs, BTC/USDT perp 15m, `state_machine_v1`**, 2026-08-08
+22:51→00:07 and 23:18→00:06 UTC. Both primed **2,196 bars** from `backfill` and
+reported `buffer carries funding: True`.
+
+| | run 1 (75 min) | run 2 (48 min) |
+|---|---|---|
+| bars | 5 | 3 |
+| signals | 0 | 0 |
+| `bar_reasons` | 5 | 3 |
+| withheld polls | **27** | **26** |
+| bar log | — | written |
+
+**The delayed oracle reads zero.** Against stored candles fetched *afterwards*,
+independently — the paper process writes none, which is what makes this an oracle
+rather than an echo:
+
+- **Live bars against the record**: run 2's 3 closed bars, **0 differing on every
+  OHLCV field**.
+- **Per-bar reasons**: **0 differing on the state and on every feature**, 5 bars
+  in run 1 and 3 in run 2. This is R10a's diff pointed at a live run instead of a
+  replayed one, and R10a's own reading was `crowding` differing on 6,048 of 6,048.
+- **Signals**: **not exercised.** Neither path emitted, because over 48 minutes at
+  15m a real strategy emits nothing — `state_machine_v1` fired 325 times in 6,048
+  bars. The script names this rather than printing "0 differing" as a result,
+  which is reading 4 applied one level down: the absence of a disagreement is not
+  the absence of one.
+
+**Acceptance check 5 failed, and that is the third finding.** It asked for **0**
+withheld polls over a window whose settlements are stored, and both runs withheld
+tens. The cause is exact. Settlements landed at 00:00, 08:00 and **16:00**; the
+coverage guard tolerates a trailing gap of one cadence, so coverage lapsed at
+**00:00** — and both runs' bars stop at **23:30**, with every remaining poll
+withheld (27 and 26 ≈ 6.7 minutes at a 15 s cadence) and the bar closing at 00:00
+never delivered. Nothing was corrupted and nothing was silently wrong; the guard
+and the withholding did exactly what they are for. What was wrong is that the
+process could not recover: `_advance_funding` ran **inside the consumer loop**, a
+withheld poll yields no event, so the fetch that would end a stall could only
+happen while there was no stall. It now runs beside the stream, and **a withheld
+poll is what triggers it** — the feed saying it cannot cover its window is better
+evidence that funding is behind than any timer. That is **M47**.
+
+The fix's effect at a settlement boundary is **not re-measured**: the next one is
+08:00 UTC. What is measured is the mechanism — a feed that only ever withholds now
+gets its funding advanced repeatedly, where before it was fetched once at startup
+and never again, and both mutants over that are killed.
+
+**Two smaller things the wiring exposed.** `StrategyRunner` emits `strength=None`
+and no `Signal` carries a `position_size`, so the book fills every entry at scale
+1.0 — a real divergence from a backtest for a strategy that sizes per bar, which
+is the one property R10g's book was built to have; it is now declared at startup
+and filed in §12. And the command held **two clocks**, its own and the feed's:
+equal in production, and a test that thought it had scripted a venue was reaching
+Binance and priming **zero bars while reporting success**. The feed owns "now"
+now — **M46**.
+
+---
+
 ### 9.17 R10 the live feed — a delayed oracle for the one path that has none
 
 **A design plan** ([docs/plans/2026-08-08-r10-the-live-feed.md](../plans/2026-08-08-r10-the-live-feed.md),
@@ -2283,6 +2361,7 @@ Decisions and their reasoning. Amend with a new row rather than editing history.
 | M44 | **A fixture too clean to distinguish two states makes the assertion over them decorative** | R10 ([§9.17](#917-r10-the-live-feed--a-delayed-oracle-for-the-one-path-that-has-none)) tested that a forming bar is *superseded* by the closed bar for the same interval — the assertion was written, it passed, and a **first-wins mutant in `BarBuffer.append` survived it**. The cause was the scripted venue: it returned `frame.iloc[:rows]`, so an interval's forming copy and its closed copy were the *same row*, identical in every field. Keeping the first and keeping the last produce the same buffer when the two are equal, so nothing could tell them apart. A real in-progress bar has a different close from the one it settles at; perturbing the forming row kills the mutant. **This is a distinct failure from §8 rule 1's decorative test** — the assertion is present and meaningful, and the *data* is what cannot fail it, which is invisible in review because the test reads correctly. **The general rule: when a test asserts that A supersedes B, the fixture has to make A and B distinguishable, and mutation is what proves it did.** | 2026-08-08 |
 | M45 | **A window is bounded by the question asked of it, not by the data wanted from it** | R10h ([§9.18](#918-r10h-the-paper-process-and-the-delayed-oracle-performed)) went to run the paper process and found that **no perp poll had ever carried funding.** `LiveFeed` fetched `lookback_bars = 5` bars because five is what corrections need, and then asked `with_funding_column` about coverage over that window. `funding_coverage_gaps` certifies a cadence rather than assuming 8h, so it needs the interval **observed twice** — three settlements — and five bars at 4h is 16 hours holding two. Measured against the real database: 5 bars → 2 settlements → **no column**, 8 bars → 5 → covered. At 15m five bars is 75 minutes and holds none, so **there is no timeframe this program trades at which a lookback-sized window funds itself**. The data was never missing; the window was too narrow to be *asked*. Under R10f's withholding rule that stalls the process on its first poll, and before it the same window ran `crowding` neutral in silence — M20 on the live path, arrived at through the request size rather than through a flag. **The same defect the browser fixed once**: `server._fetch_funding` already reaches back to "the earlier of the candle lookback and the last stored settlement", and `LiveFeed` re-derived the five-bar window without it. **The general rule: a request sized for what a caller wants back must also be sized for every question that will be asked of the result — and when a rule about that already exists in prose in one module, prose is not where it belongs.** | 2026-08-08 |
 | M46 | **A process has one clock, and whatever polls owns it** | The `paper` command constructed a `LiveClock` for the runner and handed the feed another. Both read the wall, so nothing was wrong until a test substituted the feed with a scripted venue whose clock sat in 2024: the command's own clock still said 2026, `backfill` computed a window two years past every bar the venue had, and the run **primed zero bars while reporting success**. The test looked correct and asserted nothing false; it simply exercised an empty buffer. Making the feed's clock the process's single "now" fixed it, and is the right shape independently — `backfill`'s window, the funding cadence and the poll all describe the same instant, and a second clock is a second answer to when that is. **The general rule: duplicate a value that is *equal today* and you have written down a dependency nobody will maintain; time is the one where the duplicate is invisible until something substitutes one copy.** | 2026-08-08 |
+| M47 | **A recovery action must not live on the path the failure blocks** | R10h ([§9.18](#918-r10h-the-paper-process--the-delayed-oracle-performed-and-three-bugs-only-running-could-find)) put the funding top-up inside the paper process's consumer loop, which reads `async for event in feed.stream(...)`. A withheld poll yields no event, so the loop body does not run, so funding is not advanced — and funding being behind is *why* the poll was withheld. A deadlock by construction, invisible in review because both halves are correct and the dependency runs backwards through an absence. Measured on the first two real runs: coverage lapsed at 00:00, one cadence past the 16:00 settlement, and both stalled for every remaining poll (27 and 26) and never delivered the bar that closed there. The top-up now runs beside the stream, and **the withheld-poll counter is what triggers it** — a component saying it cannot proceed is better evidence than a timer that guesses. **The general rule: when a component can stall, the thing that clears the stall must be reachable while it is stalling — so it belongs on a different path, and the stall itself is the best signal to run it.** The offline suites could not see this: every one of them drives the loop with a venue that delivers, which is the condition under which the bug does not exist. | 2026-08-08 |
 
 ### Carried from Phase 0 (design doc §11)
 

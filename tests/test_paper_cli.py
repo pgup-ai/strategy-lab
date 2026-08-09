@@ -228,3 +228,50 @@ def test_a_run_header_carries_what_would_be_needed_to_repeat_it(monkeypatch, wir
         assert key in config, f"the header cannot say what {key} was"
     assert config["cash"] == 5000
     assert isinstance(wired["runs"][0]["run_id"], uuid.UUID)
+
+
+def test_funding_is_advanced_during_a_stall_not_only_between_them(monkeypatch, wired):
+    """The bug the first two real runs found. The top-up ran inside the consumer
+    loop, and a withheld poll yields no event -- so the fetch that would end a
+    stall could only happen while there was no stall. Measured: coverage lapsed
+    at 00:00, one cadence past the 16:00 settlement, and both runs stalled for
+    every remaining poll (27 and 26) and lost the bar that closed there.
+    """
+    monkeypatch.setattr(cli, "get_strategy", lambda name: _EveryBar())
+    monkeypatch.setattr(cli, "FUNDING_CHECK_SECONDS", 0.001)
+
+    # A feed that only ever withholds: no event reaches the consumer, which is
+    # the condition under which the old code could not fetch at all.
+    stalling = {"n": 0}
+
+    class _Stalled:
+        lookback_bars = 5
+        clock = SimClock(0)
+
+        @property
+        def funding_withheld_polls(self):
+            stalling["n"] += 1
+            return stalling["n"]
+
+        def resume_after(self, *_):
+            pass
+
+        async def backfill(self, *_a, **_kw):
+            return
+            yield  # pragma: no cover - makes this an async generator
+
+        async def stream(self, _subs):
+            while True:
+                await asyncio.sleep(0)
+            yield  # unreachable, and what makes this an async generator
+
+    monkeypatch.setattr(cli, "_live_feed", lambda **_: _Stalled())
+    advanced = []
+    monkeypatch.setattr(cli, "_advance_funding", lambda identity: advanced.append(1) or 1)
+
+    _invoke("--strategy", "every_bar", "--no-persist")
+
+    assert len(advanced) > 1, (
+        "funding was fetched once at startup and never again, so a stall that "
+        "began after startup could never end"
+    )
