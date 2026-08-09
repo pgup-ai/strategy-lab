@@ -190,7 +190,7 @@ def bootstrap_config() -> dict[str, object]:
         "primitives": CONTRACT_PRIMITIVES,
         "exitModeContracts": list(CONTRACTS_WITH_EXIT_MODE),
         "exitModes": [mode.value for mode in ExitMode],
-    "marketTypes": list(MARKET_TYPES),
+        "marketTypes": list(MARKET_TYPES),
         "defaultMarketType": DEFAULT_MARKET_TYPE,
         "restatedMarketType": RESTATED_MARKET_TYPE,
         "restatementStaleDays": RESTATEMENT_STALE_DAYS,

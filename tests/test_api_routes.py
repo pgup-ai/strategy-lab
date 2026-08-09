@@ -563,6 +563,29 @@ def test_an_unparseable_since_is_a_client_error_not_a_traceback(client):
     assert response.status_code == 422
 
 
+def test_a_bare_date_is_midnight_utc_rather_than_a_422(client, monkeypatch):
+    """`AnalysisQuery` already takes date-only bounds, so refusing one here would
+    make the same date mean two things depending on the endpoint. Appending a
+    zone to it alone yields `2024-01-01+00:00`, which is not a datetime."""
+    seen = {}
+    monkeypatch.setattr(
+        "strategy_lab.server.refresh_candles",
+        lambda identity, after, since: seen.update(since=since)
+        or {"bars": [], "candles_upserted": 0, "funding_upserted": None},
+    )
+
+    response = client.post(
+        "/api/refresh",
+        params={
+            "exchange": "binance", "market_type": "spot", "symbol": "BTC/USDT",
+            "timeframe": "1h", "since": "2024-01-01",
+        },
+    )
+
+    assert response.status_code == 200, response.text
+    assert seen["since"].isoformat() == "2024-01-01T00:00:00+00:00"
+
+
 def test_a_since_without_a_zone_is_read_as_utc(client, monkeypatch):
     """Everything downstream compares against aware datetimes, so a naive one
     raises deep in the fetch rather than at the boundary that accepted it."""

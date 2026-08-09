@@ -241,6 +241,7 @@ class BoardQuery(_Strict):
 
 # A trailing `Z`, `+hh:mm` or `-hh:mm` after the time part.
 _HAS_TIMEZONE = re.compile(r"(?:[zZ]|[+-]\d{2}:?\d{2})$")
+_DATE_ONLY = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 
 class RefreshQuery(IdentityQuery):
@@ -261,7 +262,14 @@ class RefreshQuery(IdentityQuery):
     @field_validator("since", mode="before")
     @classmethod
     def _assume_utc(cls, value: object) -> object:
-        if isinstance(value, str) and value and not _HAS_TIMEZONE.search(value):
+        if not isinstance(value, str) or not value:
+            return value
+        # A bare date is what `AnalysisQuery` already accepts for its own bounds,
+        # so refusing it here would make one date mean two things depending on
+        # the endpoint. Midnight, because a start is the beginning of its day.
+        if _DATE_ONLY.match(value):
+            return value + "T00:00:00+00:00"
+        if not _HAS_TIMEZONE.search(value):
             return value + "+00:00"
         return value
 
