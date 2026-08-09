@@ -1024,17 +1024,26 @@ def paper_command(
     )
     bar_ms = timeframe_to_millis(timeframe)
 
-    settlements = _advance_funding(identity)
-    if settlements is not None:
-        typer.echo(f"Funding advanced: {settlements} settlements stored.")
-
-    feed = _live_feed(poll_seconds=poll_seconds, clock=LiveClock())
+    feed = _live_feed(
+        poll_seconds=poll_seconds,
+        clock=LiveClock(),
+        # The same question `replay` asks, asked the same way: a strategy that
+        # reads no funding-derived feature must not have its bars withheld over
+        # coverage it never consults. CLAUDE.md's rule (3), which `LiveFeed`
+        # could not honour until it was told.
+        requires_funding="crowding" in getattr(strategy, "features", ()),
+    )
     # One "now" in the process, and the feed owns it. The runner, the backfill
     # window and the funding cadence all read the same clock the polling does, so
     # anything that substitutes the feed substitutes time coherently rather than
     # leaving a second wall clock behind -- which is how a test that thought it
     # had scripted a venue primed zero bars from a window two years wide.
     clock = feed.clock
+
+    settlements = _advance_funding(identity, now_ms=clock.now_ms())
+    if settlements is not None:
+        typer.echo(f"Funding advanced: {settlements} settlements stored.")
+
     runner = StrategyRunner(
         strategy=strategy,
         instrument=instrument,
@@ -1094,6 +1103,7 @@ def paper_command(
         )
 
     signals: list = []
+    failures = {"funding": 0}
     written = {"signals": 0, "reasons": 0}
     bars = 0
     bar_log = _open_bar_log(bars_csv)
@@ -1137,8 +1147,19 @@ def paper_command(
             stalling = feed.funding_withheld_polls > withheld
             withheld = feed.funding_withheld_polls
             if stalling or elapsed * 1000 >= bar_ms:
-                _advance_funding(identity)
                 elapsed = 0.0
+                try:
+                    _advance_funding(identity, now_ms=clock.now_ms())
+                except Exception as exc:
+                    # Warn and carry on, never die. This task *is* the recovery
+                    # path: letting a transient venue or database error end it
+                    # leaves the process running with funding frozen, every poll
+                    # withheld from the next lapse onward, and no bars for the
+                    # rest of the run -- M47 arriving through the mechanism built
+                    # to prevent it. A persistent failure is still visible: the
+                    # withheld-poll count climbs and the run produces nothing.
+                    failures["funding"] += 1
+                    typer.echo(f"Funding top-up failed ({failures['funding']}): {exc}")
 
     async def _run() -> None:
         funding = asyncio.create_task(_keep_funding_current())
@@ -1153,25 +1174,30 @@ def paper_command(
         pass  # the bound, not a failure
     except KeyboardInterrupt:
         typer.echo("Interrupted.")
-
-    if run_id is not None:
-        _flush(run_id, signals, runner.reasons, written)
-    if bar_log is not None:
-        bar_log.close()
-        typer.echo(f"Live bars logged to {bars_csv}.")
-
-    typer.echo(
-        f"Ran {for_minutes:g} min: {bars} bars, {len(signals)} signals, "
-        f"{len(runner.reasons)} reasons, {len(book.trades)} closed trades. "
-        f"Withheld polls: {feed.funding_withheld_polls}."
-    )
-    if run_id is not None:
+    finally:
+        # In a `finally` because the run can also end on an exhausted retry
+        # budget, and a process that dies still has to say what it recorded. The
+        # per-bar flush means little is at stake -- but the summary is how an
+        # operator learns a run ended early, and printing it only on the happy
+        # path hides exactly the runs worth looking at.
+        if run_id is not None:
+            _flush(run_id, signals, runner.reasons, written)
+        if bar_log is not None:
+            bar_log.close()
+            typer.echo(f"Live bars logged to {bars_csv}.")
         typer.echo(
-            f"Run {run_id}: wrote {written['signals']} signals, "
-            f"{written['reasons']} reasons."
+            f"Ran {for_minutes:g} min: {bars} bars, {len(signals)} signals, "
+            f"{len(runner.reasons)} reasons, {len(book.trades)} closed trades. "
+            f"Withheld polls: {feed.funding_withheld_polls}, "
+            f"funding top-up failures: {failures['funding']}."
         )
-    else:
-        typer.echo("Not persisted.")
+        if run_id is not None:
+            typer.echo(
+                f"Run {run_id}: wrote {written['signals']} signals, "
+                f"{written['reasons']} reasons."
+            )
+        else:
+            typer.echo("Not persisted.")
 
 
 def _live_feed(**kwargs):
@@ -1212,11 +1238,13 @@ def _log_bar(handle, bar) -> None:
     handle.flush()
 
 
-def _advance_funding(identity) -> int | None:
+def _advance_funding(identity, *, now_ms: int) -> int | None:
     """Top up stored settlements for a perp. ``None`` off-perp, where none exist.
 
     The browser's own fetch, called rather than copied, so a paper process cannot
-    advance funding by a rule the rest of the lab does not use.
+    advance funding by a rule the rest of the lab does not use. ``now_ms`` comes
+    from the feed's clock rather than the wall, so the process has one "now"
+    even here -- M46 applied to the one caller that was still exempt.
     """
     if identity.market_type != "perp":
         return None
@@ -1224,7 +1252,8 @@ def _advance_funding(identity) -> int | None:
     from strategy_lab.db.funding import upsert_funding
     from strategy_lab.server import _fetch_funding
 
-    rows = _fetch_funding(identity, datetime.now(UTC) - timedelta(days=2))
+    since = datetime.fromtimestamp(now_ms / 1000, UTC) - timedelta(days=2)
+    rows = _fetch_funding(identity, since)
     return None if rows is None else upsert_funding(rows)
 
 

@@ -61,25 +61,36 @@ from pathlib import Path
 import pandas as pd
 from sqlalchemy import select
 
+from strategy_lab.backtests.funding_frame import with_funding_column
 from strategy_lab.core.clock import SimClock
 from strategy_lab.core.types import InstrumentId
 from strategy_lab.db.candles import get_engine, load_candles
 from strategy_lab.engine.runner import StrategyRunner
 from strategy_lab.feeds.base import Subscription
 from strategy_lab.feeds.replay import ReplayFeed
+from strategy_lab.features.flow import FUNDING_COLUMN
+from strategy_lab.market_data.base import MarketDataIdentity
 from strategy_lab.storage.bar_reasons import load_bar_reasons
 from strategy_lab.storage.schema import runs_table
 from strategy_lab.storage.signals import load_signals
 from strategy_lab.strategies.registry import get_strategy
 from strategy_lab.timeframes import timeframe_to_millis
 
-FEATURES = ("energy", "direction", "strength", "persistence", "crowding")
+# Deliberately *not* a hardcoded list. The first version of this script carried
+# ("energy", "direction", "strength", "persistence", "crowding") -- `persistence`
+# is a registered `StateFeature` but not one `state_machine_v1` reads, and
+# `stability` is. A name absent from both sides compares equal to itself, so the
+# wrong name was skipped in silence and the right one was never compared: the
+# run reported "0 differing on every feature" having checked four of five. The
+# set now comes from the rows themselves, so it cannot drift from the strategy.
 OHLCV = ("open", "high", "low", "close", "volume")
 
 # Prices round-trip through NUMERIC(38,18) on one side and a csv on the other, so
 # equality is to a tolerance rather than to the bit. Well below a tick on any
 # instrument here, and far above either representation's error.
 PRICE_TOLERANCE = 1e-9
+
+ALL_SECTIONS = frozenset({"bars", "signals", "reasons"})
 
 
 def _run_header(run_id: uuid.UUID) -> dict:
@@ -92,6 +103,23 @@ def _run_header(run_id: uuid.UUID) -> dict:
     if row is None:
         raise SystemExit(f"no run {run_id}")
     return dict(row)
+
+
+def _identity(header: dict) -> MarketDataIdentity:
+    config = header["config"]
+    return MarketDataIdentity(
+        exchange=config["exchange"],
+        market_type=config["market_type"],
+        symbol=config["symbol"],
+        timeframe=config["timeframe"],
+    )
+
+
+def _closed_bar_stamps(bars_csv: Path | None) -> list[int]:
+    if bars_csv is None:
+        return []
+    live = pd.read_csv(bars_csv)
+    return sorted(int(ts) for ts in live[live["is_closed"]]["ts_open_ms"])
 
 
 def _replay(header: dict, window_start_ms: int, window_end_ms: int):
@@ -141,19 +169,34 @@ def _replay(header: dict, window_start_ms: int, window_end_ms: int):
     )
 
 
-def _compare_bars(header: dict, bars_csv: Path) -> tuple[int, dict[str, int]]:
-    """Every logged live bar against the stored candle for the same interval."""
-    config = header["config"]
+def _compare_bars(header: dict, bars_csv: Path) -> tuple[int, dict[str, int], bool]:
+    """Every logged live bar against the stored candle for the same interval.
+
+    **Funding is part of the bar, so it is part of the comparison.** Attaching
+    it wrong is one of the failure modes this phase exists to catch -- M45 was a
+    window too narrow to carry it at all -- and a strategy that reads no
+    funding-derived feature would not surface the difference through its reasons.
+    Attached through ``with_funding_column``, the engine's own function, so the
+    oracle uses the alignment rule rather than a second reading of it.
+    """
+    identity = _identity(header)
     stored = load_candles(
-        exchange=config["exchange"],
-        market_type=config["market_type"],
-        symbol=config["symbol"],
-        timeframe=config["timeframe"],
+        exchange=identity.exchange,
+        market_type=identity.market_type,
+        symbol=identity.symbol,
+        timeframe=identity.timeframe,
     )
+    stored, _ = with_funding_column(identity, stored, enabled=True, required=False)
+    funded = FUNDING_COLUMN in stored.columns
     by_ts = {int(ts.value // 10**6): row for ts, row in stored.iterrows()}
 
     live = pd.read_csv(bars_csv)
     live = live[live["is_closed"]]  # a forming bar has no stored counterpart yet
+    # Both sides, not just storage. A run whose strategy reads no funding-derived
+    # feature is driven with `requires_funding=False` and logs no rate at all;
+    # holding that against stored funding would report a difference where the
+    # live path never made the claim.
+    funded = funded and bool(live[FUNDING_COLUMN].notna().any())
     counts: dict[str, int] = defaultdict(int)
     compared = 0
     for _, row in live.iterrows():
@@ -165,7 +208,24 @@ def _compare_bars(header: dict, bars_csv: Path) -> tuple[int, dict[str, int]]:
         for name in OHLCV:
             if abs(float(row[name]) - float(stored_row[name])) > PRICE_TOLERANCE:
                 counts[name] += 1
-    return compared, dict(counts)
+        if funded and not _funding_agrees(row, stored_row):
+            counts[FUNDING_COLUMN] += 1
+    return compared, dict(counts), funded
+
+
+def _funding_agrees(live_row, stored_row) -> bool:
+    """A logged rate against the aligned stored one, absence included.
+
+    The log writes an empty field for a bar that carried no rate, which pandas
+    reads as ``NaN`` -- and ``NaN != NaN``, so "both absent" has to be its own
+    branch rather than falling out of the comparison.
+    """
+    mine, theirs = live_row.get(FUNDING_COLUMN), stored_row.get(FUNDING_COLUMN)
+    mine_absent = mine is None or mine != mine
+    theirs_absent = theirs is None or float(theirs) != float(theirs)
+    if mine_absent or theirs_absent:
+        return mine_absent and theirs_absent
+    return abs(float(mine) - float(theirs)) <= PRICE_TOLERANCE
 
 
 def _compare_signals(live, replayed) -> tuple[int, int]:
@@ -177,21 +237,25 @@ def _compare_signals(live, replayed) -> tuple[int, int]:
 def _compare_reasons(live, replayed) -> tuple[int, dict[str, int]]:
     by_ts = {r.ts_bar_ms: r for r in replayed}
     counts: dict[str, int] = defaultdict(int)
+    # Both directions. Iterating only `live` means a replay that produced an
+    # *extra* row leaves every count at zero, which prints as agreement.
+    counts["only in replay"] = len({r.ts_bar_ms for r in replayed} - {r.ts_bar_ms for r in live})
+    if not counts["only in replay"]:
+        del counts["only in replay"]
+
     compared = 0
     for reason in live:
         other = by_ts.get(reason.ts_bar_ms)
         if other is None:
-            counts["absent from replay"] += 1
+            counts["only in the live run"] += 1
             continue
         compared += 1
         if reason.state != other.state:
             counts["state"] += 1
-        for name in FEATURES:
-            mine = (reason.features or {}).get(name)
-            theirs = (other.features or {}).get(name)
-            if mine is None and theirs is None:
-                continue
-            if mine is None or theirs is None or abs(float(mine) - float(theirs)) > 1e-9:
+        mine, theirs = reason.features or {}, other.features or {}
+        for name in sorted(set(mine) | set(theirs)):
+            a, b = mine.get(name), theirs.get(name)
+            if a is None or b is None or abs(float(a) - float(b)) > 1e-9:
                 counts[name] += 1
     return compared, dict(counts)
 
@@ -211,22 +275,33 @@ def main() -> int:
 
     live_signals = load_signals(run_id=run_id)
     live_reasons = load_bar_reasons(run_id=run_id)
-    print(f"  live: {len(live_signals)} signals, {len(live_reasons)} reason rows")
-    if not live_reasons:
+    logged = _closed_bar_stamps(bars_csv)
+    print(
+        f"  live: {len(live_signals)} signals, {len(live_reasons)} reason rows, "
+        f"{len(logged)} logged closed bars"
+    )
+
+    # The window comes from whatever recorded bars, not from reasons alone: a
+    # strategy that cannot explain itself produces none -- `donchian`, the paper
+    # command's own default, produces zero -- and reading "no reasons" as "no
+    # bars" would call a real run empty.
+    stamps = [r.ts_bar_ms for r in live_reasons] or logged
+    if not stamps:
         print(
-            "\nREADING 4: nothing to compare. The run recorded no bars, so every "
-            "diff below would read 0 differences for the wrong reason."
+            "\nREADING 4: nothing to compare. The run recorded neither reasons nor "
+            "logged bars, so every diff below would read 0 differences for the "
+            "wrong reason."
         )
         return 2
 
-    start_ms, end_ms = live_reasons[0].ts_bar_ms, live_reasons[-1].ts_bar_ms
+    start_ms, end_ms = stamps[0], stamps[-1]
     print(
         f"  live window: {pd.Timestamp(start_ms, unit='ms', tz='UTC')} -> "
         f"{pd.Timestamp(end_ms, unit='ms', tz='UTC')}"
     )
 
     failed = False
-    exercised = {"bars", "signals", "reasons"}
+    exercised = set(ALL_SECTIONS)
 
     print("\n[1] live bars against the stored candles fetched afterwards")
     if bars_csv is None:
@@ -235,12 +310,21 @@ def main() -> int:
         print("  closed-bar error both surface only as a derived difference.")
         exercised.remove("bars")
     else:
-        compared, counts = _compare_bars(header, bars_csv)
-        print(f"  {compared} closed bars compared")
+        compared, counts, funded = _compare_bars(header, bars_csv)
+        fields = ", ".join((*OHLCV, FUNDING_COLUMN) if funded else OHLCV)
+        print(f"  {compared} closed bars compared on {fields}")
         for name, count in sorted(counts.items()):
             print(f"    {name}: {count} differing")
         if not counts:
-            print("    0 differing on every OHLCV field")
+            print("    0 differing on every field")
+        if not funded:
+            # Never let an unfunded comparison read as a funded one: attaching
+            # funding wrong is a failure mode this section exists to catch.
+            print(
+                "    funding NOT compared: one side carries no rate -- either the "
+                "stored settlements do not cover this range, or the run read no "
+                "funding-derived feature and was driven unfunded."
+            )
         failed = failed or bool(counts) or compared == 0
 
     print("\n[2] replaying the same range from storage")
@@ -264,18 +348,26 @@ def main() -> int:
     print("\n[4] per-bar reasons")
     compared, counts = _compare_reasons(live_reasons, replay_reasons)
     print(f"  {compared} bars compared")
-    for name in ("state", *FEATURES, "absent from replay"):
-        if name in counts:
-            print(f"    {name}: {counts[name]} differing")
-    if not counts:
-        print("    0 differing on the state and on every feature")
-    failed = failed or bool(counts) or compared == 0
+    for name, count in sorted(counts.items()):
+        print(f"    {name}: {count} differing")
+    if not live_reasons and not replay_reasons:
+        print("  NOT EXERCISED: this strategy records no reasons.")
+        exercised.remove("reasons")
+    elif not counts:
+        compared_features = sorted(
+            set().union(*(set(r.features or {}) for r in live_reasons))
+        )
+        print(
+            f"    0 differing on the state and on every feature "
+            f"({', '.join(compared_features)})"
+        )
+    failed = failed or bool(counts) or (compared == 0 and bool(live_reasons))
 
     if failed:
         print("\nA reading other than 1 applies -- see the counts above.")
         return 1
-    if exercised != {"bars", "signals", "reasons"}:
-        skipped = ", ".join(sorted({"bars", "signals", "reasons"} - exercised))
+    if exercised != ALL_SECTIONS:
+        skipped = ", ".join(sorted(ALL_SECTIONS - exercised))
         print(
             f"\nREADING 1 on what ran, but NOT on everything: {skipped} was not "
             f"exercised. Nothing below disagreed; that is a weaker claim than the "

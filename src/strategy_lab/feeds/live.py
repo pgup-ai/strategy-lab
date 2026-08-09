@@ -169,6 +169,12 @@ class LiveFeed:
     clock: Clock = field(default_factory=LiveClock)
     # Consecutive failed polls one subscription may take before the stream ends.
     fetch_retries: int = 3
+    # Whether the *consumer* reads a funding-derived feature. The same question
+    # `sweep` and `replay` ask, and the feed could not honour it until it was
+    # told: a strategy reading no funding must not have its bars withheld over
+    # coverage it never consults, or BTC's own perp becomes unrunnable for
+    # `donchian` the moment settlements lag. See `_conform_funding`.
+    requires_funding: bool = True
 
     # Never pruned, deliberately. Pruning below the fetch watermark was tried and
     # reverted: it assumes the venue returns nothing older than it was asked for,
@@ -294,6 +300,9 @@ class LiveFeed:
           unfunded on the timing of its first poll.
         - **Off-perp there is nothing to decide.** Spot never carries the column
           and never will, so it settles unfunded silently.
+        - **And none of it applies when the consumer reads no funding.**
+          ``requires_funding=False`` runs the stream unfunded outright: there is
+          no coverage question to answer, so there is nothing to withhold over.
 
         Losing funding after the stream is already funded withholds too, for the
         same reason and by the same path: a raise would kill a paper run on a lag
@@ -307,6 +316,14 @@ class LiveFeed:
         into an alert belongs with restart and supervision, which R10
         deliberately does not own.
         """
+        if not self.requires_funding:
+            # Nothing downstream reads it, so the stream runs unfunded and can
+            # never stall over coverage. The column is dropped rather than passed
+            # through, because `BarBuffer` still refuses a stream that changes
+            # its mind (M42) whether or not anyone reads the values -- so the one
+            # safe answer is the one that cannot change.
+            return frame.drop(columns=[FUNDING_COLUMN], errors="ignore")
+
         has_column = FUNDING_COLUMN in frame.columns
         settled = self._funded.get(sub.candle)
         undecided_tail = (

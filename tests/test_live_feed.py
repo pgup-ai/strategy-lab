@@ -841,3 +841,24 @@ def test_a_perp_with_too_few_settlements_stored_widens_to_nothing(monkeypatch):
     )
     since = int(pd.Timestamp("2026-06-01", tz="UTC").value // 10**6)
     assert _funded_since_ms(perp, since) == since
+
+
+def test_the_first_poll_after_priming_decides_the_newest_primed_bar_once(frame):
+    """`resume_after` suppresses bars *older* than the primed history, not the
+    boundary bar itself, and that is deliberate rather than an off-by-one.
+
+    `prime_bars` appends without emitting, so the newest primed bar carries no
+    decision. Emitting it once is the run's first decision, on the newest closed
+    bar at startup — the alternative is standing idle for up to a whole bar
+    interval while holding data that says to act. It arrives once, not twice:
+    priming is silent.
+    """
+    feed = LiveFeed(fetch=_Venue(frame, first=10, step=1), sleep=_noop)
+    boundary = int(frame.index[8].value // 10**6)  # index 9 is still forming
+    feed.resume_after(SUB, boundary)
+
+    stamps = [e.bar.ts_open_ms for e in drain(feed, [SUB], polls=3)]
+
+    assert stamps.count(boundary) == 1, f"the boundary bar arrived {stamps.count(boundary)}x"
+    assert min(stamps) == boundary, "a bar older than the primed history was emitted"
+    assert stamps == sorted(stamps), "bars must still ascend"

@@ -42,6 +42,20 @@ class _EveryBar:
 
 
 @dataclass(frozen=True)
+class _NeedsFunding:
+    """Declares `crowding`, so the feed must carry funding for it."""
+
+    name: str = "needs_funding"
+    version: str = "1.0.0"
+    warmup_bars: int = 3
+    features: tuple[str, ...] = ("direction", "crowding")
+
+    def generate_signals(self, df: pd.DataFrame) -> SignalSet:
+        flat = pd.Series(False, index=df.index)
+        return SignalSet(pd.Series(True, index=df.index), flat, flat, flat)
+
+
+@dataclass(frozen=True)
 class _Sized:
     """Carries a per-bar scale, which no `Signal` can express."""
 
@@ -58,6 +72,38 @@ class _Sized:
             flat,
             position_size=pd.Series(0.5, index=df.index),
         )
+
+
+class _Stalled:
+    """A feed that only ever withholds: no event ever reaches the consumer.
+
+    That is the condition both funding-task bugs live under -- the top-up ran in
+    the consumer loop, and the loop body does not run when nothing arrives -- so
+    a double that delivers bars cannot see either of them.
+    """
+
+    lookback_bars = 5
+
+    def __init__(self) -> None:
+        self.clock = SimClock(0)
+        self._polls = 0
+
+    @property
+    def funding_withheld_polls(self) -> int:
+        self._polls += 1
+        return self._polls
+
+    def resume_after(self, *_args) -> None:
+        pass
+
+    async def backfill(self, *_args, **_kwargs):
+        return
+        yield  # unreachable, and what makes this an async generator
+
+    async def stream(self, _subs):
+        while True:
+            await asyncio.sleep(0)
+        yield  # unreachable, and what makes this an async generator
 
 
 @pytest.fixture
@@ -89,7 +135,7 @@ def wired(monkeypatch):
         # sleeps for real; only the fixture has to remember to yield.
         await asyncio.sleep(0)
 
-    monkeypatch.setattr(cli, "_advance_funding", lambda identity: 7)
+    monkeypatch.setattr(cli, "_advance_funding", lambda identity, *, now_ms: 7)
     monkeypatch.setattr(
         cli,
         "_live_feed",
@@ -190,7 +236,29 @@ def test_the_bar_log_records_what_the_live_path_received(monkeypatch, wired, tmp
     assert list(logged.columns) == [
         "ts_open_ms", "open", "high", "low", "close", "volume", "funding_rate", "is_closed",
     ]
-    assert logged["funding_rate"].notna().all(), "a funded perp bar logged no rate"
+
+
+def test_a_funding_reading_strategy_logs_the_rate_and_others_do_not(
+    monkeypatch, wired, tmp_path
+):
+    """`requires_funding` is derived from the strategy, so what reaches the bar
+    log follows it. A strategy reading no funding-derived feature runs unfunded
+    outright — which is what stops a `donchian` paper run stalling over coverage
+    it never consults — and one that reads `crowding` must carry the rate or it
+    is running M20 live."""
+    reads, ignores = tmp_path / "funded.csv", tmp_path / "bare.csv"
+
+    monkeypatch.setattr(cli, "get_strategy", lambda name: _NeedsFunding())
+    _invoke("--strategy", "needs_funding", "--bars-csv", str(reads))
+    monkeypatch.setattr(cli, "get_strategy", lambda name: _EveryBar())
+    _invoke("--strategy", "every_bar", "--bars-csv", str(ignores))
+
+    assert pd.read_csv(reads)["funding_rate"].notna().all(), (
+        "a strategy that reads crowding was fed bars with no rate"
+    )
+    assert pd.read_csv(ignores)["funding_rate"].isna().all(), (
+        "a strategy that reads no funding was made to depend on it anyway"
+    )
 
 
 def test_advance_funding_asks_nothing_of_a_market_that_settles_nothing():
@@ -201,7 +269,7 @@ def test_advance_funding_asks_nothing_of_a_market_that_settles_nothing():
     spot = MarketDataIdentity(
         exchange="binance", market_type="spot", symbol="BTC/USDT", timeframe=TIMEFRAME
     )
-    assert cli._advance_funding(spot) is None
+    assert cli._advance_funding(spot, now_ms=1_700_000_000_000) is None
 
 
 def test_a_run_header_carries_what_would_be_needed_to_repeat_it(monkeypatch, wired):
@@ -229,34 +297,11 @@ def test_funding_is_advanced_during_a_stall_not_only_between_them(monkeypatch, w
     monkeypatch.setattr(cli, "get_strategy", lambda name: _EveryBar())
     monkeypatch.setattr(cli, "FUNDING_CHECK_SECONDS", 0.001)
 
-    # A feed that only ever withholds: no event reaches the consumer, which is
-    # the condition under which the old code could not fetch at all.
-    stalling = {"n": 0}
-
-    class _Stalled:
-        lookback_bars = 5
-        clock = SimClock(0)
-
-        @property
-        def funding_withheld_polls(self):
-            stalling["n"] += 1
-            return stalling["n"]
-
-        def resume_after(self, *_):
-            pass
-
-        async def backfill(self, *_a, **_kw):
-            return
-            yield  # pragma: no cover - makes this an async generator
-
-        async def stream(self, _subs):
-            while True:
-                await asyncio.sleep(0)
-            yield  # unreachable, and what makes this an async generator
-
     monkeypatch.setattr(cli, "_live_feed", lambda **_: _Stalled())
     advanced = []
-    monkeypatch.setattr(cli, "_advance_funding", lambda identity: advanced.append(1) or 1)
+    monkeypatch.setattr(
+        cli, "_advance_funding", lambda identity, *, now_ms: advanced.append(1) or 1
+    )
 
     _invoke("--strategy", "every_bar", "--no-persist")
 
@@ -264,3 +309,38 @@ def test_funding_is_advanced_during_a_stall_not_only_between_them(monkeypatch, w
         "funding was fetched once at startup and never again, so a stall that "
         "began after startup could never end"
     )
+
+
+def test_a_failing_funding_top_up_does_not_kill_the_task_that_clears_stalls(
+    monkeypatch, wired
+):
+    """M47 arriving through the mechanism built to prevent it. `_advance_funding`
+    reaches a venue and a database, both of which fail transiently. An unhandled
+    raise ends the task while the stream keeps running, so funding freezes, every
+    poll is withheld from the next lapse onward, and the process produces nothing
+    for the rest of the run while looking alive."""
+    monkeypatch.setattr(cli, "get_strategy", lambda name: _EveryBar())
+    monkeypatch.setattr(cli, "FUNDING_CHECK_SECONDS", 0.001)
+    monkeypatch.setattr(cli, "_live_feed", lambda **_: _Stalled())
+
+    attempts = {"n": 0}
+
+    def fails_after_startup(identity, *, now_ms):
+        # The startup call is deliberately outside the task's guard: a process
+        # that cannot reach the venue at all should fail loudly rather than run
+        # blind. It is the periodic call that must survive.
+        attempts["n"] += 1
+        if attempts["n"] == 1:
+            return 7
+        raise RuntimeError("venue down")
+
+    monkeypatch.setattr(cli, "_advance_funding", fails_after_startup)
+
+    output = _invoke("--strategy", "every_bar", "--no-persist")
+
+    assert attempts["n"] > 2, (
+        f"the task stopped after {attempts['n']} attempts, so a transient error "
+        f"permanently disabled the only thing that clears a funding stall"
+    )
+    assert "Funding top-up failed" in output, "the failures were swallowed silently"
+    assert "funding top-up failures:" in output, "the summary hid a degraded run"
