@@ -547,3 +547,39 @@ def test_a_plain_refresh_still_asks_for_no_particular_start(client, monkeypatch)
     )
 
     assert seen["since"] is None
+
+
+def test_an_unparseable_since_is_a_client_error_not_a_traceback(client):
+    """It was parsed with `pd.Timestamp` inside the route but outside its
+    `try`, so a bad value escaped as a 500."""
+    response = client.post(
+        "/api/refresh",
+        params={
+            "exchange": "binance", "market_type": "spot", "symbol": "BTC/USDT",
+            "timeframe": "1h", "since": "not-a-date",
+        },
+    )
+
+    assert response.status_code == 422
+
+
+def test_a_since_without_a_zone_is_read_as_utc(client, monkeypatch):
+    """Everything downstream compares against aware datetimes, so a naive one
+    raises deep in the fetch rather than at the boundary that accepted it."""
+    seen = {}
+    monkeypatch.setattr(
+        "strategy_lab.server.refresh_candles",
+        lambda identity, after, since: seen.update(since=since)
+        or {"bars": [], "candles_upserted": 0, "funding_upserted": None},
+    )
+
+    response = client.post(
+        "/api/refresh",
+        params={
+            "exchange": "binance", "market_type": "spot", "symbol": "BTC/USDT",
+            "timeframe": "1h", "since": "2024-01-01T00:00:00",
+        },
+    )
+
+    assert response.status_code == 200
+    assert seen["since"].tzinfo is not None

@@ -1027,12 +1027,13 @@ def test_the_ladder_offers_no_month(page):
     month is not a fixed width, and warmup, funding windows and the poll cadence
     are all `bar_ms` arithmetic. A rung that fetches candles and then cannot be
     analysed is the live control that cannot connect, again."""
-    from strategy_lab.browser.page import TIMEFRAME_LADDER
+    from strategy_lab.browser.page import TIMEFRAME_LADDERS
     from strategy_lab.timeframes import timeframe_to_millis
 
-    assert "1M" not in TIMEFRAME_LADDER
-    for timeframe in TIMEFRAME_LADDER:
-        assert timeframe_to_millis(timeframe) > 0
+    for ladder in TIMEFRAME_LADDERS.values():
+        assert "1M" not in ladder
+        for timeframe in ladder:
+            assert timeframe_to_millis(timeframe) > 0
     with pytest.raises(ValueError):
         timeframe_to_millis("1M")
 
@@ -1082,3 +1083,16 @@ def test_a_bar_close_refresh_does_not_redraw_over_the_board(page):
     refresh = _within(script, "function refreshInstrument()")
     assert "var startedIn = viewSel.value;" in refresh
     assert "if (viewSel.value !== startedIn) return null;" in refresh
+
+
+def test_the_ladder_spells_a_week_the_way_each_venue_does(page):
+    """Yahoo's own error names its set — `[1m, 2m, 5m, 15m, 30m, 60m, 90m, 1h,
+    4h, 1d, 5d, 1wk, 1mo, 3mo]` — so `4h` is fine there and `1w` returns nothing.
+    That is the `1w`/`1wk` split this repo already keys datasets on, and a rung
+    that fetches nothing is the live control that cannot connect."""
+    from strategy_lab.browser.page import TIMEFRAME_LADDERS
+
+    assert "1w" in TIMEFRAME_LADDERS["binance"] and "1wk" not in TIMEFRAME_LADDERS["binance"]
+    assert "1wk" in TIMEFRAME_LADDERS["yahoo"] and "1w" not in TIMEFRAME_LADDERS["yahoo"]
+    assert "4h" in TIMEFRAME_LADDERS["yahoo"], "Yahoo does serve 4h — measured"
+    assert "CFG.timeframeLadders[id.exchange] || CFG.defaultTimeframeLadder" in _script(page)

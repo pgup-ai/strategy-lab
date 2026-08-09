@@ -67,9 +67,8 @@ def refresh_candles(
     # `since` is for a timeframe that has no stored bars at all: the five-bar
     # lookback tops up a series that exists, and would leave a brand new one
     # holding five candles and a warmup error.
-    lookback_start = since or datetime.now(UTC) - timedelta(
-        milliseconds=bar_ms * REFRESH_LOOKBACK_BARS
-    )
+    funding_start = datetime.now(UTC) - timedelta(milliseconds=bar_ms * REFRESH_LOOKBACK_BARS)
+    lookback_start = since or funding_start
 
     # Both fetches before either write. Storing candles first and then fetching
     # funding meant a venue outage on the funding call left the bars committed
@@ -77,7 +76,12 @@ def refresh_candles(
     # exists to prevent, reported as a 502 rather than avoided by it. Failing
     # before anything is written leaves the pair where it was.
     fetched = _fetch_recent(identity, lookback_start)
-    pending_funding = _fetch_funding(identity, lookback_start)
+    # Funding keeps its own five-bar catch-up even when the candles reach back
+    # years. It is keyed `(exchange, market_type, symbol)` with no timeframe, so
+    # a new *timeframe* adds nothing to it -- and `_fetch_funding` starts at the
+    # earlier of its argument and the last stored settlement, so handing it the
+    # candle `since` re-pages the whole ~7,700-row history to write duplicates.
+    pending_funding = _fetch_funding(identity, funding_start)
 
     # Settlements before bars, which makes the remaining failure a harmless one.
     # The two upserts cannot share a transaction without threading a connection

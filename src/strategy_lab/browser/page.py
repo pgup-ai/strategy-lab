@@ -155,13 +155,23 @@ if DEFAULT_MARKET_TYPE not in MARKET_TYPES:
 # raises, and warmup, funding windows and the poll cadence are all `bar_ms`
 # arithmetic. A rung that fetches candles and then cannot be analysed is the
 # same defect as a live control that cannot connect: better absent than broken.
-TIMEFRAME_LADDER: tuple[str, ...] = ("1h", "4h", "1d", "1w")
+# Per venue, because a week is not spelled the same way twice. Yahoo's own
+# error names its set -- `[1m, 2m, 5m, 15m, 30m, 60m, 90m, 1h, 4h, 1d, 5d, 1wk,
+# 1mo, 3mo]` -- so `4h` is fine there and `1w` returns nothing, which is the
+# `1w`/`1wk` split this repo already keys datasets on. A rung that fetches
+# nothing is the live control that cannot connect, again.
+TIMEFRAME_LADDERS: dict[str, tuple[str, ...]] = {
+    "binance": ("1h", "4h", "1d", "1w"),
+    "yahoo": ("1h", "4h", "1d", "1wk"),
+}
+DEFAULT_TIMEFRAME_LADDER: tuple[str, ...] = ("1h", "4h", "1d")
 
 # Shortest first, for ordering rungs the ladder did not name. A timeframe this
 # instrument already has is worth a rung even when it is not one of the four
 # above -- otherwise leaving 15m for 1h strands you in the dropdown.
 TIMEFRAME_ORDER: tuple[str, ...] = (
-    "1m", "3m", "5m", "15m", "30m", "1h", "2h", "4h", "6h", "8h", "12h", "1d", "3d", "1w", "1wk"
+    "1s", "1m", "3m", "5m", "15m", "30m", "1h", "2h", "4h",
+    "6h", "8h", "12h", "1d", "3d", "1w", "1wk",
 )
 
 STATE_COLORS: dict[str, str] = {
@@ -190,7 +200,8 @@ def bootstrap_config() -> dict[str, object]:
         # instrument -- the switcher fetches the missing one rather than hiding
         # it, because "this timeframe does not exist here" is a fact about
         # storage, not about the market.
-        "timeframeLadder": list(TIMEFRAME_LADDER),
+        "timeframeLadders": {k: list(v) for k, v in TIMEFRAME_LADDERS.items()},
+        "defaultTimeframeLadder": list(DEFAULT_TIMEFRAME_LADDER),
         "timeframeOrder": list(TIMEFRAME_ORDER),
     }
 
@@ -1880,7 +1891,7 @@ __SHELL_CSS__
     var current = id.timeframe;
     // The four rungs, plus every timeframe this instrument already has stored,
     // so switching away from one never strands it in the dropdown.
-    var rungs = CFG.timeframeLadder.slice();
+    var rungs = (CFG.timeframeLadders[id.exchange] || CFG.defaultTimeframeLadder).slice();
     Array.prototype.forEach.call(datasetSel.options, function (option) {
       var parts = option.value.split('|');
       var mine = parts[0] === id.exchange && parts[1] === id.market_type &&

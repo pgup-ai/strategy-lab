@@ -407,3 +407,25 @@ def test_a_fetch_that_ends_on_a_closed_bar_keeps_all_of_it(monkeypatch):
     monkeypatch.setattr("strategy_lab.server.load_candles", lambda **_: closed)
 
     assert refresh_candles(_SPOT, None)["candles_upserted"] == 2
+
+
+def test_a_candle_backfill_does_not_re_page_the_funding_history(monkeypatch):
+    """Funding is keyed `(exchange, market_type, symbol)` with no timeframe, so a
+    new *timeframe* adds nothing to it — and `_fetch_funding` starts at the
+    earlier of its argument and the last stored settlement, so handing it a 2019
+    candle edge re-pages ~7,700 settlements to write duplicates."""
+    asked: dict = {}
+    stored = _with_forming().iloc[:-1]
+    monkeypatch.setattr("strategy_lab.server._fetch_recent", lambda *_: stored)
+    monkeypatch.setattr(
+        "strategy_lab.server._fetch_funding",
+        lambda identity, start: asked.update(start=start) or None,
+    )
+    monkeypatch.setattr("strategy_lab.server.upsert_candles", len)
+    monkeypatch.setattr("strategy_lab.server.load_candles", lambda **_: stored)
+
+    ancient = datetime(2019, 9, 10, tzinfo=UTC)
+    refresh_candles(_PERP, None, ancient)
+
+    assert asked["start"] > ancient, "the candle edge dragged funding back with it"
+    assert (datetime.now(UTC) - asked["start"]).days < 1

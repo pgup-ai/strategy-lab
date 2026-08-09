@@ -24,10 +24,12 @@ turns that omission into an error instead of a quiet loss.
 
 from __future__ import annotations
 
+import re
+
 from typing import Annotated, Literal
 
 import pandas as pd
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from strategy_lab.api.analysis import (
     DEFAULT_CASH,
@@ -237,6 +239,10 @@ class BoardQuery(_Strict):
         return self
 
 
+# A trailing `Z`, `+hh:mm` or `-hh:mm` after the time part.
+_HAS_TIMEZONE = re.compile(r"(?:[zZ]|[+-]\d{2}:?\d{2})$")
+
+
 class RefreshQuery(IdentityQuery):
     """``after`` is an epoch-second cursor: the caller already has bars up to it.
 
@@ -246,7 +252,18 @@ class RefreshQuery(IdentityQuery):
 
     after: Annotated[int, Field(ge=0)] | None = None
     # Only for a timeframe with nothing stored yet -- see `refresh_candles`.
-    since: str | None = None
+    # A real datetime rather than a string, so an unparseable one is a 422 from
+    # the boundary instead of a traceback from `pd.Timestamp` inside the route,
+    # and a naive one is made UTC rather than raising later against an aware
+    # comparison deep in the fetch.
+    since: AwareDatetime | None = None
+
+    @field_validator("since", mode="before")
+    @classmethod
+    def _assume_utc(cls, value: object) -> object:
+        if isinstance(value, str) and value and not _HAS_TIMEZONE.search(value):
+            return value + "+00:00"
+        return value
 
 
 class DatasetModel(_Strict):
