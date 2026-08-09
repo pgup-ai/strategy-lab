@@ -52,3 +52,27 @@ def test_there_is_no_stream_for_most_things(identity):
 
 def test_the_symbol_is_the_venue_s_spelling_not_this_repo_s():
     assert stream_url(_id("binance", "perp", "ETH/USDT", "4h")).endswith("/ethusdt@kline_4h")
+
+
+def test_a_settle_suffix_is_not_part_of_the_stream_name():
+    """`BTC/USDT:USDT` is ccxt's spelling of a perp and `IdentityQuery` accepts
+    it. Left in, the URL still *connects* — it just subscribes to nothing, which
+    is the silent half of a wrong stream."""
+    assert stream_url(_id("binance", "perp", "BTC/USDT:USDT", "15m")) == (
+        "wss://fstream.binance.com/ws/btcusdt@kline_15m"
+    )
+
+
+def test_the_interval_set_is_what_this_repo_can_hold_not_what_binance_publishes():
+    """Binance publishes `1M`; `timeframe_to_millis` raises on it because a month
+    is not a fixed width and every bar calculation here is width arithmetic. A
+    stream for a dataset that cannot exist is a URL nobody can use."""
+    from strategy_lab.timeframes import timeframe_to_millis
+
+    assert stream_url(_id("binance", "spot", "BTC/USDT", "1M")) is None
+    with pytest.raises(ValueError):
+        timeframe_to_millis("1M")
+    # And one this repo *can* hold is offered, published by the venue and
+    # measurable here.
+    assert timeframe_to_millis("1s") == 1000
+    assert stream_url(_id("binance", "spot", "BTC/USDT", "1s")) is not None

@@ -26,11 +26,14 @@ _HOSTS = {
     ("binance", "perp"): "wss://fstream.binance.com/ws",
 }
 
-# Binance's own kline intervals. `1wk` is deliberately absent: it is the Yahoo
-# spelling of a week, and a timeframe string is an identity here rather than a
-# duration -- `1w` and `1wk` are different datasets.
+# Binance's kline intervals *that this repo can also hold as a dataset*, which
+# is not all of them. `1M` is published and excluded: a month is not a fixed
+# width, `timeframe_to_millis` raises on it, and every bar calculation here is
+# width arithmetic. `1wk` is excluded for the opposite reason -- it is the Yahoo
+# spelling of a week, and a timeframe is an identity here rather than a
+# duration, so `1w` and `1wk` are different datasets.
 _INTERVALS = frozenset(
-    {"1m", "3m", "5m", "15m", "30m", "1h", "2h", "4h", "6h", "8h", "12h", "1d", "3d", "1w"}
+    {"1s", "1m", "3m", "5m", "15m", "30m", "1h", "2h", "4h", "6h", "8h", "12h", "1d", "3d", "1w"}
 )
 
 
@@ -39,7 +42,11 @@ def stream_url(identity: MarketDataIdentity) -> str | None:
     host = _HOSTS.get((identity.exchange, identity.market_type))
     if host is None or identity.timeframe not in _INTERVALS:
         return None
-    symbol = identity.symbol.replace("/", "").replace("-", "").lower()
+    # `BTC/USDT:USDT` is ccxt's spelling of a perp, and the settle suffix is not
+    # part of the venue's stream name. Left in, the URL still connects -- it just
+    # subscribes to nothing, which is the silent half of a wrong stream.
+    base = identity.symbol.split(":", 1)[0]
+    symbol = base.replace("/", "").replace("-", "").lower()
     return f"{host}/{symbol}@kline_{identity.timeframe}"
 
 

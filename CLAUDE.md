@@ -193,7 +193,12 @@ Key design decisions that span multiple files:
   `build_analysis` produces a state and a marker that flip when the bar closes,
   which is the reading `include_forming=False` exists to refuse — so the
   why-layer stays as of the last closed bar and the page says so over the live
-  one. **And "live" means a frame arrived, not that a socket opened**: measured,
+  one. **The forming bar also never reaches storage**: the venue always
+  returns it -- measured, a 15m fetch at 23:29:48 ends with the 23:15 bar -- and
+  `refresh_candles` withholds it, because a `market_candles` row is treated as
+  final by the backtest, the replay feed and `include_forming=False`, and a
+  partial one is *restated* on the next refresh. It stays in the refresh payload,
+  which is how `serve` still draws it. **And "live" means a frame arrived, not that a socket opened**: measured,
   `fstream.binance.com` (every perp dataset here) accepts the connection and
   sends nothing while `stream.binance.com` delivers 6 frames in 12 s on the same
   pair, so reporting off `onopen` is a green dot over a frozen chart. Which URL

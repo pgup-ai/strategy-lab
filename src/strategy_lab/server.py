@@ -97,6 +97,16 @@ def refresh_candles(
 
         settlements = upsert_funding(pending_funding)
 
+    # The venue always returns the bar in progress -- measured, a 15m fetch at
+    # 23:29:48 ends with the bar that opened 23:15 -- and storing it puts a
+    # partial candle in `market_candles`, where every consumer treats a row as
+    # final. It is then *restated* on the next refresh, which is the in-place
+    # rewrite of history the equity caveat warns about, and `build_analysis`
+    # meanwhile computes a state and markers for a bar that has not finished.
+    # It stays in the payload for `serve`, whose chart draws it as forming on
+    # purpose; it just never reaches storage.
+    fetched, forming = _split_forming(fetched, bar_ms)
+
     candles = 0
     if not fetched.empty:
         source = "yahoo" if _is_equity(identity) else identity.exchange
@@ -122,11 +132,27 @@ def refresh_candles(
         timeframe=identity.timeframe,
         start=start,
     )
+    if forming is not None:
+        df = pd.concat([df, forming])
     return {
         **build_candles_payload(df),
         "candles_upserted": candles,
         "funding_upserted": settlements,
     }
+
+
+def _split_forming(frame: pd.DataFrame, bar_ms: int) -> tuple[pd.DataFrame, pd.DataFrame | None]:
+    """The bars whose interval has closed, and the one still open if there is one.
+
+    Only the final row can be forming: the venue serves ascending bars up to now,
+    so everything before the last one closed when the next began.
+    """
+    if frame.empty:
+        return frame, None
+    ends = frame.index[-1] + pd.Timedelta(milliseconds=bar_ms)
+    if ends <= pd.Timestamp.now(tz="UTC"):
+        return frame, None
+    return frame.iloc[:-1], frame.iloc[-1:]
 
 
 def _fetch_funding(identity: MarketDataIdentity, lookback_start: datetime):

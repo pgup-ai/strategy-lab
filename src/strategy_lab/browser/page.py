@@ -1120,17 +1120,24 @@ __SHELL_CSS__
     var socket = new WebSocket(url);
     live.socket = socket;
     socket.onopen = function () {
+      if (live.socket !== socket) return;
       setLive('wait', 'waiting for data');
       live.watchdog = setTimeout(function () {
         if (live.socket === socket && !live.ticks) setLive('off', 'connected · no data');
       }, FIRST_TICK_GRACE_MS);
     };
     socket.onmessage = function (event) {
+      // The guard `onclose` and the watchdog already carry. Without it a frame
+      // in flight when the dataset changed draws the old market's candle onto
+      // the new chart, and a stale `x: true` POSTs a refresh nobody asked for.
+      if (live.socket !== socket) return;
       if (!live.ticks) setLive('on', 'live');
       live.ticks += 1;
       onTick(JSON.parse(event.data));
     };
-    socket.onerror = function () { setLive('off', 'stream error'); };
+    socket.onerror = function () {
+      if (live.socket === socket) setLive('off', 'stream error');
+    };
     socket.onclose = function () {
       // Only report a drop we did not ask for; switching dataset closes it too.
       if (live.socket === socket) { live.socket = null; setLive('off', 'disconnected'); }
@@ -1150,6 +1157,7 @@ __SHELL_CSS__
     // timer: the one moment the stored candles are provably behind. Refresh
     // stores it and recomputes, so state and markers catch up to the bar the
     // chart already drew.
+    if (viewSel.value !== 'instrument') return;
     setLive('wait', 'bar closed · refreshing');
     refreshInstrument().then(function () {
       if (live.socket) setLive('on', 'live');
@@ -1813,6 +1821,12 @@ __SHELL_CSS__
     });
   });
   function refreshInstrument() {
+    // The view can change while the fetch is in flight, and this one is not
+    // always started by a click -- a closing bar starts it too. Reloading then
+    // draws a chart over the board and retitles the page, which is what
+    // `abandonInstrument` prevents for requests already running but cannot for
+    // one begun afterwards.
+    var startedIn = viewSel.value;
     var button = el('refresh');
     button.disabled = true;
     setStatus('fetching newest bars …');
@@ -1841,6 +1855,7 @@ __SHELL_CSS__
         // coverage guard tolerates only to one funding cadence.
         exactBounds = { start: exactBounds && exactBounds.start, end: null };
         el('end').value = '';
+        if (viewSel.value !== startedIn) return null;
         return load();
       })
       .catch(function (error) { setError(error.message); })

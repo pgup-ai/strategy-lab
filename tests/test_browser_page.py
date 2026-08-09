@@ -1057,3 +1057,28 @@ def test_the_ladder_carries_the_timeframes_this_instrument_already_has(page):
     assert "if (mine && rungs.indexOf(parts[3]) < 0) rungs.push(parts[3]);" in render
     assert "if (rungs.indexOf(current) < 0) rungs.push(current);" in render
     assert "CFG.timeframeOrder.indexOf(a) - CFG.timeframeOrder.indexOf(b)" in render
+
+
+def test_a_frame_from_a_replaced_socket_reaches_nothing(page):
+    """`closeSocket()` nulls the reference, but a message already in flight is
+    still dispatched. Ungated it draws the old market's candle onto the new
+    dataset's chart, and a stale `x: true` POSTs a refresh nobody asked for — to
+    the app's only write."""
+    socket = _within(_script(page), "function openSocket()")
+
+    for handler in ("socket.onopen", "socket.onmessage"):
+        after = socket[socket.index(handler) :]
+        assert "if (live.socket !== socket) return;" in after[: after.index("};")], handler
+    assert "if (live.socket === socket) setLive('off', 'stream error');" in socket
+
+
+def test_a_bar_close_refresh_does_not_redraw_over_the_board(page):
+    """This refresh is not always started by a click, so the view can change
+    while it is in flight. `abandonInstrument` invalidates requests already
+    running; it cannot stop one begun afterwards."""
+    script = _script(page)
+
+    assert "if (viewSel.value !== 'instrument') return;" in _within(script, "function onTick(message)")
+    refresh = _within(script, "function refreshInstrument()")
+    assert "var startedIn = viewSel.value;" in refresh
+    assert "if (viewSel.value !== startedIn) return null;" in refresh

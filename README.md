@@ -21,7 +21,7 @@ after the question you arrived with.
 
 | I want to… | run | where it is explained |
 |---|---|---|
-| **watch live prices with signals and state** | `strategy-lab browse` | [The live pill](#the-live-pill-a-forming-candle-and-a-refresh-when-it-closes) |
+| **watch live prices, signals and state** | `strategy-lab browse` | [The live pill](#the-live-pill-a-forming-candle-and-a-refresh-when-it-closes) |
 | see any strategy on any stored candle set | `strategy-lab browse` | [browse — the live view](#two-ways-to-look-at-a-strategy) |
 | run a strategy against the venue, on paper | `strategy-lab paper` | [Paper Trading](#paper-trading-against-the-live-venue) |
 | backtest and keep a reproducible record | `strategy-lab backtest` | [Backtest](#backtest) |
@@ -610,7 +610,8 @@ tile's **open**, and the **live** pill is already on. Try
 `BTC/USDT · 15m · binance/spot` with `state_machine_v1` to get a moving candle,
 markers, the state panel and the state-change list together.
 
-On a Binance dataset the instrument view offers that **live** toggle, default on.
+On a Binance dataset at a timeframe the venue streams, the instrument view
+offers that **live** toggle, default on.
 It opens the venue's kline websocket and draws the forming candle as it moves.
 
 **The forming bar is drawn and never analysed.** A tick reaching
