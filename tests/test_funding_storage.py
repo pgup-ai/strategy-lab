@@ -303,3 +303,26 @@ def test_nth_newest_settlement_refuses_a_count_below_one():
     all -- the newest settlement returned as though it were the zeroth."""
     with pytest.raises(ValueError, match="at least 1"):
         nth_newest_settlement(**IDENTITY, count=0)
+
+
+def test_nth_newest_settlement_can_be_asked_as_of_a_past_moment():
+    """"Newest" is relative to when the question is asked, and a caller reasoning
+    about a window that has already passed wants the newest as of *then*.
+    Measured before this existed: a 75-minute window a week old widened by
+    nothing, because the fourth newest settlement in the table was newer than the
+    window itself, and the delayed oracle then had no funding column to compare."""
+    stamps = [1_700_000_000_000 + i * 8 * 3_600_000 for i in range(6)]
+    upsert_funding(
+        [
+            {**IDENTITY, "funding_time_ms": ts, "funding_rate": Decimal("0.0001"),
+             "mark_price": None, "source": "test"}
+            for ts in stamps
+        ]
+    )
+
+    unbounded = nth_newest_settlement(**IDENTITY, count=2)
+    as_of_the_third = nth_newest_settlement(**IDENTITY, count=2, before_ms=stamps[2])
+
+    assert int(unbounded.value // 10**6) == stamps[-2]
+    assert int(as_of_the_third.value // 10**6) == stamps[1], "the bound was ignored"
+    assert nth_newest_settlement(**IDENTITY, count=2, before_ms=stamps[0]) is None

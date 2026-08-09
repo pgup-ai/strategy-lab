@@ -124,7 +124,9 @@ def _fetch_recent(
     return frame
 
 
-def _funded_since_ms(identity: MarketDataIdentity, since_ms: int) -> int:
+def _funded_since_ms(
+    identity: MarketDataIdentity, since_ms: int, *, before_ms: int | None = None
+) -> int:
     """``since_ms``, reached back far enough for a perp to carry its own funding.
 
     The same rule ``server._fetch_funding`` states for the browser's refresh --
@@ -134,6 +136,12 @@ def _funded_since_ms(identity: MarketDataIdentity, since_ms: int) -> int:
     to reach for: a window that cannot be covered is ``_conform_funding``'s
     problem, and widening toward funding that does not exist would only make the
     request slower before it got the same answer.
+
+    ``before_ms`` is for a caller reasoning about a window that has already
+    passed -- the delayed oracle. A live poll leaves it unset, because its window
+    ends now and the newest settlements are the ones it needs; asking the same
+    question about a week-old window without the bound reaches for settlements
+    newer than the window and so widens by nothing.
     """
     if identity.market_type != "perp":
         return since_ms
@@ -145,6 +153,7 @@ def _funded_since_ms(identity: MarketDataIdentity, since_ms: int) -> int:
         market_type=identity.market_type,
         symbol=identity.symbol,
         count=MIN_SETTLEMENTS_IN_WINDOW,
+        before_ms=before_ms,
     )
     if floor is None:
         return since_ms

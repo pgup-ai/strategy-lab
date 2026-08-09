@@ -174,6 +174,19 @@ def _replay(header: dict, window_start_ms: int, window_end_ms: int):
     )
 
 
+def _widened_start_ms(identity: MarketDataIdentity, start_ms: int, end_ms: int) -> int:
+    """The feed's own reach-back, asked about a window that has already passed.
+
+    ``_funded_since_ms`` defaults to the newest settlements stored, which is what
+    a live poll wants because its window ends now. This one ends whenever the run
+    ended, so the bound has to move with it -- measured, a 75-minute window a week
+    old widened by nothing at all, because the fourth newest settlement in the
+    table was newer than the window, and the funding comparison then had no column
+    to make.
+    """
+    return _funded_since_ms(identity, start_ms, before_ms=end_ms)
+
+
 def _compare_bars(
     header: dict, bars_csv: Path, window_start_ms: int, window_end_ms: int
 ) -> tuple[int, dict[str, int], bool]:
@@ -202,7 +215,7 @@ def _compare_bars(
         market_type=identity.market_type,
         symbol=identity.symbol,
         timeframe=identity.timeframe,
-        start=str(pd.Timestamp(_funded_since_ms(identity, window_start_ms), unit="ms", tz="UTC")),
+        start=str(pd.Timestamp(_widened_start_ms(identity, window_start_ms, window_end_ms), unit="ms", tz="UTC")),
         end=str(pd.Timestamp(window_end_ms, unit="ms", tz="UTC")),
     )
     stored, _ = with_funding_column(identity, stored, enabled=True, required=False)

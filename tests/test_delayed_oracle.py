@@ -157,7 +157,9 @@ def test_the_bar_comparison_is_bounded_to_the_run_window(oracle, monkeypatch, tm
         )
 
     monkeypatch.setattr(oracle, "load_candles", fake_load_candles)
-    monkeypatch.setattr(oracle, "_funded_since_ms", lambda identity, since_ms: since_ms - 999)
+    monkeypatch.setattr(
+        oracle, "_funded_since_ms", lambda identity, since_ms, **_: since_ms - 999
+    )
     # The bounds are what is under test; funding attachment has its own coverage
     # and would reach the database from here.
     monkeypatch.setattr(oracle, "with_funding_column", lambda i, df, **kw: (df, None))
@@ -203,3 +205,28 @@ def test_a_log_without_rates_reports_funding_as_not_compared(oracle, monkeypatch
     assert compared == 1
     assert not funded, "an unfunded live log was compared against stored funding"
     assert counts == {}, f"the missing rate was counted as a difference: {counts}"
+
+
+def test_the_reach_back_is_anchored_to_the_run_window_not_to_now(oracle, monkeypatch):
+    """`_funded_since_ms` defaults to the newest settlements stored, which is what
+    a live poll wants because its window ends now. A delayed oracle'"'"'s window ended
+    whenever the run did — measured, a 75-minute window a week old widened by
+    nothing, because the fourth newest settlement in the table was newer than the
+    window, and the funding comparison then had no column to make."""
+    seen = {}
+
+    def capture(**kwargs):
+        seen.update(kwargs)
+        return None
+
+    monkeypatch.setattr("strategy_lab.db.funding.nth_newest_settlement", capture)
+    identity = oracle.MarketDataIdentity(
+        exchange="binance", market_type="perp", symbol="BTC/USDT", timeframe="15m"
+    )
+
+    oracle._widened_start_ms(identity, 1_700_000_000_000, 1_700_004_500_000)
+
+    assert seen["before_ms"] == 1_700_004_500_000, (
+        "the reach-back asked for the newest settlements stored, not the newest "
+        "as of the window it is about"
+    )
