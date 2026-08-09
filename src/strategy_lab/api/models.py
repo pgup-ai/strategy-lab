@@ -255,6 +255,9 @@ class DatasetModel(_Strict):
     candles: int
     first_timestamp: str
     last_timestamp: str
+    # `None` for most: Yahoo publishes no stream and `1wk` is its spelling of a
+    # week. The page shows a live control only where this is set.
+    stream: str | None = None
 
 
 class StrategyModel(_Strict):

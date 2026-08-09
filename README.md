@@ -578,9 +578,39 @@ bars moved** against a fresh fetch (median 0.257%), and `donchian` differed on 3
 of them where two ratio-based strategies differed on none. The board opens on
 `perp` so that caveat is something you choose to look at rather than inherit.
 
-Refresh is **explicit** — per tile or all tiles — and never on a timer. A
+Refresh is **explicit** — per tile or all tiles — and never on a *timer*. A
 background poll that talks to a venue on its own schedule is a different thing
 from a page you refreshed, and only the second is honest about when it last did.
+
+### The live pill: a forming candle, and a refresh when it closes
+
+On a Binance dataset the instrument view offers a **live** toggle, default on.
+It opens the venue's kline websocket and draws the forming candle as it moves.
+
+**The forming bar is drawn and never analysed.** A tick reaching
+`build_analysis` would produce a state and a marker that flip when the bar
+closes — the one reading the event path refuses everywhere else. So the candle
+moves while the state panel, the markers and the transition list stay as of the
+last *closed* bar, and hovering the live one says `live bar · not analysed until
+it closes` rather than showing the previous bar's state as if it were this one's.
+
+**A closing bar is what triggers a refresh, and that is not a timer.** The
+stream sets `x: true` on the one update where the stored candles are provably
+behind, so the page refreshes exactly then rather than guessing on a clock. The
+rule it keeps is the one above — the page still says when it last spoke to the
+venue — and `setInterval` remains banned.
+
+**"live" means data, not a socket.** Measured against Binance from one network:
+`fstream.binance.com`, which serves **every perp dataset here**, accepts the
+connection and then sends nothing — on both the raw and combined stream forms,
+at 1m and 4h — while `stream.binance.com` delivers 6 frames in 12 s on the same
+pair. Reporting the pill off `onopen` would have left a green dot over a frozen
+chart, so it turns green on the first frame and says `connected · no data` if
+none arrives within 15 s. If your perp charts sit there, that is what you are
+seeing, and spot streams fine.
+
+Only Binance, and only because the stored candles are Binance: a second venue's
+ticks drawn onto this venue's candles is two markets' prices in one line.
 
 Signals are computed by the same whole-history `generate_signals(df)` call
 `run_backtest` makes over the same stored candles — never read from the `signals`

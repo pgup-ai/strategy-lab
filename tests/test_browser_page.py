@@ -459,8 +459,26 @@ def test_a_tile_offers_refresh_for_itself_and_for_the_whole_board(page):
 
     assert "function refreshOne(identity, button)" in script
     assert "function refreshAll()" in script
-    assert "setInterval" not in script, "the board must not poll on a timer"
-    assert "setTimeout" not in script
+    assert "setInterval" not in script, "nothing may fetch on a clock"
+
+
+def test_the_only_unclicked_fetch_is_the_one_a_closing_bar_asks_for(page):
+    """The rule this page kept was "never on a timer", and the reason was
+    honesty about when it last spoke to a venue -- not a ban on timers as such.
+    A closing bar is not a clock: it is the venue naming the one moment the
+    stored candles are provably behind, and the page still says when it last
+    refreshed.
+
+    So `setInterval` stays banned, and the single `setTimeout` here is the
+    first-frame watchdog, which changes a label and fetches nothing.
+    """
+    script = _script(page)
+
+    assert script.count("setTimeout") == 1
+    watchdog = script[script.index("live.watchdog = setTimeout") :][:400]
+    for fetching in ("getJSON", "fetch(", "/api/"):
+        assert fetching not in watchdog, "the watchdog must not talk to anything"
+    assert "refreshInstrument()" in _within(script, "function onTick(message)")
 
 
 def test_a_row_the_board_could_not_answer_says_why_on_its_own_tile(page):
@@ -657,7 +675,10 @@ def test_switching_views_stops_whichever_one_is_being_left(page):
 
     body = script[script.index("function setView(name)"):]
     body = body[: body.index("function reload()")]
-    assert "if (name === 'board') abandonInstrument(); else abortBoard();" in body
+    assert "abandonInstrument();" in body and "abortBoard();" in body
+    # And the venue socket: a stream left open behind the board is a connection
+    # nobody is watching, still redrawing a hidden chart on every tick.
+    assert "closeSocket();" in body
     # The two guards key on different counters, so each branch may bump the one
     # it is not about to take a token from.
     assert "pending += 1;" in _within(script, "function abandonInstrument()")
@@ -707,8 +728,7 @@ def test_refreshing_the_instrument_moves_only_the_edge_the_fetch_moved(page):
     """
     script = _script(page)
 
-    body = script[script.index("el('refresh').addEventListener"):]
-    body = body[: body.index("});")]
+    body = _within(script, "function refreshInstrument()")
     assert "exactBounds = { start: exactBounds && exactBounds.start, end: null };" in body
     assert "el('end').value = '';" in body
     assert body.index("end: null };") < body.index("return load();")
@@ -896,3 +916,70 @@ def test_a_transition_carries_the_bar_its_dwell_is_measured_from(page):
     assert "previousIndex: previousIndex," in build
     assert "previousIndex = i;" in build
     assert "dwellText(view.bars, shift.previousIndex, shift.index)" in script
+
+
+def test_a_live_tick_is_drawn_but_never_analysed(page):
+    """The one reading the whole event path refuses. A tick reaching
+    `build_analysis` produces a state and a marker that flip when the bar
+    closes — `include_forming=False` exists for this, and a timestamp is
+    complete only once a later one arrives. So the candle moves and the
+    why-layer stays where the last closed bar left it."""
+    tick = _within(_script(page), "function onTick(message)")
+
+    assert "candleSeries.update(live.bar);" in tick
+    assert "build_analysis" not in tick and "/api/analysis" not in tick
+    # And the gap that leaves is named rather than papered over: a live bar has
+    # no index, and falling through would show the previous bar's state as if it
+    # were this one's.
+    assert "'live bar · not analysed until it closes'" in _script(page)
+
+
+def test_a_closing_bar_is_what_triggers_the_refresh_not_a_timer(page):
+    """`serve` polls every 60s and guesses. The stream says `x: true` on the
+    one update where the stored candles are provably behind, so the refresh
+    happens exactly then and the page can say when it last did."""
+    script = _script(page)
+    tick = _within(script, "function onTick(message)")
+
+    assert "if (!k.x) return;" in tick
+    assert "refreshInstrument()" in tick
+    assert "setInterval" not in script, "a timer would be the thing this replaces"
+
+
+def test_the_live_control_is_hidden_where_there_is_no_stream(page):
+    """Most datasets have none — Yahoo publishes nothing, and `1wk` is a Yahoo
+    timeframe. A control that cannot connect is worse than no control."""
+    script = _script(page)
+
+    assert "streams[id] = row.stream || null;" in script
+    assert "view.stream = streams[datasetSel.value] || null;" in script
+    assert "el('live').hidden = !view.stream;" in script
+
+
+def test_the_page_composes_no_venue_url_of_its_own(page):
+    """Which URL a stream lives at is venue knowledge, and it is wrong in ways a
+    chart still renders. It comes from `market_data.streams`, tested in Python,
+    and reaches the page as a field on the dataset row."""
+    script = _script(page)
+
+    assert "wss://" not in script
+    assert "@kline_" not in script
+
+
+def test_live_means_a_frame_arrived_not_that_a_socket_opened(page):
+    """Measured against Binance from one network: `fstream.binance.com` — every
+    perp dataset in this repo — accepts the connection and sends nothing, on
+    both the raw and combined stream forms at 1m and 4h, while
+    `stream.binance.com` delivers 6 frames in 12 s on the same pair.
+
+    So `onopen` is a proxy for working, and reporting off it leaves a green dot
+    over a frozen chart. Green comes from the first frame; silence gets said out
+    loud.
+    """
+    socket = _within(_script(page), "function openSocket()")
+
+    assert "socket.onopen" in socket
+    assert "setLive('on', 'live')" not in socket[socket.index("socket.onopen") : socket.index("socket.onmessage")]
+    assert "setLive('wait', 'waiting for data');" in socket
+    assert "if (!live.ticks) setLive('on', 'live');" in socket
+    assert "setLive('off', 'connected · no data');" in socket

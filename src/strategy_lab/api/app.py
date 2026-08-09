@@ -45,6 +45,7 @@ from strategy_lab.api.models import (
 from strategy_lab.backtests.funding_frame import FundingUnavailable
 from strategy_lab.db import list_candle_sets
 from strategy_lab.market_data.base import MarketDataIdentity
+from strategy_lab.market_data.streams import stream_url
 
 # Loopback only. The app reads a research database and can make the process
 # fetch from an exchange, so binding it to a routable address is a change of
@@ -205,11 +206,20 @@ def create_app() -> FastAPI:
 
 
 def _dataset_row(row: pd.Series) -> dict[str, Any]:
+    identity = MarketDataIdentity(
+        exchange=str(row["exchange"]),
+        market_type=str(row["market_type"]),
+        symbol=str(row["symbol"]),
+        timeframe=str(row["timeframe"]),
+    )
     return {
-        "exchange": str(row["exchange"]),
-        "market_type": str(row["market_type"]),
-        "symbol": str(row["symbol"]),
-        "timeframe": str(row["timeframe"]),
+        "exchange": identity.exchange,
+        "market_type": identity.market_type,
+        "symbol": identity.symbol,
+        "timeframe": identity.timeframe,
+        # `None` for anything without one, which is most of them. The page shows
+        # a live control only where there is something to connect to.
+        "stream": stream_url(identity),
         "candles": int(row["candles"]),
         "first_timestamp": str(row["first_timestamp"]),
         "last_timestamp": str(row["last_timestamp"]),

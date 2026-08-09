@@ -253,6 +253,10 @@ __SHELL_CSS__
      strategy was not acting yet, so they are not decisions. */
   .shift.warmup { opacity: 0.55; }
   .shift.warmup .shift-to { font-weight: 400; }
+  .live { display: inline-flex; align-items: center; gap: 6px; }
+  .live-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--ink-dim); }
+  .live.on .live-dot { background: var(--up); }
+  .live.wait .live-dot { background: #d1a54a; }
   .why-chips { display: flex; gap: 8px; flex-wrap: wrap; }
   .why-chips .chip { min-width: 84px; }
   .why-chips .chip.state { border-color: #4a5163; background: #232733; }
@@ -333,6 +337,10 @@ __SHELL_CSS__
     </div>
     <div class="field instrument-only">
       <label for="refresh">Candles</label>
+      <button id="live" type="button" class="live off" hidden
+              title="Draw the venue's forming candle, and recompute when it closes">
+        <span class="live-dot"></span><span id="live-text">live</span>
+      </button>
       <button id="refresh" type="button" title="Fetch the newest bars and recompute">
         refresh
       </button>
@@ -564,10 +572,13 @@ __SHELL_CSS__
     });
   }
 
+  var streams = {};
+
   function fillDatasets(rows) {
     var deepest = null;
     rows.forEach(function (row) {
       var id = datasetKey(row);
+      streams[id] = row.stream || null;
       datasetSel.appendChild(option(
         id,
         row.symbol + ' · ' + row.timeframe + ' · ' + row.exchange + '/' +
@@ -686,6 +697,10 @@ __SHELL_CSS__
       var range = priceChart.timeScale().getVisibleLogicalRange();
       if (range) exposureChart.timeScale().setVisibleLogicalRange(range);
     }
+
+    view.stream = streams[datasetSel.value] || null;
+    el('live').hidden = !view.stream;
+    openSocket();
 
     renderProvenance(payload.provenance);
     view.shifts = payload.why ? shiftsFrom(payload.why.states, payload.bars) : null;
@@ -968,9 +983,105 @@ __SHELL_CSS__
     });
   }
 
+  // ---------------------------------------------------------------- live feed
+
+  // The venue's forming candle, drawn but **never analysed**. A tick that
+  // reached `build_analysis` would produce a state and a marker that flip when
+  // the bar closes, which is the one reading the whole event path refuses --
+  // `include_forming=False`, and a timestamp is complete only once a later one
+  // arrives. So the candle moves and the why-layer stays where the last closed
+  // bar left it, and `renderBar` says so rather than letting the previous bar's
+  // state read as this one's.
+  var live = { socket: null, on: true, bar: null, ticks: 0, watchdog: null };
+
+  // A socket that opens is not a feed that delivers. Measured against Binance
+  // from here: `fstream.binance.com` -- every perp dataset in this repo --
+  // accepts the connection and then sends nothing, on both the raw and combined
+  // stream forms, while `stream.binance.com` delivers 6 frames in 12s on the
+  // same pair. `onopen` is therefore a proxy for working, and reporting "live"
+  // off it would leave a green dot over a frozen chart. It says live once a
+  // frame has actually arrived, and says so when none does.
+  var FIRST_TICK_GRACE_MS = 15000;
+
+  function setLive(cls, text) {
+    var button = el('live');
+    button.className = 'live ' + cls;
+    el('live-text').textContent = text;
+  }
+
+  function closeSocket() {
+    if (live.watchdog) { clearTimeout(live.watchdog); live.watchdog = null; }
+    if (!live.socket) return;
+    var socket = live.socket;
+    live.socket = null;          // before close(), so onclose knows it was us
+    socket.close();
+  }
+
+  function openSocket() {
+    closeSocket();
+    live.bar = null;
+    var url = view.stream;
+    if (!url || !live.on) {
+      setLive('off', live.on ? 'no stream' : 'paused');
+      return;
+    }
+    setLive('wait', 'connecting');
+    live.ticks = 0;
+    var socket = new WebSocket(url);
+    live.socket = socket;
+    socket.onopen = function () {
+      setLive('wait', 'waiting for data');
+      live.watchdog = setTimeout(function () {
+        if (live.socket === socket && !live.ticks) setLive('off', 'connected · no data');
+      }, FIRST_TICK_GRACE_MS);
+    };
+    socket.onmessage = function (event) {
+      if (!live.ticks) setLive('on', 'live');
+      live.ticks += 1;
+      onTick(JSON.parse(event.data));
+    };
+    socket.onerror = function () { setLive('off', 'stream error'); };
+    socket.onclose = function () {
+      // Only report a drop we did not ask for; switching dataset closes it too.
+      if (live.socket === socket) { live.socket = null; setLive('off', 'disconnected'); }
+    };
+  }
+
+  function onTick(message) {
+    var k = message.k;
+    if (!k) return;
+    live.bar = {
+      time: Math.floor(k.t / 1000),
+      open: Number(k.o), high: Number(k.h), low: Number(k.l), close: Number(k.c)
+    };
+    candleSeries.update(live.bar);
+    if (!k.x) return;
+    // The venue says this bar is final, which is the whole reason this is not a
+    // timer: the one moment the stored candles are provably behind. Refresh
+    // stores it and recomputes, so state and markers catch up to the bar the
+    // chart already drew.
+    setLive('wait', 'bar closed · refreshing');
+    refreshInstrument().then(function () {
+      if (live.socket) setLive('on', 'live');
+    });
+  }
+
+  el('live').addEventListener('click', function () {
+    live.on = !live.on;
+    openSocket();
+  });
+
   priceChart.subscribeCrosshairMove(function (param) {
     if (view.pinned !== null) return;
     var i = param.time !== undefined ? view.index[param.time] : undefined;
+    // A live bar has no index: it was drawn after the analysis, on purpose. Say
+    // so rather than falling back to the last analysed bar, whose state would
+    // then read as this one's.
+    if (i === undefined && live.bar && param.time === live.bar.time) {
+      el('why-bar').textContent = 'live bar · not analysed until it closes';
+      el('why-chips').replaceChildren();
+      return;
+    }
     renderBar(i === undefined ? view.bars.length - 1 : i);
   });
   priceChart.subscribeClick(function (param) {
@@ -1574,7 +1685,7 @@ __SHELL_CSS__
     // fires on its own: leaving the board would keep appending tiles to a
     // hidden host and finishing a full recompute per dataset, and leaving the
     // instrument view would draw a chart over the board and retitle the page.
-    if (name === 'board') abandonInstrument(); else abortBoard();
+    if (name === 'board') { abandonInstrument(); closeSocket(); } else abortBoard();
     return name === 'board' ? loadBoard() : load();
   }
 
@@ -1611,14 +1722,14 @@ __SHELL_CSS__
       load();
     });
   });
-  el('refresh').addEventListener('click', function () {
+  function refreshInstrument() {
     var button = el('refresh');
     button.disabled = true;
     setStatus('fetching newest bars …');
     var params = new URLSearchParams(identity());
     var last = view.bars[view.bars.length - 1];
     if (last) params.set('after', String(last.time));
-    getJSON('/api/refresh?' + params.toString(), { method: 'POST' })
+    return getJSON('/api/refresh?' + params.toString(), { method: 'POST' })
       // The counts exist so drift is visible at the moment it opens, not two
       // clicks later as a 409. A perp that moved candles and no settlements is
       // exactly the state the coverage guard will refuse next, and thrown away
@@ -1644,7 +1755,9 @@ __SHELL_CSS__
       })
       .catch(function (error) { setError(error.message); })
       .then(function () { button.disabled = false; });
-  });
+  }
+
+  el('refresh').addEventListener('click', refreshInstrument);
 
   fillMarkets();
   fillExitModes();
