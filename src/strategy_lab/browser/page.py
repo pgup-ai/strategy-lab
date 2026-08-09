@@ -247,9 +247,8 @@ __SHELL_CSS__
   .shift-from { color: var(--ink-dim); }
   .shift-dwell { color: var(--ink-dim); text-align: right;
     font-variant-numeric: tabular-nums; }
-  /* A transition before the strategy's warmup is a state the machine walked
-     through but never acted on -- dimmed rather than hidden, because it is real
-     and a reader must not mistake it for a decision. */
+  /* Dimmed rather than hidden: the machine really walked through these, but the
+     strategy was not acting yet, so they are not decisions. */
   .shift.warmup .shift-to { font-weight: 400; opacity: 0.55; }
   .shift.warmup .shift-when, .shift.warmup .shift-dwell { opacity: 0.55; }
   .why-chips { display: flex; gap: 8px; flex-wrap: wrap; }
@@ -869,11 +868,9 @@ __SHELL_CSS__
 
   // ------------------------------------------------------- the state sequence
 
-  // Derived here from `why.states` rather than returned by the API, and that is
-  // the point: a transition is a `!==` over a series the payload already
-  // carries, so it cannot disagree with the per-bar state the chip shows or
-  // with the board tile. A second server-side derivation would be M36's third
-  // answer, free to drift from the two that already agree.
+  // A `!==` over a series the payload already carries, so it cannot disagree
+  // with the per-bar chip or the board tile. Deriving it server-side would be
+  // M36's third answer, free to drift from the two that already agree.
   function shiftsFrom(states, bars) {
     var out = [];
     for (var i = 1; i < states.length; i += 1) {
@@ -902,11 +899,14 @@ __SHELL_CSS__
     section.hidden = false;
 
     var warmup = view.payload.provenance.warmup_bars;
-    // Newest first: this is a monitor, and the question it answers most often is
-    // "what is it doing now", not "what did it do first".
+    var inWarmup = 0;
+    // Newest first: the question a monitor answers most often is what it is
+    // doing now, not what it did first.
     view.shifts.slice().reverse().forEach(function (shift) {
+      var early = warmup !== null && shift.index < warmup;
+      if (early) inWarmup += 1;
       var row = document.createElement('div');
-      row.className = 'shift' + (warmup !== null && shift.index < warmup ? ' warmup' : '');
+      row.className = 'shift' + (early ? ' warmup' : '');
       row.dataset.index = shift.index;
 
       var when = document.createElement('span');
@@ -933,13 +933,11 @@ __SHELL_CSS__
       host.appendChild(row);
     });
 
-    var inWarmup = view.shifts.filter(function (s) {
-      return warmup !== null && s.index < warmup;
-    }).length;
     el('transitions-count').textContent = view.shifts.length +
       (view.shifts.length === 1 ? ' change' : ' changes') + ' · newest first';
     el('transitions-note').textContent = inWarmup
-      ? inWarmup + ' of these fall inside the ' + warmup + '-bar warmup and are dimmed: ' +
+      ? inWarmup + ' of these fall inside the ' + warmup.toLocaleString() +
+        '-bar warmup and are dimmed: ' +
         'the machine walked through them, but the strategy was not acting yet, so they ' +
         'are not decisions.'
       : 'Dwell is how long the previous state held. Click a row to pin that bar.';

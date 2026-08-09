@@ -830,9 +830,8 @@ def test_the_state_sequence_is_derived_from_the_series_the_page_already_has(page
     """
     script = _script(page)
 
-    assert "function shiftsFrom(states, bars)" in script
-    assert "if (states[i] === states[i - 1]) continue;" in script
     assert "shiftsFrom(payload.why.states, payload.bars)" in script
+    assert "if (states[i] === states[i - 1]) continue;" in script
 
 
 def test_a_strategy_with_no_state_machine_shows_no_sequence(page):
@@ -841,10 +840,8 @@ def test_a_strategy_with_no_state_machine_shows_no_sequence(page):
     script = _script(page)
 
     assert "view.shifts = null;" in script
-    assert "if (payload.why) {" in script
-    after = script[script.index("function renderShifts()"):]
-    assert "if (!view.shifts) {" in after[: after.index("function pinBar")]
-    assert "section.hidden = true;" in after[: after.index("function pinBar")]
+    render = script[script.index("function renderShifts()") : script.index("function pinBar")]
+    assert "if (!view.shifts) {\n      section.hidden = true;" in render
 
 
 def test_a_transition_inside_warmup_is_marked_rather_than_hidden(page):
@@ -855,14 +852,18 @@ def test_a_transition_inside_warmup_is_marked_rather_than_hidden(page):
     """
     script = _script(page)
 
-    assert "shift.index < warmup ? ' warmup' : ''" in script
-    assert "are not decisions." in script
+    assert "var early = warmup !== null && shift.index < warmup;" in script
+    assert "'shift' + (early ? ' warmup' : '')" in script
     assert ".shift.warmup .shift-to" in _style(page)
+    # And the reader is told *how many*, not just that some are: a dimmed row
+    # with no count is a style nobody can act on.
+    assert "if (early) inWarmup += 1;" in script
+    assert "el('transitions-note').textContent = inWarmup" in script
+    assert "are not decisions." in script
 
 
 def test_clicking_a_transition_recentres_only_when_the_bar_is_off_screen(page):
     """Otherwise comparing two rows yanks the chart on every click."""
     script = _script(page)
 
-    assert "function pinBar(i)" in script
     assert "if (range && (i < range.from || i > range.to))" in script
