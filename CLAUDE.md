@@ -28,6 +28,8 @@ strategy-lab features --exchange binance --market-type perp --symbol BTC/USDT \
 strategy-lab backtest --exchange binance --market-type perp --symbols BTC/USDT \
   --timeframe 4h --strategy state_machine_v1 --exit-mode opposite_signal_only \
   --start "2019-09-10 08:00:00" --cost-stress 1,2,3   # the MDE R5 state machine
+strategy-lab paper --symbol BTC/USDT --timeframe 15m --strategy state_machine_v1 \
+  --for-minutes 75 --bars-csv live_bars.csv   # poll the venue, decide, book it; stores no candles
 strategy-lab serve                 # serve the frozen reports/ with the candle-refresh API
 strategy-lab browse                # the research browser: recomputed live, writes nothing
 ```
@@ -52,9 +54,10 @@ A second, event-driven flow shares the same strategy layer: `ReplayFeed`
 (`engine/runner.py`) appends each closed bar to a `BarBuffer`
 (`engine/context.py`) and calls the same `strategy.generate_signals(df)` once
 per bar, reading only the last row → `Signal` → `storage.signals.write_signals`
-→ the append-only `signals` table. The `replay` CLI drives this path today; a
-live feed will drive it later through the same protocol, with no change to the
-runner or to strategy code. See
+→ the append-only `signals` table. The `replay` CLI drives this path from
+stored candles and the `paper` CLI drives it from `LiveFeed`, which polls the
+venue — the same runner and the same strategy code, differing only in the feed,
+which is what having a protocol bought. See
 [the Phase 1a design doc](docs/design/2026-08-02-realtime-trading-framework.md)
 for the full rationale.
 

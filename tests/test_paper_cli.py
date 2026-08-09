@@ -1,0 +1,430 @@
+"""The paper command's own wiring, exercised without a venue or a database.
+
+``LiveFeed`` is driven by a scripted fetch and a sleep that does not sleep, the
+funding top-up is patched, and the storage indirections record instead of insert
+-- so these cover what the command owns: priming from ``backfill``, the cursor
+handoff to the poll, the book, the incremental flush, and the bar log.
+
+The parts underneath have their own suites. This is the seam between them, and
+before R10h nothing exercised it at all because nothing constructed either half.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import uuid
+from dataclasses import dataclass
+
+import pandas as pd
+import pytest
+from typer.testing import CliRunner
+
+from strategy_lab import cli
+from strategy_lab.core.clock import SimClock
+from strategy_lab.core.types import Mode
+from strategy_lab.feeds.live import LiveFeed
+from strategy_lab.strategies.base import SignalSet
+from tests.conftest import synthetic_ohlcv_with_funding
+
+runner = CliRunner()
+TIMEFRAME = "4h"
+
+
+@dataclass(frozen=True)
+class _EveryBar:
+    name: str = "every_bar"
+    version: str = "9.9.9"
+    warmup_bars: int = 3
+
+    def generate_signals(self, df: pd.DataFrame) -> SignalSet:
+        flat = pd.Series(False, index=df.index)
+        return SignalSet(pd.Series(True, index=df.index), flat, flat, flat)
+
+
+@dataclass(frozen=True)
+class _NeedsFunding:
+    """Declares `crowding`, so the feed must carry funding for it."""
+
+    name: str = "needs_funding"
+    version: str = "1.0.0"
+    warmup_bars: int = 3
+    features: tuple[str, ...] = ("direction", "crowding")
+
+    def generate_signals(self, df: pd.DataFrame) -> SignalSet:
+        flat = pd.Series(False, index=df.index)
+        return SignalSet(pd.Series(True, index=df.index), flat, flat, flat)
+
+
+@dataclass(frozen=True)
+class _Sized:
+    """Carries a per-bar scale, which no `Signal` can express."""
+
+    name: str = "sized"
+    version: str = "1.0.0"
+    warmup_bars: int = 3
+
+    def generate_signals(self, df: pd.DataFrame) -> SignalSet:
+        flat = pd.Series(False, index=df.index)
+        return SignalSet(
+            pd.Series(True, index=df.index),
+            flat,
+            flat,
+            flat,
+            position_size=pd.Series(0.5, index=df.index),
+        )
+
+
+class _Stalled:
+    """A feed that only ever withholds: no event ever reaches the consumer.
+
+    That is the condition both funding-task bugs live under -- the top-up ran in
+    the consumer loop, and the loop body does not run when nothing arrives -- so
+    a double that delivers bars cannot see either of them.
+    """
+
+    lookback_bars = 5
+
+    def __init__(self) -> None:
+        self.clock = SimClock(0)
+        self._polls = 0
+
+    @property
+    def funding_withheld_polls(self) -> int:
+        self._polls += 1
+        return self._polls
+
+    def resume_after(self, *_args) -> None:
+        pass
+
+    async def backfill(self, *_args, **_kwargs):
+        return
+        yield  # unreachable, and what makes this an async generator
+
+    async def stream(self, _subs):
+        while True:
+            await asyncio.sleep(0)
+        yield  # unreachable, and what makes this an async generator
+
+
+@pytest.fixture
+def wired(monkeypatch):
+    """The command with its venue, funding top-up and storage replaced."""
+    frame = synthetic_ohlcv_with_funding(n=40, freq=TIMEFRAME)
+    primed_through = 25
+    revealed = {"n": primed_through + 1}
+    # The clock walks the fixture rather than the wall: `backfill` bounds itself
+    # by the clock, so a clock in 2026 over bars from 2024 filters every one of
+    # them out and primes nothing.
+    clock = SimClock(int(frame.index[primed_through].value // 10**6))
+
+    def fetch(identity, since_ms, until_ms=None):
+        window = frame[frame.index >= pd.Timestamp(since_ms, unit="ms", tz="UTC")]
+        if until_ms is not None:  # backfill, which is bounded on both sides
+            return window[window.index <= pd.Timestamp(until_ms, unit="ms", tz="UTC")]
+        # A poll: one more bar has closed since the last one, as it would live.
+        window = window[window.index <= frame.index[revealed["n"] - 1]]
+        if revealed["n"] < len(frame):
+            revealed["n"] += 1
+            clock.advance_to(int(frame.index[revealed["n"] - 1].value // 10**6))
+        return window
+
+    async def _noop(_seconds):
+        # `asyncio.sleep(0)` rather than a bare return: a coroutine that never
+        # suspends never hands control back to the loop, so the command's
+        # `wait_for` deadline cannot fire and the run spins forever. Production
+        # sleeps for real; only the fixture has to remember to yield.
+        await asyncio.sleep(0)
+
+    monkeypatch.setattr(cli, "_advance_funding", lambda identity, *, now_ms: 7)
+    monkeypatch.setattr(
+        cli,
+        "_live_feed",
+        lambda **kwargs: LiveFeed(**{**kwargs, "fetch": fetch, "sleep": _noop, "clock": clock}),
+    )
+
+    written = {"runs": [], "signals": [], "reasons": []}
+    monkeypatch.setattr(cli, "_create_run", lambda **kw: written["runs"].append(kw) or kw["run_id"])
+    monkeypatch.setattr(
+        cli,
+        "_write_signals",
+        lambda run_id, mode, signals: written["signals"].append((mode, list(signals)))
+        or len(signals),
+    )
+    monkeypatch.setattr(
+        cli,
+        "_write_bar_reasons",
+        lambda run_id, mode, reasons: written["reasons"].append((mode, list(reasons)))
+        or len(reasons),
+    )
+    return written
+
+
+def _invoke(*args):
+    result = runner.invoke(
+        cli.app,
+        ["paper", "--timeframe", TIMEFRAME, "--for-minutes", "0.01", *args],
+        catch_exceptions=False,
+    )
+    assert result.exit_code == 0, result.output
+    return result.output
+
+
+def test_a_paper_run_primes_polls_and_records(monkeypatch, wired):
+    """The seam the phase exists to close: `backfill` warms the runner, the poll
+    feeds it, and what it decided reaches storage under `paper`."""
+    monkeypatch.setattr(cli, "get_strategy", lambda name: _EveryBar())
+
+    output = _invoke("--strategy", "every_bar")
+
+    # warmup + lookback, less the one still forming at the clock's instant.
+    assert "Primed 8 bars" in output
+    assert wired["runs"], "a paper run that happened left no header"
+    assert wired["runs"][0]["mode"] is Mode.PAPER
+    assert wired["signals"], "the run emitted nothing to storage"
+    assert all(mode is Mode.PAPER for mode, _ in wired["signals"])
+
+
+def test_nothing_is_written_twice_across_flushes(monkeypatch, wired):
+    """Signals are flushed per bar so an hours-long run survives what ends it.
+    The claim that makes that safe is that a flush writes only the new tail."""
+    monkeypatch.setattr(cli, "get_strategy", lambda name: _EveryBar())
+
+    _invoke("--strategy", "every_bar")
+
+    seen = [(s.ts_bar_ms, s.side) for _, batch in wired["signals"] for s in batch]
+    assert seen, "nothing was written, so the incremental claim is untested"
+    assert len(seen) == len(set(seen)), f"a flush rewrote what an earlier one had: {seen}"
+
+
+def test_persist_off_writes_nothing_at_all(monkeypatch, wired):
+    monkeypatch.setattr(cli, "get_strategy", lambda name: _EveryBar())
+
+    output = _invoke("--strategy", "every_bar", "--no-persist")
+
+    assert "Not persisted." in output
+    assert not wired["runs"] and not wired["signals"] and not wired["reasons"]
+
+
+def test_a_per_bar_scale_is_declared_rather_than_silently_dropped(monkeypatch, wired):
+    """`StrategyRunner` emits `strength=None` and no `Signal` carries a size, so
+    the book fills every entry at scale 1.0. For a strategy that sizes per bar
+    that is a real divergence from its backtest -- the one property R10g's book
+    was built to have -- and it is worth a sentence rather than a different
+    number nobody was told about."""
+    monkeypatch.setattr(cli, "get_strategy", lambda name: _Sized())
+
+    assert "fills every entry at scale 1.0" in _invoke("--strategy", "sized")
+
+
+def test_a_strategy_without_a_per_bar_scale_says_nothing(monkeypatch, wired):
+    """The bound on the above: a warning on every run is a warning nobody reads."""
+    monkeypatch.setattr(cli, "get_strategy", lambda name: _EveryBar())
+
+    assert "scale 1.0" not in _invoke("--strategy", "every_bar")
+
+
+def test_the_bar_log_records_what_the_live_path_received(monkeypatch, wired, tmp_path):
+    """Without it the delayed oracle cannot tell a venue revision from a
+    closed-bar error, because both surface only as a derived difference."""
+    monkeypatch.setattr(cli, "get_strategy", lambda name: _EveryBar())
+    path = tmp_path / "bars.csv"
+
+    _invoke("--strategy", "every_bar", "--bars-csv", str(path))
+
+    logged = pd.read_csv(path)
+    assert not logged.empty, "the run logged no bars"
+    assert list(logged.columns) == [
+        "ts_open_ms", "open", "high", "low", "close", "volume", "funding_rate", "is_closed",
+    ]
+
+
+def test_a_funding_reading_strategy_logs_the_rate_and_others_do_not(
+    monkeypatch, wired, tmp_path
+):
+    """`requires_funding` is derived from the strategy, so what reaches the bar
+    log follows it. A strategy reading no funding-derived feature runs unfunded
+    outright — which is what stops a `donchian` paper run stalling over coverage
+    it never consults — and one that reads `crowding` must carry the rate or it
+    is running M20 live."""
+    reads, ignores = tmp_path / "funded.csv", tmp_path / "bare.csv"
+
+    monkeypatch.setattr(cli, "get_strategy", lambda name: _NeedsFunding())
+    _invoke("--strategy", "needs_funding", "--bars-csv", str(reads))
+    monkeypatch.setattr(cli, "get_strategy", lambda name: _EveryBar())
+    _invoke("--strategy", "every_bar", "--bars-csv", str(ignores))
+
+    funded, bare = pd.read_csv(reads), pd.read_csv(ignores)
+    # Both `notna().all()` and `isna().all()` are True on an empty Series, so
+    # without this the whole comparison passes by having nothing in it. The two
+    # runs share one scripted bar budget and the second gets what the first left,
+    # which today is a single bar -- thin enough that drift would make this
+    # vacuous rather than red.
+    assert not funded.empty and not bare.empty, (
+        f"nothing to compare: {len(funded)} funded rows, {len(bare)} unfunded"
+    )
+    assert funded["funding_rate"].notna().all(), (
+        "a strategy that reads crowding was fed bars with no rate"
+    )
+    assert bare["funding_rate"].isna().all(), (
+        "a strategy that reads no funding was made to depend on it anyway"
+    )
+
+
+def test_advance_funding_asks_nothing_of_a_market_that_settles_nothing():
+    """The same rule `board_window` follows: a query that can only return `None`
+    is how a coverage guard gets invented for a market that has none."""
+    from strategy_lab.market_data.base import MarketDataIdentity
+
+    spot = MarketDataIdentity(
+        exchange="binance", market_type="spot", symbol="BTC/USDT", timeframe=TIMEFRAME
+    )
+    assert cli._advance_funding(spot, now_ms=1_700_000_000_000) is None
+
+
+def test_a_run_header_carries_what_would_be_needed_to_repeat_it(monkeypatch, wired):
+    """A paper run cannot be re-run — its window is gone — so the header is the
+    only place the shape of it survives."""
+    monkeypatch.setattr(cli, "get_strategy", lambda name: _EveryBar())
+
+    _invoke("--strategy", "every_bar", "--cash", "5000")
+
+    config = wired["runs"][0]["config"]
+    for key in ("exchange", "market_type", "symbol", "timeframe", "warmup_bars",
+                "primed_bars", "cash", "position_pct", "started_ms"):
+        assert key in config, f"the header cannot say what {key} was"
+    assert config["cash"] == 5000
+    assert isinstance(wired["runs"][0]["run_id"], uuid.UUID)
+
+
+def test_funding_is_advanced_during_a_stall_not_only_between_them(monkeypatch, wired):
+    """The bug the first two real runs found. The top-up ran inside the consumer
+    loop, and a withheld poll yields no event -- so the fetch that would end a
+    stall could only happen while there was no stall. Measured: coverage lapsed
+    at 00:00, one cadence past the 16:00 settlement, and both runs stalled for
+    every remaining poll (27 and 26) and lost the bar that closed there.
+    """
+    monkeypatch.setattr(cli, "get_strategy", lambda name: _EveryBar())
+    monkeypatch.setattr(cli, "FUNDING_CHECK_SECONDS", 0.001)
+
+    monkeypatch.setattr(cli, "_live_feed", lambda **_: _Stalled())
+    advanced = []
+    monkeypatch.setattr(
+        cli, "_advance_funding", lambda identity, *, now_ms: advanced.append(1) or 1
+    )
+
+    _invoke("--strategy", "every_bar", "--no-persist")
+
+    assert len(advanced) > 1, (
+        "funding was fetched once at startup and never again, so a stall that "
+        "began after startup could never end"
+    )
+
+
+def test_a_failing_funding_top_up_does_not_kill_the_task_that_clears_stalls(
+    monkeypatch, wired
+):
+    """M47 arriving through the mechanism built to prevent it. `_advance_funding`
+    reaches a venue and a database, both of which fail transiently. An unhandled
+    raise ends the task while the stream keeps running, so funding freezes, every
+    poll is withheld from the next lapse onward, and the process produces nothing
+    for the rest of the run while looking alive."""
+    monkeypatch.setattr(cli, "get_strategy", lambda name: _EveryBar())
+    monkeypatch.setattr(cli, "FUNDING_CHECK_SECONDS", 0.001)
+    monkeypatch.setattr(cli, "_live_feed", lambda **_: _Stalled())
+
+    attempts = {"n": 0}
+
+    def fails_after_startup(identity, *, now_ms):
+        # The startup call is deliberately outside the task's guard: a process
+        # that cannot reach the venue at all should fail loudly rather than run
+        # blind. It is the periodic call that must survive.
+        attempts["n"] += 1
+        if attempts["n"] == 1:
+            return 7
+        raise RuntimeError("venue down")
+
+    monkeypatch.setattr(cli, "_advance_funding", fails_after_startup)
+
+    output = _invoke("--strategy", "every_bar", "--no-persist")
+
+    assert attempts["n"] > 2, (
+        f"the task stopped after {attempts['n']} attempts, so a transient error "
+        f"permanently disabled the only thing that clears a funding stall"
+    )
+    assert "Funding top-up failed" in output, "the failures were swallowed silently"
+    assert "funding top-up failures:" in output, "the summary hid a degraded run"
+
+
+def test_a_clean_run_reports_no_revisions(monkeypatch, wired):
+    """`buffer.replaced_duplicates` counts any repeated timestamp, and the
+    boundary bar handed over by `resume_after` replaces a primed one on every
+    single run — so reporting that as "bars revised after the fact" overstated
+    every run by exactly one, in the operator-facing health line."""
+    monkeypatch.setattr(cli, "get_strategy", lambda name: _EveryBar())
+
+    assert "bars revised after the fact: 0." in _invoke("--strategy", "every_bar")
+
+
+def test_a_venue_revision_is_reported(monkeypatch, wired, tmp_path):
+    """The bound on the above: a bar the poll delivers twice is what
+    `lookback_bars` exists to surface, and it must still be counted."""
+    monkeypatch.setattr(cli, "get_strategy", lambda name: _EveryBar())
+    frame = synthetic_ohlcv_with_funding(n=40, freq=TIMEFRAME)
+    clock = SimClock(int(frame.index[30].value // 10**6))
+    polls = {"n": 0}
+
+    def revising(identity, since_ms, until_ms=None):
+        window = frame[frame.index >= pd.Timestamp(since_ms, unit="ms", tz="UTC")]
+        if until_ms is not None:
+            return window[window.index <= pd.Timestamp(until_ms, unit="ms", tz="UTC")]
+        polls["n"] += 1
+        window = window[window.index <= frame.index[31]].copy()
+        if polls["n"] > 1:
+            # The *newest closed* bar, which is the only one a correction can
+            # reach: `_poll` treats the last row as still forming, and anything
+            # older than the cursor is suppressed as a stale correction because
+            # `BarBuffer` would only drop it as out-of-order.
+            window.iloc[-2, window.columns.get_loc("close")] *= 1.5
+        return window
+
+    async def _noop(_seconds):
+        await asyncio.sleep(0)
+
+    monkeypatch.setattr(
+        cli,
+        "_live_feed",
+        lambda **kw: LiveFeed(**{**kw, "fetch": revising, "sleep": _noop, "clock": clock}),
+    )
+
+    output = _invoke("--strategy", "every_bar")
+
+    # The exact count, not "not zero": the venue corrects one bar, so anything
+    # else means the tally is counting something other than what it claims.
+    assert "bars revised after the fact: 1." in output, output
+
+
+def test_an_unknown_exit_mode_is_refused_by_the_cli(monkeypatch, wired):
+    """`backtest` already types this as `ExitMode`. Left as a free string, an
+    invalid value reached `StrategyRunner` and surfaced as a traceback after the
+    funding fetch and a full backfill had already run."""
+    monkeypatch.setattr(cli, "get_strategy", lambda name: _EveryBar())
+
+    result = runner.invoke(
+        cli.app,
+        ["paper", "--timeframe", TIMEFRAME, "--for-minutes", "0.01", "--exit-mode", "nonsense"],
+    )
+
+    assert result.exit_code != 0
+    assert "not one of" in result.output, result.output
+    assert not wired["runs"], "a rejected run still minted a header"
+
+
+def test_a_valid_exit_mode_reaches_the_header(monkeypatch, wired):
+    """The header is the only record of how a paper run was configured — its
+    window is gone and it cannot be re-run. `ExitMode` is a `str` subclass, so it
+    lands as its value with no conversion."""
+    monkeypatch.setattr(cli, "get_strategy", lambda name: _EveryBar())
+
+    _invoke("--strategy", "every_bar", "--exit-mode", "opposite_signal_only")
+
+    assert wired["runs"][0]["config"]["exit_mode"] == "opposite_signal_only"

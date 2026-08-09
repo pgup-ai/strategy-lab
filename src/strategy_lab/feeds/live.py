@@ -57,6 +57,14 @@ DEFAULT_LOOKBACK_BARS = 5
 # a sentinel for "no bound" rather than a date anyone meant.
 _MAX_TIMESTAMP_MS = pd.Timestamp.max.value // 1_000_000
 
+# Settlements a perp poll's window must contain before it can be asked about
+# coverage. ``funding_coverage_gaps`` certifies the cadence rather than assuming
+# 8h, so it needs the interval observed twice -- three settlements -- and this
+# carries one spare, since the newest may fall past the window's right edge.
+# Measured on BTC/USDT perp 4h: a 5-bar window is 16h and holds two, so no
+# funding column comes back at all; 8 bars holds five and is covered.
+MIN_SETTLEMENTS_IN_WINDOW = 4
+
 # The default cadence, as a fraction of the bar being polled. See ``_interval``.
 POLLS_PER_BAR = 60
 MIN_POLL_SECONDS = 5.0
@@ -82,6 +90,18 @@ def _fetch_recent(
     newest bars routinely have none yet. Coverage falling short drops the column
     entirely rather than returning it partial, and what the feed does with that
     depends on whether the stream was ever funded -- see ``_conform_funding``.
+
+    **A perp's window is widened until it can answer that question**, which is
+    the reason this function and not ``_since_ms`` owns the reach-back: the
+    lookback means "bars to re-read for corrections" and should keep meaning it,
+    the widening belongs beside the call that needs it, and ``LiveFeed`` keeps
+    the injection seam that makes its tests offline. Measured, a 5-bar window at
+    4h is 16h and holds two settlements where the guard needs three, so **no
+    poll at any timeframe this program trades funded itself** -- the process
+    stalled on its first poll under the withholding rule, and ran ``crowding``
+    neutral in silence before it. The extra bars are not waste the feed has to
+    absorb: ``_seen`` already dedups a venue that returns more than it was asked
+    for, which is why pruning it was rejected.
     """
     from strategy_lab.backtests.funding_frame import with_funding_column
     from strategy_lab.market_data.binance import CryptoOhlcvClient
@@ -89,7 +109,7 @@ def _fetch_recent(
     client = CryptoOhlcvClient(
         exchange_id=identity.exchange, market_type=identity.market_type
     )
-    since = pd.Timestamp(since_ms, unit="ms", tz="UTC").isoformat()
+    since = pd.Timestamp(_funded_since_ms(identity, since_ms), unit="ms", tz="UTC").isoformat()
     # ``until`` is passed through rather than filtered locally: without it the
     # client paginates forward to the present, so a bounded backfill over a narrow
     # window far in the past would fetch years and discard nearly all of it.
@@ -102,6 +122,49 @@ def _fetch_recent(
     frame = client.fetch_ohlcv(identity.symbol, identity.timeframe, since=since, until=until)
     frame, _ = with_funding_column(identity, frame, enabled=True, required=False)
     return frame
+
+
+def _funded_since_ms(
+    identity: MarketDataIdentity, since_ms: int, *, before_ms: int | None = None
+) -> int:
+    """``since_ms``, reached back far enough for a perp to carry its own funding.
+
+    The same rule ``server._fetch_funding`` states for the browser's refresh --
+    "the earlier of the candle lookback and the last stored settlement" -- asked
+    in settlements rather than hours, because the interval is per-contract.
+    Unchanged off-perp, and unchanged when there are too few settlements stored
+    to reach for: a window that cannot be covered is ``_conform_funding``'s
+    problem, and widening toward funding that does not exist would only make the
+    request slower before it got the same answer.
+
+    ``before_ms`` is for a caller reasoning about a window that has already
+    passed -- the delayed oracle. A live poll leaves it unset, because its window
+    ends now and the newest settlements are the ones it needs; asking the same
+    question about a week-old window without the bound reaches for settlements
+    newer than the window and so widens by nothing.
+    """
+    if identity.market_type != "perp":
+        return since_ms
+
+    from strategy_lab.db.funding import nth_newest_settlement
+
+    floor = nth_newest_settlement(
+        exchange=identity.exchange,
+        market_type=identity.market_type,
+        symbol=identity.symbol,
+        count=MIN_SETTLEMENTS_IN_WINDOW,
+        before_ms=before_ms,
+    )
+    if floor is None:
+        return since_ms
+    # One bar *before* the settlement, not at it. ``funding_coverage_gaps``
+    # counts settlements at or after the first bar's **open**, and Binance stamps
+    # them up to 47 ms past the boundary -- so a window starting exactly at a
+    # settlement excludes the bar that contains it and therefore the settlement
+    # itself, and the count is one short of what it asked for. Measured: a window
+    # from the 4th-newest settlement held 2 usable settlements where the guard
+    # needs 3, and returned no column.
+    return min(since_ms, int(floor.value // 1_000_000) - timeframe_to_millis(identity.timeframe))
 
 
 @dataclass
@@ -120,6 +183,14 @@ class LiveFeed:
     fetch: Callable[..., pd.DataFrame] = _fetch_recent
     sleep: Callable[[float], object] = asyncio.sleep
     clock: Clock = field(default_factory=LiveClock)
+    # Consecutive failed polls one subscription may take before the stream ends.
+    fetch_retries: int = 3
+    # Whether the *consumer* reads a funding-derived feature. The same question
+    # `sweep` and `replay` ask, and the feed could not honour it until it was
+    # told: a strategy reading no funding must not have its bars withheld over
+    # coverage it never consults, or BTC's own perp becomes unrunnable for
+    # `donchian` the moment settlements lag. See `_conform_funding`.
+    requires_funding: bool = True
 
     # Never pruned, deliberately. Pruning below the fetch watermark was tried and
     # reverted: it assumes the venue returns nothing older than it was asked for,
@@ -134,6 +205,7 @@ class LiveFeed:
     _withholding: set[CandleId] = field(default_factory=set, init=False, repr=False)
     _window_floors: dict[CandleId, int] = field(default_factory=dict, init=False, repr=False)
     _cursors: dict[CandleId, int] = field(default_factory=dict, init=False, repr=False)
+    _failures: dict[CandleId, int] = field(default_factory=dict, init=False, repr=False)
     _last_event_ms: int | None = field(default=None, init=False, repr=False)
 
     def __post_init__(self) -> None:
@@ -166,7 +238,26 @@ class LiveFeed:
         """
         while True:
             for sub in subs:
-                for event in self._poll(sub):
+                try:
+                    events = self._poll(sub)
+                except Exception as exc:
+                    # Bounded and loud, not swallowed. A process meant to run for
+                    # hours cannot end on one timed-out request, but a feed that
+                    # retried forever would report itself healthy while producing
+                    # nothing -- so the budget is per subscription, a success
+                    # clears it, and spending it re-raises the original error.
+                    failures = self._failures.get(sub.candle, 0) + 1
+                    self._failures[sub.candle] = failures
+                    if failures > self.fetch_retries:
+                        raise
+                    warnings.warn(
+                        f"{sub.candle.key}: poll failed "
+                        f"({failures}/{self.fetch_retries} before giving up): {exc}",
+                        stacklevel=2,
+                    )
+                    continue
+                self._failures.pop(sub.candle, None)
+                for event in events:
                     self._last_event_ms = event.ts_event_ms
                     self._cursors[sub.candle] = max(
                         self._cursors.get(sub.candle, 0), event.bar.ts_open_ms
@@ -225,6 +316,9 @@ class LiveFeed:
           unfunded on the timing of its first poll.
         - **Off-perp there is nothing to decide.** Spot never carries the column
           and never will, so it settles unfunded silently.
+        - **And none of it applies when the consumer reads no funding.**
+          ``requires_funding=False`` runs the stream unfunded outright: there is
+          no coverage question to answer, so there is nothing to withhold over.
 
         Losing funding after the stream is already funded withholds too, for the
         same reason and by the same path: a raise would kill a paper run on a lag
@@ -238,6 +332,14 @@ class LiveFeed:
         into an alert belongs with restart and supervision, which R10
         deliberately does not own.
         """
+        if not self.requires_funding:
+            # Nothing downstream reads it, so the stream runs unfunded and can
+            # never stall over coverage. The column is dropped rather than passed
+            # through, because `BarBuffer` still refuses a stream that changes
+            # its mind (M42) whether or not anyone reads the values -- so the one
+            # safe answer is the one that cannot change.
+            return frame.drop(columns=[FUNDING_COLUMN], errors="ignore")
+
         has_column = FUNDING_COLUMN in frame.columns
         settled = self._funded.get(sub.candle)
         undecided_tail = (
@@ -359,6 +461,19 @@ class LiveFeed:
             floor = max(0, self.clock.now_ms() - bar_ms * self.lookback_bars)
             self._window_floors[sub.candle] = floor
         return floor
+
+    def resume_after(self, sub: Subscription, ts_open_ms: int) -> None:
+        """Start polling from where a caller's own history ends.
+
+        A process primes its buffer from ``backfill`` and then polls, and the two
+        do not otherwise know about each other: ``backfill`` sets no cursor, so
+        the first poll re-reads its whole window -- widened on a perp to cover its
+        own funding, which at 15m is over a hundred bars -- and every bar older
+        than the primed history is emitted for ``BarBuffer`` to drop as
+        out-of-order. Nothing breaks, but the cursor exists to say where the
+        caller is, and after priming the caller is here.
+        """
+        self._cursors[sub.candle] = max(self._cursors.get(sub.candle, 0), ts_open_ms)
 
     async def backfill(self, sub: Subscription, start_ms: int, end_ms: int) -> AsyncIterator[Bar]:
         """Every **closed** bar covering ``[start_ms, end_ms]``, ascending.

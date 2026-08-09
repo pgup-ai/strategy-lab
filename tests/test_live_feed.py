@@ -25,6 +25,7 @@ from strategy_lab.engine.context import BarBuffer
 from strategy_lab.engine.runner import StrategyRunner
 from strategy_lab.feeds.base import Subscription
 from strategy_lab.feeds.live import (
+    _funded_since_ms,
     MAX_POLL_SECONDS,
     MIN_POLL_SECONDS,
     LiveFeed,
@@ -42,8 +43,13 @@ SUB = Subscription(INSTRUMENT, TIMEFRAME)
 FORMING_SUB = Subscription(INSTRUMENT, TIMEFRAME, include_forming=True)
 
 
-class _Stopped(Exception):
+class _Stopped(BaseException):
     """The venue going away, which is how a test stops an endless stream.
+
+    A ``BaseException`` rather than an ``Exception``, so the feed's bounded poll
+    retry does not treat it as a venue error and try three more times. It is
+    control flow -- "stop now" -- where a real venue failure is something the
+    stream is supposed to survive.
 
     ``LiveFeed.stream`` does not terminate -- the protocol says "until exhausted
     (replay) or cancelled (live)" -- so a bound has to come from outside it.
@@ -704,3 +710,161 @@ def test_a_stall_longer_than_the_lookback_still_loses_no_bars():
         if first_window <= int(ts.value // 10**6) < clock.now_ms()
     }
     assert withheld <= arrived, f"{len(withheld - arrived)} bars fell out of the window"
+
+
+def test_a_failing_poll_is_retried_and_then_gives_up():
+    """A process meant to run for hours cannot end on one timed-out request. But
+    a feed that retried forever would report itself healthy while producing
+    nothing, so the budget is bounded and spending it re-raises."""
+    attempts = {"n": 0}
+
+    def flaky(identity, since_ms, until_ms=None):
+        attempts["n"] += 1
+        # Bounded far above the budget, so a feed that retried forever ends this
+        # test rather than hanging it. A test that hangs protects nothing.
+        if attempts["n"] > 20:
+            raise _Stopped
+        raise RuntimeError("venue said no")
+
+    feed = LiveFeed(fetch=flaky, sleep=_noop, fetch_retries=3)
+
+    async def _run():
+        async for _ in feed.stream([SUB]):
+            pass
+
+    with pytest.warns(UserWarning, match="poll failed"):
+        with pytest.raises(RuntimeError, match="venue said no"):
+            asyncio.run(_run())
+    assert attempts["n"] == 4, "the budget is retries *after* the first attempt"
+
+
+def test_a_recovered_poll_clears_the_retry_budget(frame):
+    """Otherwise a feed that failed occasionally over days would eventually die
+    of accumulated unrelated hiccups."""
+    calls = {"n": 0}
+
+    def intermittent(identity, since_ms, until_ms=None):
+        calls["n"] += 1
+        if calls["n"] % 2:
+            raise RuntimeError("transient")
+        if calls["n"] > 12:
+            raise _Stopped
+        return frame.iloc[: 10 + calls["n"]]
+
+    feed = LiveFeed(fetch=intermittent, sleep=_noop, fetch_retries=1)
+
+    async def _run():
+        events = []
+        try:
+            async for event in feed.stream([SUB]):
+                events.append(event)
+        except _Stopped:
+            pass
+        return events
+
+    with pytest.warns(UserWarning, match="poll failed"):
+        events = asyncio.run(_run())
+    assert events, "alternating failure and success should still deliver bars"
+
+
+def test_resume_after_starts_polling_where_priming_ended():
+    """`backfill` sets no cursor, so without this the first poll re-reads its
+    whole window — widened on a perp to cover its own funding, over a hundred
+    bars at 15m — and every bar older than the primed history is emitted only for
+    `BarBuffer` to drop as out-of-order."""
+    feed = LiveFeed(clock=SimClock(10**13))
+    bar_ms = timeframe_to_millis(TIMEFRAME)
+    primed_to = 1_700_000_000_000
+
+    feed.resume_after(SUB, primed_to)
+
+    assert feed._since_ms(SUB, bar_ms) == primed_to - bar_ms * feed.lookback_bars
+    feed.resume_after(SUB, primed_to - bar_ms * 10)
+    assert feed._since_ms(SUB, bar_ms) == primed_to - bar_ms * feed.lookback_bars, (
+        "an older history must not drag the cursor backwards"
+    )
+
+
+def test_a_perp_poll_reaches_back_far_enough_to_carry_its_own_funding(monkeypatch):
+    """`funding_coverage_gaps` certifies a cadence rather than assuming 8h, so it
+    needs the interval observed twice — three settlements inside the window. A
+    5-bar poll at 4h is 16h and holds two; at 15m it is 75 minutes and holds
+    none. Measured against the real database before this existed: 5 bars → no
+    funding column, 8 bars → covered. There is no timeframe this program trades
+    at which a lookback-sized window funds itself, so every perp poll came back
+    unfunded — a stall today, and crowding-neutral in silence before that.
+    """
+    from strategy_lab.db import funding as funding_db
+
+    floor = pd.Timestamp("2026-01-01", tz="UTC")
+    monkeypatch.setattr(funding_db, "nth_newest_settlement", lambda **_: floor)
+
+    perp = MarketDataIdentity(
+        exchange="binance", market_type="perp", symbol="BTC/USDT", timeframe="4h"
+    )
+    naive = int(pd.Timestamp("2026-06-01", tz="UTC").value // 10**6)
+
+    # One bar *before* the settlement, not at it: `funding_coverage_gaps` counts
+    # settlements at or after the first bar's open, so a window starting exactly
+    # on one excludes the bar containing it and therefore the settlement — and
+    # the count comes back one short of what it asked for. Measured before this:
+    # a window from the 4th-newest settlement held 2 where the guard needs 3.
+    assert _funded_since_ms(perp, naive) == int(floor.value // 10**6) - timeframe_to_millis("4h")
+
+    # Already earlier than the settlements it needs: nothing to widen.
+    early = int(pd.Timestamp("2025-01-01", tz="UTC").value // 10**6)
+    assert _funded_since_ms(perp, early) == early
+
+
+def test_only_a_perp_widens_its_window(monkeypatch):
+    """Spot settles nothing, so reaching back for settlements it can never have
+    would fetch a wider window every poll to answer a question nobody asked —
+    the same rule as `board_window` dispatching on market type."""
+    from strategy_lab.db import funding as funding_db
+
+    def refuse(**_):
+        raise AssertionError("a non-perp asked about funding")
+
+    monkeypatch.setattr(funding_db, "nth_newest_settlement", refuse)
+
+    since = int(pd.Timestamp("2026-06-01", tz="UTC").value // 10**6)
+    for market_type in ("spot", "equity"):
+        identity = MarketDataIdentity(
+            exchange="binance", market_type=market_type, symbol="BTC/USDT", timeframe="4h"
+        )
+        assert _funded_since_ms(identity, since) == since
+
+
+def test_a_perp_with_too_few_settlements_stored_widens_to_nothing(monkeypatch):
+    """Widening toward funding that does not exist would only make the request
+    slower before it got the same answer. An uncoverable window is
+    `_conform_funding`'s problem, and it already has one."""
+    from strategy_lab.db import funding as funding_db
+
+    monkeypatch.setattr(funding_db, "nth_newest_settlement", lambda **_: None)
+    perp = MarketDataIdentity(
+        exchange="binance", market_type="perp", symbol="NEW/USDT", timeframe="4h"
+    )
+    since = int(pd.Timestamp("2026-06-01", tz="UTC").value // 10**6)
+    assert _funded_since_ms(perp, since) == since
+
+
+def test_the_first_poll_after_priming_decides_the_newest_primed_bar_once(frame):
+    """`resume_after` suppresses bars *older* than the primed history, not the
+    boundary bar itself, and that is deliberate rather than an off-by-one.
+
+    `prime_bars` appends without emitting, so the newest primed bar carries no
+    decision. Emitting it once is the run's first decision, on the newest closed
+    bar at startup — the alternative is standing idle for up to a whole bar
+    interval while holding data that says to act. It arrives once, not twice:
+    priming is silent.
+    """
+    feed = LiveFeed(fetch=_Venue(frame, first=10, step=1), sleep=_noop)
+    boundary = int(frame.index[8].value // 10**6)  # index 9 is still forming
+    feed.resume_after(SUB, boundary)
+
+    stamps = [e.bar.ts_open_ms for e in drain(feed, [SUB], polls=3)]
+
+    assert stamps.count(boundary) == 1, f"the boundary bar arrived {stamps.count(boundary)}x"
+    assert min(stamps) == boundary, "a bar older than the primed history was emitted"
+    assert stamps == sorted(stamps), "bars must still ascend"

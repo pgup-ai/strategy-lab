@@ -244,6 +244,54 @@ def funding_span(
     )
 
 
+def nth_newest_settlement(
+    *,
+    exchange: str,
+    market_type: str,
+    symbol: str,
+    count: int,
+    before_ms: int | None = None,
+    database_url: str | None = None,
+) -> pd.Timestamp | None:
+    """The ``count``-th newest stored settlement, or ``None`` if there are fewer.
+
+    A window is only wide enough to be *asked* about coverage if it holds enough
+    settlements for ``funding_coverage_gaps`` to certify a cadence, and that is a
+    count rather than a duration -- the settlement interval is per-contract and
+    nothing here hardcodes 8h. So a caller that needs a window says how many
+    settlements it needs and gets back the timestamp to reach to.
+
+    ``before_ms`` bounds "newest" to a point in time. A live poll wants the
+    newest there are, because its window ends now; a caller reasoning about a
+    *past* window wants the newest as of **then**, and without the bound the
+    answer is anchored to whenever the question happens to be asked. Measured: a
+    75-minute window a week old widened by nothing at all, because the fourth
+    newest settlement in the table was newer than the window itself.
+
+    Ordered and limited in SQL for ``funding_span``'s reason: the answer is one
+    row, and loading BTC's 7,565 of them to read it is the kind of query that
+    only looks free.
+    """
+    if count < 1:
+        raise ValueError(f"count must be at least 1, got {count}")
+    query = (
+        select(funding_table.c.funding_time_ms)
+        .where(
+            funding_table.c.exchange == exchange,
+            funding_table.c.market_type == market_type,
+            funding_table.c.symbol == symbol,
+        )
+        .order_by(funding_table.c.funding_time_ms.desc())
+        .offset(count - 1)
+        .limit(1)
+    )
+    if before_ms is not None:
+        query = query.where(funding_table.c.funding_time_ms <= before_ms)
+    with get_engine(database_url).connect() as conn:
+        row = conn.execute(query).first()
+    return None if row is None else pd.Timestamp(int(row[0]), unit="ms", tz="UTC")
+
+
 def load_open_interest(
     *,
     exchange: str,

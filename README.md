@@ -341,6 +341,55 @@ strategy-lab replay \
 Run 99fe4a0f-9086-4047-ab0e-75fc5d84027d: emitted 916 signals, wrote 916.
 ```
 
+### Paper trading against the live venue
+
+`replay` drives the event engine from stored candles. `paper` drives the same
+runner from `LiveFeed`, which polls the venue, and hands what it decides to
+`PaperBook`. Nothing reaches an exchange — the book is a ledger.
+
+```bash
+strategy-lab paper \
+  --symbol BTC/USDT \
+  --timeframe 15m \
+  --strategy state_machine_v1 \
+  --for-minutes 75 \
+  --bars-csv live_bars.csv
+```
+
+```text
+Funding advanced: 6 settlements stored.
+Primed 2196 bars (state_machine_v1 wants 2192); buffer carries funding: True.
+Warning: state_machine_v1 sizes per bar, and the event path carries no size onto
+a Signal -- this book fills every entry at scale 1.0, so its trades will not
+match a backtest of the same range.
+Ran 75 min: 5 bars, 0 signals, 5 reasons, 0 closed trades. Withheld polls: 27,
+funding top-up failures: 0, bars revised after the fact: 0.
+```
+
+That warning is not incidental to the example: `state_machine_v1` returns a
+per-bar `position_size` and no `Signal` can carry one, so its paper book sizes
+every entry at 1.0. The withheld polls are not incidental either — that run
+crossed a settlement boundary, and §9.18 of the charter is where the 27 came
+from.
+
+It is bounded by the wall clock, because a live stream does not end and a bound
+that waited for bars would hang exactly when the feed had stopped producing
+them. Signals and `bar_reasons` are written per bar rather than at the end, so a
+run measured in hours survives whatever ends it.
+
+**A perp run advances its own funding**, and this is not optional: stored
+settlements move only when a funding fetch runs, so a process that polled only
+candles would watch its window grow past its coverage until every poll was
+withheld. On the same subject, a perp poll deliberately fetches a wider window
+than `--bars-csv` shows corrections for — the coverage guard needs three
+settlements to certify a cadence, and five bars at 15m is 75 minutes holding
+none.
+
+**It writes no candles.** The point of a paper run is to be checkable against
+what the venue serves for the same range *later*, and a process that stored its
+own bars as the record would be compared against itself. Fetch the range
+afterwards and replay it; `scripts/r10h/delayed_oracle.py` does the comparison.
+
 Every invocation mints a fresh `run_id`, so replaying the same range twice
 stores two independent runs rather than zero rows the second time — that is
 the append-only audit trail working as intended, not a bug. Some
