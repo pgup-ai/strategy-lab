@@ -979,7 +979,8 @@ def test_live_means_a_frame_arrived_not_that_a_socket_opened(page):
     socket = _within(_script(page), "function openSocket()")
 
     assert "socket.onopen" in socket
-    assert "setLive('on', 'live')" not in socket[socket.index("socket.onopen") : socket.index("socket.onmessage")]
+    onopen = socket[socket.index("socket.onopen") : socket.index("socket.onmessage")]
+    assert "setLive('on', 'live')" not in onopen
     assert "setLive('wait', 'waiting for data');" in socket
     assert "if (!live.ticks) setLive('on', 'live');" in socket
     assert "setLive('off', 'connected · no data');" in socket
@@ -1069,7 +1070,8 @@ def test_a_frame_from_a_replaced_socket_reaches_nothing(page):
 
     for handler in ("socket.onopen", "socket.onmessage"):
         after = socket[socket.index(handler) :]
-        assert "if (live.socket !== socket) return;" in after[: after.index("};")], handler
+        body = after[: after.index("};")]
+        assert "if (live.socket !== socket) return;" in body, handler
     assert "if (live.socket === socket) setLive('off', 'stream error');" in socket
 
 
@@ -1079,7 +1081,8 @@ def test_a_bar_close_refresh_does_not_redraw_over_the_board(page):
     running; it cannot stop one begun afterwards."""
     script = _script(page)
 
-    assert "if (viewSel.value !== 'instrument') return;" in _within(script, "function onTick(message)")
+    tick = _within(script, "function onTick(message)")
+    assert "if (viewSel.value !== 'instrument') return;" in tick
     refresh = _within(script, "function refreshInstrument()")
     assert "var startedIn = viewSel.value;" in refresh
     assert "if (viewSel.value !== startedIn) return null;" in refresh
