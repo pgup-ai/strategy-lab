@@ -14,6 +14,21 @@ The current stack is intentionally small:
   strategy code runs in backtest, in replay, and against the live venue —
   see [Paper Trading Against The Live Venue](#paper-trading-against-the-live-venue)
 
+## What do you want to do?
+
+Every section below is named after a piece of the machinery. This table is named
+after the question you arrived with.
+
+| I want to… | run | where it is explained |
+|---|---|---|
+| **watch live prices with signals and state** | `strategy-lab browse` | [The live pill](#the-live-pill-a-forming-candle-and-a-refresh-when-it-closes) |
+| see any strategy on any stored candle set | `strategy-lab browse` | [browse — the live view](#two-ways-to-look-at-a-strategy) |
+| run a strategy against the venue, on paper | `strategy-lab paper` | [Paper Trading](#paper-trading-against-the-live-venue) |
+| backtest and keep a reproducible record | `strategy-lab backtest` | [Backtest](#backtest) |
+| re-read a backtest I already ran | `strategy-lab serve` | [serve — the frozen record](#two-ways-to-look-at-a-strategy) |
+| prove the live path matches the backtest | `strategy-lab replay` | [Replay](#replay) |
+| get data in before any of the above | `strategy-lab fetch-*` | [Fetch Data](#fetch-data) |
+
 ## Layout
 
 ```text
@@ -584,7 +599,18 @@ from a page you refreshed, and only the second is honest about when it last did.
 
 ### The live pill: a forming candle, and a refresh when it closes
 
-On a Binance dataset the instrument view offers a **live** toggle, default on.
+**This is how you watch real-time prices with signals and state on one chart:**
+
+```bash
+strategy-lab browse --port 8760
+```
+
+Then at `http://127.0.0.1:8760` — pick a strategy in the selector, click any
+tile's **open**, and the **live** pill is already on. Try
+`BTC/USDT · 15m · binance/spot` with `state_machine_v1` to get a moving candle,
+markers, the state panel and the state-change list together.
+
+On a Binance dataset the instrument view offers that **live** toggle, default on.
 It opens the venue's kline websocket and draws the forming candle as it moves.
 
 **The forming bar is drawn and never analysed.** A tick reaching
