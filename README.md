@@ -359,8 +359,18 @@ strategy-lab paper \
 ```text
 Funding advanced: 6 settlements stored.
 Primed 2196 bars (state_machine_v1 wants 2192); buffer carries funding: True.
-Ran 75 min: 5 bars, 0 signals, 5 reasons, 0 closed trades. Withheld polls: 0.
+Warning: state_machine_v1 sizes per bar, and the event path carries no size onto
+a Signal -- this book fills every entry at scale 1.0, so its trades will not
+match a backtest of the same range.
+Ran 75 min: 5 bars, 0 signals, 5 reasons, 0 closed trades. Withheld polls: 27,
+funding top-up failures: 0, bars revised after the fact: 0.
 ```
+
+That warning is not incidental to the example: `state_machine_v1` returns a
+per-bar `position_size` and no `Signal` can carry one, so its paper book sizes
+every entry at 1.0. The withheld polls are not incidental either — that run
+crossed a settlement boundary, and §9.18 of the charter is where the 27 came
+from.
 
 It is bounded by the wall clock, because a live stream does not end and a bound
 that waited for bars would hang exactly when the feed had stopped producing

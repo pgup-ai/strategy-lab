@@ -344,3 +344,51 @@ def test_a_failing_funding_top_up_does_not_kill_the_task_that_clears_stalls(
     )
     assert "Funding top-up failed" in output, "the failures were swallowed silently"
     assert "funding top-up failures:" in output, "the summary hid a degraded run"
+
+
+def test_a_clean_run_reports_no_revisions(monkeypatch, wired):
+    """`buffer.replaced_duplicates` counts any repeated timestamp, and the
+    boundary bar handed over by `resume_after` replaces a primed one on every
+    single run — so reporting that as "bars revised after the fact" overstated
+    every run by exactly one, in the operator-facing health line."""
+    monkeypatch.setattr(cli, "get_strategy", lambda name: _EveryBar())
+
+    assert "bars revised after the fact: 0." in _invoke("--strategy", "every_bar")
+
+
+def test_a_venue_revision_is_reported(monkeypatch, wired, tmp_path):
+    """The bound on the above: a bar the poll delivers twice is what
+    `lookback_bars` exists to surface, and it must still be counted."""
+    monkeypatch.setattr(cli, "get_strategy", lambda name: _EveryBar())
+    frame = synthetic_ohlcv_with_funding(n=40, freq=TIMEFRAME)
+    clock = SimClock(int(frame.index[30].value // 10**6))
+    polls = {"n": 0}
+
+    def revising(identity, since_ms, until_ms=None):
+        window = frame[frame.index >= pd.Timestamp(since_ms, unit="ms", tz="UTC")]
+        if until_ms is not None:
+            return window[window.index <= pd.Timestamp(until_ms, unit="ms", tz="UTC")]
+        polls["n"] += 1
+        window = window[window.index <= frame.index[31]].copy()
+        if polls["n"] > 1:
+            # The *newest closed* bar, which is the only one a correction can
+            # reach: `_poll` treats the last row as still forming, and anything
+            # older than the cursor is suppressed as a stale correction because
+            # `BarBuffer` would only drop it as out-of-order.
+            window.iloc[-2, window.columns.get_loc("close")] *= 1.5
+        return window
+
+    async def _noop(_seconds):
+        await asyncio.sleep(0)
+
+    monkeypatch.setattr(
+        cli,
+        "_live_feed",
+        lambda **kw: LiveFeed(**{**kw, "fetch": revising, "sleep": _noop, "clock": clock}),
+    )
+
+    output = _invoke("--strategy", "every_bar")
+
+    assert "bars revised after the fact: 0." not in output, (
+        f"a re-delivered bar was not counted as a revision: {output}"
+    )

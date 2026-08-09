@@ -959,7 +959,9 @@ def paper_command(
     symbol: str = typer.Option("BTC/USDT", help="Symbol to trade on paper."),
     timeframe: str = typer.Option("15m", help="Candle timeframe."),
     strategy_name: str = typer.Option("donchian", "--strategy", help="Strategy name."),
-    exit_mode: str | None = typer.Option(None, help="Engine exit mode; the strategy's own if unset."),
+    exit_mode: str | None = typer.Option(
+        None, help="Engine exit mode; the strategy's own if unset."
+    ),
     for_minutes: float = typer.Option(60.0, help="Wall-clock minutes to run for."),
     cash: float = typer.Option(10_000.0, help="Starting cash for the paper book."),
     position_pct: float = typer.Option(0.95, help="Fraction of cash an entry sizes against."),
@@ -1111,7 +1113,8 @@ def paper_command(
         )
 
     signals: list = []
-    failures = {"funding": 0}
+    delivered: set[int] = set()
+    tally = {"funding_failures": 0, "revised": 0}
     written = {"signals": 0, "reasons": 0}
     bars = 0
     bar_log = _open_bar_log(bars_csv)
@@ -1120,6 +1123,14 @@ def paper_command(
         nonlocal bars
         async for event in feed.stream([subscription]):
             bars += 1
+            # A revision is a bar the *poll* delivered twice, which is what
+            # `lookback_bars` exists to surface. Not `buffer.replaced_duplicates`:
+            # that counts any repeated timestamp, and the boundary bar handed over
+            # by `resume_after` replaces a primed one on every single run, so it
+            # reported one revision that never happened.
+            if event.bar.ts_open_ms in delivered:
+                tally["revised"] += 1
+            delivered.add(event.bar.ts_open_ms)
             if bar_log is not None:
                 _log_bar(bar_log, event.bar)
             emitted = runner.on_event(event)
@@ -1166,8 +1177,8 @@ def paper_command(
                     # rest of the run -- M47 arriving through the mechanism built
                     # to prevent it. A persistent failure is still visible: the
                     # withheld-poll count climbs and the run produces nothing.
-                    failures["funding"] += 1
-                    typer.echo(f"Funding top-up failed ({failures['funding']}): {exc}")
+                    tally["funding_failures"] += 1
+                    typer.echo(f"Funding top-up failed ({tally['funding_failures']}): {exc}")
 
     async def _run() -> None:
         funding = asyncio.create_task(_keep_funding_current())
@@ -1197,8 +1208,8 @@ def paper_command(
             f"Ran {for_minutes:g} min: {bars} bars, {len(signals)} signals, "
             f"{len(runner.reasons)} reasons, {len(book.trades)} closed trades. "
             f"Withheld polls: {feed.funding_withheld_polls}, "
-            f"funding top-up failures: {failures['funding']}, "
-            f"bars revised after the fact: {runner.buffer.replaced_duplicates}."
+            f"funding top-up failures: {tally['funding_failures']}, "
+            f"bars revised after the fact: {tally['revised']}."
         )
         if run_id is not None:
             typer.echo(

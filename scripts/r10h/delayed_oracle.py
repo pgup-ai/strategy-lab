@@ -222,7 +222,13 @@ def _compare_bars(
         market_type=identity.market_type,
         symbol=identity.symbol,
         timeframe=identity.timeframe,
-        start=str(pd.Timestamp(_widened_start_ms(identity, window_start_ms, window_end_ms), unit="ms", tz="UTC")),
+        start=str(
+            pd.Timestamp(
+                _widened_start_ms(identity, window_start_ms, window_end_ms),
+                unit="ms",
+                tz="UTC",
+            )
+        ),
         end=str(pd.Timestamp(window_end_ms, unit="ms", tz="UTC")),
     )
     stored, _ = with_funding_column(identity, stored, enabled=True, required=False)
