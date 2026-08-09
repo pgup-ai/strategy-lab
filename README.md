@@ -342,9 +342,11 @@ strategy-lab replay \
 Run 99fe4a0f-9086-4047-ab0e-75fc5d84027d: emitted 916 signals, wrote 916.
 ```
 
-Every invocation mints a fresh `run_id`, so replaying the same range twice
-stores two independent runs rather than zero rows the second time — that is
-the append-only audit trail working as intended, not a bug. Some
+A run that persists something mints a fresh `run_id`, so replaying the same
+range twice stores two independent runs rather than zero rows the second time —
+that is the append-only audit trail working as intended, not a bug.
+`--no-persist`, and a replay that emits neither a signal nor a reason, write no
+run header at all rather than leaving an orphan behind. Some
 strategy/window combinations legitimately emit nothing: `turnaround_v2`, the
 CLI default, fires only 126 times across the *entire* 83,348-bar stored
 BTC/USDT 15m history, so a quiet run by itself is not a sign anything is

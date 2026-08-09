@@ -839,7 +839,7 @@ def test_a_strategy_with_no_state_machine_shows_no_sequence(page):
     no state to sequence — an empty list would claim there were no changes."""
     script = _script(page)
 
-    assert "view.shifts = null;" in script
+    assert "payload.why ? shiftsFrom(payload.why.states, payload.bars) : null" in script
     render = script[script.index("function renderShifts()") : script.index("function pinBar")]
     assert "if (!view.shifts) {\n      section.hidden = true;" in render
 
@@ -854,7 +854,10 @@ def test_a_transition_inside_warmup_is_marked_rather_than_hidden(page):
 
     assert "var early = warmup !== null && shift.index < warmup;" in script
     assert "'shift' + (early ? ' warmup' : '')" in script
-    assert ".shift.warmup .shift-to" in _style(page)
+    # The row, not a list of its children: enumerating them is what left
+    # `.shift-from` undimmed, so a warmup row showed the state it left at full
+    # strength and the state it moved into at half.
+    assert ".shift.warmup { opacity: 0.55; }" in _style(page)
     # And the reader is told *how many*, not just that some are: a dimmed row
     # with no count is a style nobody can act on.
     assert "if (early) inWarmup += 1;" in script
@@ -867,3 +870,29 @@ def test_clicking_a_transition_recentres_only_when_the_bar_is_off_screen(page):
     script = _script(page)
 
     assert "if (range && (i < range.from || i > range.to))" in script
+
+
+def test_a_transition_row_is_a_button_rather_than_a_clickable_div(page):
+    """It is an action, and everything else actionable on this page is a button.
+    A `div` is unreachable by keyboard and announces nothing, so a row that pins
+    a bar could only be used with a mouse."""
+    script, style = _script(page), _style(page)
+    render = script[script.index("function renderShifts()") : script.index("function pinBar")]
+
+    assert "document.createElement('button')" in render
+    assert "row.type = 'button';" in render
+    assert "row.setAttribute('aria-pressed', String(selected));" in script
+    assert ".shift:focus-visible" in style
+
+
+def test_a_transition_carries_the_bar_its_dwell_is_measured_from(page):
+    """`dwellText` reads `bars[shift.previousIndex]`, so a shift without it
+    indexes `undefined` and the whole list fails to render. It is set where the
+    shift is built rather than stitched on by the caller — assembling an object
+    in two places is what made it read as missing."""
+    script = _script(page)
+    build = script[script.index("function shiftsFrom") : script.index("function dwellText")]
+
+    assert "previousIndex: previousIndex," in build
+    assert "previousIndex = i;" in build
+    assert "dwellText(view.bars, shift.previousIndex, shift.index)" in script

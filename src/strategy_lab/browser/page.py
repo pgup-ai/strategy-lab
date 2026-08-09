@@ -238,8 +238,10 @@ __SHELL_CSS__
   #transitions { display: flex; flex-direction: column; gap: 2px; max-height: 320px;
     overflow-y: auto; }
   .shift { display: grid; grid-template-columns: 148px 1fr 110px; gap: 10px;
-    align-items: baseline; padding: 5px 8px; border-radius: 4px; cursor: pointer;
-    border: 1px solid transparent; font-size: 13px; }
+    width: 100%; align-items: baseline; padding: 5px 8px; border-radius: 4px;
+    cursor: pointer; border: 1px solid transparent; background: transparent;
+    color: inherit; font: inherit; font-size: 13px; text-align: left; }
+  .shift:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
   .shift:hover { background: #232733; }
   .shift.selected { border-color: #4a5163; background: #232733; }
   .shift-when { color: var(--ink-dim); font-variant-numeric: tabular-nums; }
@@ -249,8 +251,8 @@ __SHELL_CSS__
     font-variant-numeric: tabular-nums; }
   /* Dimmed rather than hidden: the machine really walked through these, but the
      strategy was not acting yet, so they are not decisions. */
-  .shift.warmup .shift-to { font-weight: 400; opacity: 0.55; }
-  .shift.warmup .shift-when, .shift.warmup .shift-dwell { opacity: 0.55; }
+  .shift.warmup { opacity: 0.55; }
+  .shift.warmup .shift-to { font-weight: 400; }
   .why-chips { display: flex; gap: 8px; flex-wrap: wrap; }
   .why-chips .chip { min-width: 84px; }
   .why-chips .chip.state { border-color: #4a5163; background: #232733; }
@@ -686,17 +688,7 @@ __SHELL_CSS__
     }
 
     renderProvenance(payload.provenance);
-    view.shifts = null;
-    if (payload.why) {
-      view.shifts = shiftsFrom(payload.why.states, payload.bars);
-      // The dwell of the first change is measured from bar 0, which is the
-      // opening state rather than a state something moved into.
-      var previous = 0;
-      view.shifts.forEach(function (shift) {
-        shift.previousIndex = previous;
-        previous = shift.index;
-      });
-    }
+    view.shifts = payload.why ? shiftsFrom(payload.why.states, payload.bars) : null;
     renderShifts();
     view.pinned = null;
     renderBar(payload.bars.length - 1);
@@ -873,9 +865,19 @@ __SHELL_CSS__
   // M36's third answer, free to drift from the two that already agree.
   function shiftsFrom(states, bars) {
     var out = [];
+    // Bar 0 for the first change: it is the opening state rather than one
+    // something moved into, and its dwell is measured from the frame's start.
+    var previousIndex = 0;
     for (var i = 1; i < states.length; i += 1) {
       if (states[i] === states[i - 1]) continue;
-      out.push({ index: i, from: states[i - 1], to: states[i], time: bars[i].time });
+      out.push({
+        index: i,
+        previousIndex: previousIndex,
+        from: states[i - 1],
+        to: states[i],
+        time: bars[i].time
+      });
+      previousIndex = i;
     }
     return out;
   }
@@ -905,7 +907,9 @@ __SHELL_CSS__
     view.shifts.slice().reverse().forEach(function (shift) {
       var early = warmup !== null && shift.index < warmup;
       if (early) inWarmup += 1;
-      var row = document.createElement('div');
+      var row = document.createElement('button');
+      row.type = 'button';
+      row.setAttribute('aria-pressed', 'false');
       row.className = 'shift' + (early ? ' warmup' : '');
       row.dataset.index = shift.index;
 
@@ -958,7 +962,9 @@ __SHELL_CSS__
 
   function markSelectedShift(i) {
     Array.prototype.forEach.call(el('transitions').children, function (row) {
-      row.classList.toggle('selected', Number(row.dataset.index) === i);
+      var selected = Number(row.dataset.index) === i;
+      row.classList.toggle('selected', selected);
+      row.setAttribute('aria-pressed', String(selected));
     });
   }
 
