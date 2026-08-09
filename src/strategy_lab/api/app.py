@@ -197,8 +197,9 @@ def create_app() -> FastAPI:
             symbol=query.symbol,
             timeframe=query.timeframe,
         )
+        since = pd.Timestamp(query.since).to_pydatetime() if query.since else None
         try:
-            return refresh_candles(identity, query.after)
+            return refresh_candles(identity, query.after, since)
         except Exception as exc:  # a venue or database failure is not a bad request
             raise HTTPException(status_code=502, detail=f"refresh failed: {exc}") from exc
 

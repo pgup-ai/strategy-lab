@@ -318,3 +318,26 @@ def test_a_failed_candle_write_leaves_funding_ahead_rather_than_behind(monkeypat
         "candles were written before settlements, so a half-failure leaves the "
         "candle window past the last settlement -- the state the guard refuses"
     )
+
+
+def test_a_since_reaches_back_to_it_rather_than_five_bars(monkeypatch):
+    """The five-bar lookback tops up a series that exists. The timeframe ladder
+    fetches one with *nothing* stored, where five bars leaves a chart holding
+    five candles and a warmup error, so it names its own start."""
+    asked: list = []
+    stored = _frame()
+    monkeypatch.setattr(
+        "strategy_lab.server._fetch_recent",
+        lambda identity, start: asked.append(start) or stored,
+    )
+    monkeypatch.setattr("strategy_lab.server.upsert_candles", len)
+    monkeypatch.setattr("strategy_lab.server.load_candles", lambda **_: stored)
+
+    wanted = datetime(2021, 6, 1, tzinfo=UTC)
+    refresh_candles(_SPOT, None, wanted)
+    five_bars_back = asked[0]
+
+    refresh_candles(_SPOT, None)
+
+    assert five_bars_back == wanted, "the caller's own start was ignored"
+    assert asked[1] > wanted, "a plain top-up must not re-fetch the whole history"

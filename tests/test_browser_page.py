@@ -983,3 +983,77 @@ def test_live_means_a_frame_arrived_not_that_a_socket_opened(page):
     assert "setLive('wait', 'waiting for data');" in socket
     assert "if (!live.ticks) setLive('on', 'live');" in socket
     assert "setLive('off', 'connected · no data');" in socket
+
+
+def test_volume_is_an_overlay_rather_than_a_pane_of_its_own(page):
+    """As a pane it took half the chart: `panes()[1].setHeight(80)` did not hold
+    and the separator would not drag, leaving price squeezed into the top half of
+    an already wide range."""
+    script = _script(page)
+
+    volume = script[script.index("var volumeSeries") : script.index("var stateSeries")]
+    assert "priceScaleId: ''" in volume
+    assert "scaleMargins: { top: 0.82, bottom: 0 }" in script
+
+
+def test_the_state_ribbon_is_coloured_from_the_series_the_payload_carries(page):
+    """The state was readable one bar at a time by hovering. As a ribbon the
+    shape of a regime is visible at a glance, which is what a lifecycle strategy
+    is about — and it is the same `why.states` the chip and the change list use,
+    so the three cannot disagree."""
+    script = _script(page)
+    draw = _within(script, "function drawStateRibbon(payload)")
+
+    assert "payload.why ? payload.why.states : null" in draw
+    assert "CFG.stateColors[states[i]]" in draw
+    # Constant height: the ribbon says which state, never how much of it.
+    assert "value: 1," in draw
+    # And nothing to colour means no ribbon and no legend, rather than a blank band.
+    assert "stateSeries.setData([]);" in draw
+
+
+def test_the_lifecycle_keeps_its_own_order_and_its_colours_come_from_python(page):
+    """Alphabetical would describe a different thing from the one the machine
+    walks: compression → breakout → confirmed → riding → exhaustion → reset."""
+    from strategy_lab.browser.page import STATE_COLORS
+    from strategy_lab.state.machine import MarketState
+
+    assert list(STATE_COLORS) == [state.value for state in MarketState]
+    assert "#" not in _within(_script(page), "function drawStateRibbon(payload)")
+
+
+def test_the_ladder_offers_no_month(page):
+    """Binance publishes `1M` klines and `timeframe_to_millis` raises on it — a
+    month is not a fixed width, and warmup, funding windows and the poll cadence
+    are all `bar_ms` arithmetic. A rung that fetches candles and then cannot be
+    analysed is the live control that cannot connect, again."""
+    from strategy_lab.browser.page import TIMEFRAME_LADDER
+    from strategy_lab.timeframes import timeframe_to_millis
+
+    assert "1M" not in TIMEFRAME_LADDER
+    for timeframe in TIMEFRAME_LADDER:
+        assert timeframe_to_millis(timeframe) > 0
+    with pytest.raises(ValueError):
+        timeframe_to_millis("1M")
+
+
+def test_a_timeframe_switch_never_resamples_on_the_client(page):
+    """A 1h bar built from four 15m bars is not the venue's 1h bar, and this repo
+    keys a dataset on its timeframe precisely so the two cannot be confused. A
+    rung with nothing stored fetches that timeframe instead."""
+    switch = _within(_script(page), "function switchTimeframe(timeframe, stored)")
+
+    assert "/api/refresh?" in switch
+    assert "params.set('since'" in switch, "a new timeframe needs its own history"
+    for resampling in ("resample", "aggregate", "reduce("):
+        assert resampling not in switch
+
+
+def test_the_ladder_carries_the_timeframes_this_instrument_already_has(page):
+    """Otherwise leaving 15m for 1h strands 15m in the dropdown, because it is
+    not one of the four rungs."""
+    render = _within(_script(page), "function renderLadder()")
+
+    assert "if (mine && rungs.indexOf(parts[3]) < 0) rungs.push(parts[3]);" in render
+    assert "if (rungs.indexOf(current) < 0) rungs.push(current);" in render
+    assert "CFG.timeframeOrder.indexOf(a) - CFG.timeframeOrder.indexOf(b)" in render

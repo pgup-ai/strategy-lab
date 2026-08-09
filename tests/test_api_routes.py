@@ -336,7 +336,7 @@ def test_the_refresh_endpoint_reuses_the_existing_fetch_and_upsert_path(
     candle to differ from the one the rest of the lab wrote."""
     seen = {}
 
-    def _refresh(identity, after):
+    def _refresh(identity, after, since):
         seen["identity"] = identity
         seen["after"] = after
         return {"bars": [{"time": 1, "open": 1.0, "high": 2.0, "low": 0.5, "close": 1.5,
@@ -361,7 +361,7 @@ def test_what_a_refresh_wrote_reaches_the_caller_and_not_only_the_database(
     belongs in the response rather than in a server log nobody is reading."""
     monkeypatch.setattr(
         "strategy_lab.server.refresh_candles",
-        lambda identity, after: {
+        lambda identity, after, since: {
             "bars": [], "candles_upserted": 3, "funding_upserted": 0
         },
     )
@@ -380,7 +380,7 @@ def test_a_refresh_that_sought_no_settlements_says_so_rather_than_reporting_none
     indistinguishable from the drift above."""
     monkeypatch.setattr(
         "strategy_lab.server.refresh_candles",
-        lambda identity, after: {
+        lambda identity, after, since: {
             "bars": [], "candles_upserted": 1, "funding_upserted": None
         },
     )
@@ -398,7 +398,7 @@ def test_a_refresh_that_reported_no_counts_is_an_error_rather_than_a_default(
     sought" -- a plausible answer nobody computed, which is the failure the whole
     provenance habit exists to prevent."""
     monkeypatch.setattr(
-        "strategy_lab.server.refresh_candles", lambda identity, after: {"bars": []}
+        "strategy_lab.server.refresh_candles", lambda identity, after, since: {"bars": []}
     )
 
     with pytest.raises(Exception, match="candles_upserted"):
@@ -406,7 +406,7 @@ def test_a_refresh_that_reported_no_counts_is_an_error_rather_than_a_default(
 
 
 def test_a_venue_failure_on_refresh_is_a_502_not_a_traceback(client, monkeypatch):
-    def _boom(identity, after):
+    def _boom(identity, after, since):
         raise RuntimeError("binance said no")
 
     monkeypatch.setattr("strategy_lab.server.refresh_candles", _boom)
@@ -501,3 +501,49 @@ def test_a_date_only_end_covers_the_whole_day_it_names(client):
         timeframe="4h", strategy="donchian", end="2023-10-31 00:00:00",
     )
     assert exact.end == "2023-10-31 00:00:00"
+
+
+def test_a_new_timeframe_is_backfilled_from_the_caller_s_own_left_edge(client, monkeypatch):
+    """The five-bar top-up is for a series that exists. Applied to a timeframe
+    with nothing stored it leaves five candles and a warmup error, so the ladder
+    passes the frame it is looking at and gets history to match."""
+    seen = {}
+
+    def _refresh(identity, after, since):
+        seen["since"] = since
+        return {"bars": [], "candles_upserted": 900, "funding_upserted": None}
+
+    monkeypatch.setattr("strategy_lab.server.refresh_candles", _refresh)
+
+    response = client.post(
+        "/api/refresh",
+        params={
+            "exchange": "binance", "market_type": "spot", "symbol": "BTC/USDT",
+            "timeframe": "1h", "since": "2024-01-01T00:00:00Z",
+        },
+    )
+
+    assert response.status_code == 200
+    assert seen["since"] is not None
+    assert seen["since"].year == 2024
+
+
+def test_a_plain_refresh_still_asks_for_no_particular_start(client, monkeypatch):
+    """`since` is the new-timeframe path only. A top-up that passed one would
+    re-fetch the whole history on every click of the refresh button."""
+    seen = {}
+    monkeypatch.setattr(
+        "strategy_lab.server.refresh_candles",
+        lambda identity, after, since: seen.update(since=since)
+        or {"bars": [], "candles_upserted": 3, "funding_upserted": 1},
+    )
+
+    client.post(
+        "/api/refresh",
+        params={
+            "exchange": "binance", "market_type": "perp", "symbol": "BTC/USDT",
+            "timeframe": "4h",
+        },
+    )
+
+    assert seen["since"] is None

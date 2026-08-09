@@ -144,17 +144,54 @@ if DEFAULT_MARKET_TYPE not in MARKET_TYPES:
     )
 
 
+# The lifecycle in order, with a colour per state. In Python because the order
+# is the machine's -- compression -> breakout -> confirmed -> riding ->
+# exhaustion -> reset -- and a legend that listed them alphabetically would
+# describe a different thing from the one the strategy walks.
+# What a chart offers to switch between.
+#
+# **No month.** Binance publishes `1M` klines, but a month is not a fixed width
+# and every bar calculation here assumes one -- `timeframe_to_millis("1M")`
+# raises, and warmup, funding windows and the poll cadence are all `bar_ms`
+# arithmetic. A rung that fetches candles and then cannot be analysed is the
+# same defect as a live control that cannot connect: better absent than broken.
+TIMEFRAME_LADDER: tuple[str, ...] = ("1h", "4h", "1d", "1w")
+
+# Shortest first, for ordering rungs the ladder did not name. A timeframe this
+# instrument already has is worth a rung even when it is not one of the four
+# above -- otherwise leaving 15m for 1h strands you in the dropdown.
+TIMEFRAME_ORDER: tuple[str, ...] = (
+    "1m", "3m", "5m", "15m", "30m", "1h", "2h", "4h", "6h", "8h", "12h", "1d", "3d", "1w", "1wk"
+)
+
+STATE_COLORS: dict[str, str] = {
+    "compression": "#4a5163",
+    "breakout": "#d1a54a",
+    "confirmed": "#26a69a",
+    "riding": "#1de9b6",
+    "exhaustion": "#ef5350",
+    "reset": "#7e6bab",
+}
+
+
 def bootstrap_config() -> dict[str, object]:
     """Everything the page script must not decide for itself, as one JSON blob."""
     return {
         "primitives": CONTRACT_PRIMITIVES,
         "exitModeContracts": list(CONTRACTS_WITH_EXIT_MODE),
         "exitModes": [mode.value for mode in ExitMode],
-        "marketTypes": list(MARKET_TYPES),
+    "marketTypes": list(MARKET_TYPES),
         "defaultMarketType": DEFAULT_MARKET_TYPE,
         "restatedMarketType": RESTATED_MARKET_TYPE,
         "restatementStaleDays": RESTATEMENT_STALE_DAYS,
         "colors": {"up": UP, "down": DOWN, "upDim": UP_DIM, "downDim": DOWN_DIM},
+        "stateColors": STATE_COLORS,
+        # The rungs a chart offers, in order. Not every one is stored for every
+        # instrument -- the switcher fetches the missing one rather than hiding
+        # it, because "this timeframe does not exist here" is a fact about
+        # storage, not about the market.
+        "timeframeLadder": list(TIMEFRAME_LADDER),
+        "timeframeOrder": list(TIMEFRAME_ORDER),
     }
 
 
@@ -253,6 +290,17 @@ __SHELL_CSS__
      strategy was not acting yet, so they are not decisions. */
   .shift.warmup { opacity: 0.55; }
   .shift.warmup .shift-to { font-weight: 400; }
+  .ladder { display: inline-flex; gap: 2px; }
+  .ladder button { padding: 4px 9px; font-size: 12px; }
+  .ladder button.current { border-color: var(--accent); color: var(--ink); }
+  .ladder button.absent { color: var(--ink-dim); border-style: dashed; }
+  .legend-strip { display: flex; flex-wrap: wrap; gap: 8px 18px; margin: 6px 20px 0;
+    font-size: 12px; color: var(--ink-dim); align-items: center; }
+  .legend-strip .mk { font-size: 14px; }
+  .legend-strip .mk.up { color: var(--up); }
+  .legend-strip .mk.down { color: var(--down); }
+  .swatch { display: inline-flex; align-items: center; gap: 4px; margin-left: 8px; }
+  .swatch i { width: 9px; height: 9px; border-radius: 2px; display: inline-block; }
   .live { display: inline-flex; align-items: center; gap: 6px; }
   .live-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--ink-dim); }
   .live.on .live-dot { background: var(--up); }
@@ -337,6 +385,7 @@ __SHELL_CSS__
     </div>
     <div class="field instrument-only">
       <label for="refresh">Candles</label>
+      <span id="ladder" class="ladder"></span>
       <button id="live" type="button" class="live off" hidden
               title="Draw the venue's forming candle, and recompute when it closes">
         <span class="live-dot"></span><span id="live-text">live</span>
@@ -382,6 +431,11 @@ __SHELL_CSS__
     </div>
   </div>
 </div>
+<p class="legend-strip instrument-only" id="chart-legend">
+  <span><b class="mk up">&uarr;</b> bought &mdash; opening a long or closing a short</span>
+  <span><b class="mk down">&darr;</b> sold &mdash; opening a short or closing a long</span>
+  <span id="state-legend" hidden>state ribbon: <span id="state-swatches"></span></span>
+</p>
 <section class="why instrument-only">
   <h2>Why this bar <span class="pin" id="why-bar"></span></h2>
   <div class="why-chips" id="why-chips"></div>
@@ -438,10 +492,27 @@ __SHELL_CSS__
     wickUpColor: COLORS.up, wickDownColor: COLORS.down
   });
   candleSeries.priceScale().applyOptions({ scaleMargins: { top: 0.08, bottom: 0.06 } });
+  // An overlay on the price pane rather than a pane of its own. As a pane it
+  // took half the chart -- `panes()[1].setHeight(80)` did not hold, and the
+  // separator would not drag -- which left the price series squeezed into the
+  // top half of an already wide range. Overlaid, price keeps the whole pane and
+  // volume lives in the bottom fifth of it, which is what TradingView does.
   var volumeSeries = priceChart.addSeries(LWC.HistogramSeries, {
-    priceFormat: { type: 'volume' }, lastValueVisible: false, priceLineVisible: false
+    priceFormat: { type: 'volume' }, lastValueVisible: false, priceLineVisible: false,
+    priceScaleId: ''
+  });
+  volumeSeries.priceScale().applyOptions({ scaleMargins: { top: 0.82, bottom: 0 } });
+
+  // One bar per candle at constant height, coloured by the state the machine was
+  // in. The state was already in the payload and readable only one bar at a time
+  // by hovering; as a ribbon the shape of a regime is visible at a glance, which
+  // is the thing a lifecycle strategy is actually about.
+  var stateSeries = priceChart.addSeries(LWC.HistogramSeries, {
+    priceFormat: { type: 'volume' }, lastValueVisible: false, priceLineVisible: false,
+    priceScaleId: 'state'
   }, 1);
-  priceChart.panes()[1].setHeight(80);
+  priceChart.panes()[1].setStretchFactor(12);
+  priceChart.panes()[0].setStretchFactor(88);
   var markerLayer = LWC.createSeriesMarkers(candleSeries, []);
 
   var exposureChart = LWC.createChart(el('exposure-pane'), theme);
@@ -632,6 +703,23 @@ __SHELL_CSS__
     }));
   }
 
+  function drawStateRibbon(payload) {
+    var states = payload.why ? payload.why.states : null;
+    if (!states) {
+      stateSeries.setData([]);
+      el('state-legend').hidden = true;
+      return;
+    }
+    // Constant height: the ribbon says *which* state, never how much of it.
+    stateSeries.setData(payload.bars.map(function (bar, i) {
+      // No fallback colour: `STATE_COLORS` is asserted against `MarketState` in
+      // Python, so a missing one means a state was added there and not here --
+      // which should look wrong rather than quietly grey.
+      return { time: bar.time, value: 1, color: CFG.stateColors[states[i]] };
+    }));
+    el('state-legend').hidden = false;
+  }
+
   function toMarkers(markers) {
     return markers.map(function (marker) {
       var entering = marker.kind === 'entry';
@@ -680,6 +768,7 @@ __SHELL_CSS__
     });
 
     drawBars(payload.bars);
+    drawStateRibbon(payload);
     // Both assignments are unconditional so neither contract can inherit the
     // other's leftovers: a level is never drawn as a set of fills, and a set of
     // fills is never drawn as a level.
@@ -698,6 +787,7 @@ __SHELL_CSS__
       if (range) exposureChart.timeScale().setVisibleLogicalRange(range);
     }
 
+    renderLadder();
     view.stream = streams[datasetSel.value] || null;
     el('live').hidden = !view.stream;
     openSocket();
@@ -1758,6 +1848,87 @@ __SHELL_CSS__
   }
 
   el('refresh').addEventListener('click', refreshInstrument);
+
+  // A rung switches to the stored dataset for that timeframe, and offers to
+  // fetch it when there is none. Never a client-side resample: a 1h bar built
+  // from four 15m bars is not the venue's 1h bar, and this repo keys a dataset
+  // on its timeframe precisely so the two cannot be confused.
+  function datasetFor(timeframe) {
+    var id = identity();
+    return [id.exchange, id.market_type, id.symbol, timeframe].join('|');
+  }
+
+  function renderLadder() {
+    var host = el('ladder');
+    host.replaceChildren();
+    var id = identity();
+    var current = id.timeframe;
+    // The four rungs, plus every timeframe this instrument already has stored,
+    // so switching away from one never strands it in the dropdown.
+    var rungs = CFG.timeframeLadder.slice();
+    Array.prototype.forEach.call(datasetSel.options, function (option) {
+      var parts = option.value.split('|');
+      var mine = parts[0] === id.exchange && parts[1] === id.market_type &&
+        parts[2] === id.symbol;
+      if (mine && rungs.indexOf(parts[3]) < 0) rungs.push(parts[3]);
+    });
+    if (rungs.indexOf(current) < 0) rungs.push(current);
+    rungs.sort(function (a, b) {
+      return CFG.timeframeOrder.indexOf(a) - CFG.timeframeOrder.indexOf(b);
+    });
+    rungs.forEach(function (timeframe) {
+      var wanted = datasetFor(timeframe);
+      var stored = Object.prototype.hasOwnProperty.call(streams, wanted) ||
+        Array.prototype.some.call(datasetSel.options, function (o) { return o.value === wanted; });
+      var button = document.createElement('button');
+      button.type = 'button';
+      button.textContent = timeframe;
+      button.className = timeframe === current ? 'current' : (stored ? '' : 'absent');
+      button.title = stored
+        ? 'switch to ' + timeframe
+        : timeframe + ' is not stored for this instrument yet — click to fetch it';
+      button.addEventListener('click', function () { switchTimeframe(timeframe, stored); });
+      host.appendChild(button);
+    });
+  }
+
+  function switchTimeframe(timeframe, stored) {
+    var wanted = datasetFor(timeframe);
+    if (stored) {
+      datasetSel.value = wanted;
+      exactBounds = null;
+      return load();
+    }
+    setStatus('fetching ' + timeframe + ' candles …');
+    var parts = wanted.split('|');
+    var params = new URLSearchParams({
+      exchange: parts[0], market_type: parts[1], symbol: parts[2], timeframe: parts[3]
+    });
+    // From this frame's own left edge, so the new timeframe covers what is on
+    // screen rather than the five bars a top-up would take.
+    var first = view.bars && view.bars[0];
+    if (first) params.set('since', new Date(first.time * 1000).toISOString());
+    return getJSON('/api/refresh?' + params.toString(), { method: 'POST' })
+      .then(function () { return getJSON('/api/datasets'); })
+      .then(function (rows) {
+        datasetSel.replaceChildren();
+        fillDatasets(rows);
+        datasetSel.value = wanted;
+        exactBounds = null;
+        return load();
+      })
+      .catch(function (error) { setError(error.message); });
+  }
+
+  Object.keys(CFG.stateColors).forEach(function (name) {
+    var swatch = document.createElement('span');
+    swatch.className = 'swatch';
+    var dot = document.createElement('i');
+    dot.style.background = CFG.stateColors[name];
+    swatch.appendChild(dot);
+    swatch.appendChild(document.createTextNode(name));
+    el('state-swatches').appendChild(swatch);
+  });
 
   fillMarkets();
   fillExitModes();

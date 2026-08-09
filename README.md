@@ -647,6 +647,23 @@ ignores a repeated same-direction entry, so signals would mark bars no backtest
 traded), and a `TargetExposure` strategy gets a baseline pane carrying the signed
 −1…+1 target, which no arrow can express.
 
+**The chart carries the lifecycle, not just the fills.** Under the candles is a
+**state ribbon** — one band per bar, coloured by the state the machine was in,
+so a regime is visible as a shape rather than one bar at a time. A legend under
+the chart says what the arrows mean (**↑ bought** — opening a long *or* closing
+a short; **↓ sold** — the reverse) and what each ribbon colour is. Volume is an
+overlay in the bottom fifth of the price pane rather than a pane of its own,
+which used to take half the chart.
+
+**A timeframe ladder** sits beside the candle-set selector: `1h 4h 1d 1w`, plus
+whatever else this instrument already has stored. A rung with data switches to
+it; a dashed rung has nothing stored and **fetches that timeframe** over the
+frame you are looking at, then switches. It never resamples on the client — a 1h
+bar built from four 15m bars is not the venue's 1h bar, and a dataset is keyed on
+its timeframe precisely so the two cannot be confused. There is deliberately no
+month: `timeframe_to_millis("1M")` raises, because a month is not a fixed width
+and warmup, funding windows and the poll cadence are all bar-width arithmetic.
+
 **The state sequence is below the chart** — every change the machine made, newest
 first, with how long the previous state held and the bar it changed on. Click a
 row to pin that bar and see what the strategy did there. Only

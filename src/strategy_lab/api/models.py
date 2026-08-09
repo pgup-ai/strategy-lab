@@ -245,6 +245,8 @@ class RefreshQuery(IdentityQuery):
     """
 
     after: Annotated[int, Field(ge=0)] | None = None
+    # Only for a timeframe with nothing stored yet -- see `refresh_candles`.
+    since: str | None = None
 
 
 class DatasetModel(_Strict):

@@ -51,7 +51,9 @@ def build_candles_payload(df: pd.DataFrame) -> dict:
     return {"bars": bars}
 
 
-def refresh_candles(identity: MarketDataIdentity, after: int | None) -> dict:
+def refresh_candles(
+    identity: MarketDataIdentity, after: int | None, since: datetime | None = None
+) -> dict:
     """Fetch the newest bars, store them, and hand back the tail from storage.
 
     On a perp the settlements move with them. Candles reach the present on every
@@ -62,7 +64,10 @@ def refresh_candles(identity: MarketDataIdentity, after: int | None) -> dict:
     drift itself, and it is invisible in a payload that only carries bars.
     """
     bar_ms = timeframe_to_millis(identity.timeframe)
-    lookback_start = datetime.now(UTC) - timedelta(
+    # `since` is for a timeframe that has no stored bars at all: the five-bar
+    # lookback tops up a series that exists, and would leave a brand new one
+    # holding five candles and a warmup error.
+    lookback_start = since or datetime.now(UTC) - timedelta(
         milliseconds=bar_ms * REFRESH_LOOKBACK_BARS
     )
 
