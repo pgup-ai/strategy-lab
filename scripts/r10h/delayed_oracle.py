@@ -67,6 +67,7 @@ from strategy_lab.core.types import InstrumentId
 from strategy_lab.db.candles import get_engine, load_candles
 from strategy_lab.engine.runner import StrategyRunner
 from strategy_lab.feeds.base import Subscription
+from strategy_lab.feeds.live import _funded_since_ms
 from strategy_lab.feeds.replay import ReplayFeed
 from strategy_lab.features.flow import FUNDING_COLUMN
 from strategy_lab.market_data.base import MarketDataIdentity
@@ -173,7 +174,9 @@ def _replay(header: dict, window_start_ms: int, window_end_ms: int):
     )
 
 
-def _compare_bars(header: dict, bars_csv: Path) -> tuple[int, dict[str, int], bool]:
+def _compare_bars(
+    header: dict, bars_csv: Path, window_start_ms: int, window_end_ms: int
+) -> tuple[int, dict[str, int], bool]:
     """Every logged live bar against the stored candle for the same interval.
 
     **Funding is part of the bar, so it is part of the comparison.** Attaching
@@ -182,6 +185,16 @@ def _compare_bars(header: dict, bars_csv: Path) -> tuple[int, dict[str, int], bo
     funding-derived feature would not surface the difference through its reasons.
     Attached through ``with_funding_column``, the engine's own function, so the
     oracle uses the alignment rule rather than a second reading of it.
+
+    **Bounded to the run's own window, widened by the feed's own rule.** Asking
+    about the whole stored history instead means one hole anywhere in it decides
+    the answer for every bar: measured, a whole-history request for BTC/USDT perp
+    **4h returns no funding column at all** -- the venue's permanent ~40 h
+    leading gap -- while **15m returns one**, so the same script would have
+    checked funding on one timeframe and silently skipped it on another. Widened
+    through ``_funded_since_ms`` rather than a second reach-back rule, because a
+    window bounded tightly to a short run holds no settlements and cannot be
+    asked the coverage question at all, which is M45 again from the other side.
     """
     identity = _identity(header)
     stored = load_candles(
@@ -189,6 +202,8 @@ def _compare_bars(header: dict, bars_csv: Path) -> tuple[int, dict[str, int], bo
         market_type=identity.market_type,
         symbol=identity.symbol,
         timeframe=identity.timeframe,
+        start=str(pd.Timestamp(_funded_since_ms(identity, window_start_ms), unit="ms", tz="UTC")),
+        end=str(pd.Timestamp(window_end_ms, unit="ms", tz="UTC")),
     )
     stored, _ = with_funding_column(identity, stored, enabled=True, required=False)
     funded = FUNDING_COLUMN in stored.columns
@@ -275,6 +290,29 @@ def _compare_reasons(live, replayed) -> tuple[int, dict[str, int]]:
     return compared, dict(counts)
 
 
+def _verdict(failed: bool, exercised: set[str]) -> tuple[str, int]:
+    """What the run is allowed to claim, and the exit code that says it.
+
+    Three outcomes rather than two, because "nothing disagreed" and "the gate
+    passes" are different sentences and only one of them is reading 1. A section
+    that could not run is not evidence of agreement -- it is the absence of
+    evidence, which prints identically unless something insists on the
+    difference.
+    """
+    if failed:
+        return "A reading other than 1 applies -- see the counts above.", 1
+    if exercised != ALL_SECTIONS:
+        skipped = ", ".join(sorted(ALL_SECTIONS - exercised))
+        return (
+            f"READING 1 on what ran, but NOT on everything: {skipped} was not "
+            f"exercised. Nothing below disagreed; that is a weaker claim than the "
+            f"gate, and reporting it as the gate is exactly what reading 4 warns "
+            f"about.",
+            3,
+        )
+    return "READING 1: the gate passes.", 0
+
+
 def main() -> int:
     if not 2 <= len(sys.argv) <= 3:
         raise SystemExit("usage: delayed_oracle.py <paper-run-id> [live-bars.csv]")
@@ -325,7 +363,7 @@ def main() -> int:
         print("  closed-bar error both surface only as a derived difference.")
         exercised.remove("bars")
     else:
-        compared, counts, funded = _compare_bars(header, bars_csv)
+        compared, counts, funded = _compare_bars(header, bars_csv, start_ms, end_ms)
         fields = ", ".join((*OHLCV, FUNDING_COLUMN) if funded else OHLCV)
         print(f"  {compared} closed bars compared on {fields}")
         for name, count in sorted(counts.items()):
@@ -333,13 +371,17 @@ def main() -> int:
         if not counts:
             print("    0 differing on every field")
         if not funded:
-            # Never let an unfunded comparison read as a funded one: attaching
-            # funding wrong is a failure mode this section exists to catch.
+            # Not a footnote: this section exists partly to catch a funding
+            # attachment that is wrong, and M45 was exactly that. A run whose
+            # funding was never compared has not passed this check, so the bars
+            # section leaves `exercised` and the verdict says so rather than
+            # printing the gate as green over a comparison that did not happen.
             print(
-                "    funding NOT compared: one side carries no rate -- either the "
+                "    funding NOT EXERCISED: one side carries no rate -- either the "
                 "stored settlements do not cover this range, or the run read no "
                 "funding-derived feature and was driven unfunded."
             )
+            exercised.discard("bars")
         failed = failed or bool(counts) or compared == 0
 
     print("\n[2] replaying the same range from storage")
@@ -378,20 +420,9 @@ def main() -> int:
         )
     failed = failed or bool(counts) or (compared == 0 and bool(live_reasons))
 
-    if failed:
-        print("\nA reading other than 1 applies -- see the counts above.")
-        return 1
-    if exercised != ALL_SECTIONS:
-        skipped = ", ".join(sorted(ALL_SECTIONS - exercised))
-        print(
-            f"\nREADING 1 on what ran, but NOT on everything: {skipped} was not "
-            f"exercised. Nothing below disagreed; that is a weaker claim than the "
-            f"gate, and reporting it as the gate is exactly what reading 4 warns "
-            f"about."
-        )
-        return 3
-    print("\nREADING 1: the gate passes.")
-    return 0
+    message, code = _verdict(failed, exercised)
+    print(f"\n{message}")
+    return code
 
 
 if __name__ == "__main__":

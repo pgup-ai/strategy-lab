@@ -148,7 +148,14 @@ def _funded_since_ms(identity: MarketDataIdentity, since_ms: int) -> int:
     )
     if floor is None:
         return since_ms
-    return min(since_ms, int(floor.value // 1_000_000))
+    # One bar *before* the settlement, not at it. ``funding_coverage_gaps``
+    # counts settlements at or after the first bar's **open**, and Binance stamps
+    # them up to 47 ms past the boundary -- so a window starting exactly at a
+    # settlement excludes the bar that contains it and therefore the settlement
+    # itself, and the count is one short of what it asked for. Measured: a window
+    # from the 4th-newest settlement held 2 usable settlements where the guard
+    # needs 3, and returned no column.
+    return min(since_ms, int(floor.value // 1_000_000) - timeframe_to_millis(identity.timeframe))
 
 
 @dataclass

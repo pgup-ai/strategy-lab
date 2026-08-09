@@ -803,7 +803,13 @@ def test_a_perp_poll_reaches_back_far_enough_to_carry_its_own_funding(monkeypatc
         exchange="binance", market_type="perp", symbol="BTC/USDT", timeframe="4h"
     )
     naive = int(pd.Timestamp("2026-06-01", tz="UTC").value // 10**6)
-    assert _funded_since_ms(perp, naive) == int(floor.value // 10**6)
+
+    # One bar *before* the settlement, not at it: `funding_coverage_gaps` counts
+    # settlements at or after the first bar's open, so a window starting exactly
+    # on one excludes the bar containing it and therefore the settlement — and
+    # the count comes back one short of what it asked for. Measured before this:
+    # a window from the 4th-newest settlement held 2 where the guard needs 3.
+    assert _funded_since_ms(perp, naive) == int(floor.value // 10**6) - timeframe_to_millis("4h")
 
     # Already earlier than the settlements it needs: nothing to widen.
     early = int(pd.Timestamp("2025-01-01", tz="UTC").value // 10**6)
