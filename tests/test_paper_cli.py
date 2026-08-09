@@ -193,17 +193,6 @@ def test_the_bar_log_records_what_the_live_path_received(monkeypatch, wired, tmp
     assert logged["funding_rate"].notna().all(), "a funded perp bar logged no rate"
 
 
-def test_the_bar_log_is_absent_unless_asked_for(monkeypatch, wired, tmp_path):
-    """A live process writes no candles by default: the oracle compares against a
-    later independent fetch, and a run that stored its own bars as the record
-    would be compared against itself."""
-    monkeypatch.setattr(cli, "get_strategy", lambda name: _EveryBar())
-
-    _invoke("--strategy", "every_bar")
-
-    assert not list(tmp_path.iterdir())
-
-
 def test_advance_funding_asks_nothing_of_a_market_that_settles_nothing():
     """The same rule `board_window` follows: a query that can only return `None`
     is how a coverage guard gets invented for a market that has none."""

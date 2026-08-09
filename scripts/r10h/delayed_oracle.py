@@ -134,10 +134,10 @@ def _replay(header: dict, window_start_ms: int, window_end_ms: int):
         return emitted
 
     signals = asyncio.run(_drive())
-    inside = lambda ts: window_start_ms <= ts <= window_end_ms  # noqa: E731
+    window = range(window_start_ms, window_end_ms + 1)
     return (
-        [s for s in signals if inside(s.ts_bar_ms)],
-        [r for r in runner.reasons if inside(r.ts_bar_ms)],
+        [s for s in signals if s.ts_bar_ms in window],
+        [r for r in runner.reasons if r.ts_bar_ms in window],
     )
 
 

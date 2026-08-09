@@ -946,6 +946,12 @@ def _write_bar_reasons(run_id, mode, reasons):
     return write_bar_reasons(run_id, mode, reasons)
 
 
+# How often the funding task looks at whether it is needed. Not how often it
+# fetches: it fetches when the feed says it cannot cover its window, or once per
+# bar, whichever comes first.
+FUNDING_CHECK_SECONDS = 20.0
+
+
 @app.command("paper")
 def paper_command(
     exchange: str = typer.Option("binance", help="Venue to poll."),
@@ -987,8 +993,9 @@ def paper_command(
     funding fetch runs, so a process that only polls candles watches its window
     grow past its coverage until ``LiveFeed`` withholds every poll -- measured
     before this existed, stored funding was 46.6 h stale and no window could be
-    covered at all. The top-up runs at startup and once per poll cycle thereafter,
-    and it is the same fetch ``server.refresh_candles`` performs for the browser.
+    covered at all. It is the same fetch ``server.refresh_candles`` performs for
+    the browser, and it runs *beside* the stream rather than inside it -- see
+    ``_keep_funding_current`` for why that distinction is the whole of it.
 
     **Bounded by the wall clock rather than by a bar count.** ``stream()`` does
     not terminate, and a bound that waited for bars would hang exactly when the
@@ -1064,25 +1071,27 @@ def paper_command(
     _warn_if_sizing_is_dropped(strategy, runner)
 
     book = PaperBook(cash=cash, position_pct=position_pct)
-    run_id = _create_run(
-        run_id=uuid.uuid4(),
+    run_id = None
+    if persist:
+        run_id = _create_run(
+            run_id=uuid.uuid4(),
         mode=Mode.PAPER,
-        strategy_id=strategy.name,
-        strategy_version=strategy.version,
-        config={
-            "exchange": exchange,
-            "market_type": market_type,
-            "symbol": symbol,
-            "timeframe": timeframe,
-            "exit_mode": exit_mode,
-            "for_minutes": for_minutes,
-            "warmup_bars": strategy.warmup_bars,
-            "primed_bars": len(primed),
-            "cash": cash,
-            "position_pct": position_pct,
-            "started_ms": end_ms,
-        },
-    ) if persist else None
+            strategy_id=strategy.name,
+            strategy_version=strategy.version,
+            config={
+                "exchange": exchange,
+                "market_type": market_type,
+                "symbol": symbol,
+                "timeframe": timeframe,
+                "exit_mode": exit_mode,
+                "for_minutes": for_minutes,
+                "warmup_bars": strategy.warmup_bars,
+                "primed_bars": len(primed),
+                "cash": cash,
+                "position_pct": position_pct,
+                "started_ms": end_ms,
+            },
+        )
 
     signals: list = []
     written = {"signals": 0, "reasons": 0}
@@ -1165,12 +1174,6 @@ def paper_command(
         typer.echo("Not persisted.")
 
 
-# How often the funding task looks at whether it is needed. Not how often it
-# fetches: it fetches when the feed says it cannot cover its window, or once per
-# bar, whichever comes first.
-FUNDING_CHECK_SECONDS = 20.0
-
-
 def _live_feed(**kwargs):
     """The feed, behind the same kind of seam as the three storage writers.
 
@@ -1215,16 +1218,14 @@ def _advance_funding(identity) -> int | None:
     The browser's own fetch, called rather than copied, so a paper process cannot
     advance funding by a rule the rest of the lab does not use.
     """
-    from strategy_lab.server import _fetch_funding
-
     if identity.market_type != "perp":
         return None
-    rows = _fetch_funding(identity, datetime.now(UTC) - timedelta(days=2))
-    if rows is None:
-        return None
-    from strategy_lab.db.funding import upsert_funding
 
-    return upsert_funding(rows)
+    from strategy_lab.db.funding import upsert_funding
+    from strategy_lab.server import _fetch_funding
+
+    rows = _fetch_funding(identity, datetime.now(UTC) - timedelta(days=2))
+    return None if rows is None else upsert_funding(rows)
 
 
 def _warn_if_sizing_is_dropped(strategy, runner) -> None:
@@ -1239,8 +1240,7 @@ def _warn_if_sizing_is_dropped(strategy, runner) -> None:
     frame = runner.buffer.frame()
     if frame.empty:
         return
-    size = getattr(strategy.generate_signals(frame), "position_size", None)
-    if size is not None:
+    if strategy.generate_signals(frame).position_size is not None:
         typer.echo(
             f"Warning: {strategy.name} sizes per bar, and the event path carries no "
             f"size onto a Signal -- this book fills every entry at scale 1.0, so its "
@@ -1250,14 +1250,12 @@ def _warn_if_sizing_is_dropped(strategy, runner) -> None:
 
 def _flush(run_id, signals: list, reasons: list, written: dict) -> None:
     """Persist whatever has not been persisted yet."""
-    if len(signals) > written["signals"]:
-        from strategy_lab.core.types import Mode
+    from strategy_lab.core.types import Mode
 
+    if len(signals) > written["signals"]:
         _write_signals(run_id, Mode.PAPER, signals[written["signals"] :])
         written["signals"] = len(signals)
     if len(reasons) > written["reasons"]:
-        from strategy_lab.core.types import Mode
-
         _write_bar_reasons(run_id, Mode.PAPER, reasons[written["reasons"] :])
         written["reasons"] = len(reasons)
 

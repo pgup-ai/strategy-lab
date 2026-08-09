@@ -712,7 +712,7 @@ def test_a_stall_longer_than_the_lookback_still_loses_no_bars():
     assert withheld <= arrived, f"{len(withheld - arrived)} bars fell out of the window"
 
 
-def test_a_failing_poll_is_retried_and_then_gives_up(frame):
+def test_a_failing_poll_is_retried_and_then_gives_up():
     """A process meant to run for hours cannot end on one timed-out request. But
     a feed that retried forever would report itself healthy while producing
     nothing, so the budget is bounded and spending it re-raises."""
@@ -722,7 +722,9 @@ def test_a_failing_poll_is_retried_and_then_gives_up(frame):
         attempts["n"] += 1
         # Bounded far above the budget, so a feed that retried forever ends this
         # test rather than hanging it. A test that hangs protects nothing.
-        raise RuntimeError("venue said no") if attempts["n"] <= 20 else _Stopped
+        if attempts["n"] > 20:
+            raise _Stopped
+        raise RuntimeError("venue said no")
 
     feed = LiveFeed(fetch=flaky, sleep=_noop, fetch_retries=3)
 
@@ -770,7 +772,7 @@ def test_resume_after_starts_polling_where_priming_ended():
     whole window — widened on a perp to cover its own funding, over a hundred
     bars at 15m — and every bar older than the primed history is emitted only for
     `BarBuffer` to drop as out-of-order."""
-    feed = LiveFeed(fetch=lambda i, s, u=None: pd.DataFrame(), sleep=_noop, clock=SimClock(10**13))
+    feed = LiveFeed(clock=SimClock(10**13))
     bar_ms = timeframe_to_millis(TIMEFRAME)
     primed_to = 1_700_000_000_000
 
