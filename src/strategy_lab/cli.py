@@ -1008,6 +1008,14 @@ def paper_command(
     created up front, unlike ``replay``'s -- a paper run that recorded nothing
     still happened, and that it ran and produced nothing is the thing worth
     keeping.
+
+    **A bar the venue revises after it was recorded keeps its first reason**, and
+    that is the storage layer's rule rather than this command's: within a run the
+    first row for a bar wins, because "a stored record of what a run saw that a
+    later pass can overwrite is not a record". The runner replaces the reason in
+    memory, so the two disagree from that point, and a later replay of the
+    corrected candle will too. Reported rather than hidden -- the summary counts
+    revised bars -- and recorded in the charter's §12.
     """
     from strategy_lab.core.clock import LiveClock
     from strategy_lab.core.types import InstrumentId, Mode
@@ -1189,7 +1197,8 @@ def paper_command(
             f"Ran {for_minutes:g} min: {bars} bars, {len(signals)} signals, "
             f"{len(runner.reasons)} reasons, {len(book.trades)} closed trades. "
             f"Withheld polls: {feed.funding_withheld_polls}, "
-            f"funding top-up failures: {failures['funding']}."
+            f"funding top-up failures: {failures['funding']}, "
+            f"bars revised after the fact: {runner.buffer.replaced_duplicates}."
         )
         if run_id is not None:
             typer.echo(

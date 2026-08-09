@@ -17,12 +17,15 @@ Loaded by path because `scripts/` is not a package; it belongs with its phase.
 from __future__ import annotations
 
 import importlib.util
+import sys
+import uuid
 from pathlib import Path
 
 import pandas as pd
 import pytest
 
 from strategy_lab.core.types import BarReason, InstrumentId
+from strategy_lab.timeframes import timeframe_to_millis
 
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "r10h" / "delayed_oracle.py"
 
@@ -224,9 +227,48 @@ def test_the_reach_back_is_anchored_to_the_run_window_not_to_now(oracle, monkeyp
         exchange="binance", market_type="perp", symbol="BTC/USDT", timeframe="15m"
     )
 
-    oracle._widened_start_ms(identity, 1_700_000_000_000, 1_700_004_500_000)
+    start, end = 1_700_000_000_000, 1_700_004_500_000
+    oracle._widened_start_ms(identity, start, end)
 
-    assert seen["before_ms"] == 1_700_004_500_000, (
+    assert seen["before_ms"] > start, (
         "the reach-back asked for the newest settlements stored, not the newest "
         "as of the window it is about"
+    )
+    # The window's right edge, not its last bar's open: `funding_coverage_gaps`
+    # counts settlements strictly below `window_end`, and Binance stamps them up
+    # to 47 ms past the boundary, so bounding at the open asks about a different
+    # set than the guard will count.
+    assert seen["before_ms"] == end + timeframe_to_millis("15m") - 1
+
+
+def test_an_uncoverable_replay_window_is_reported_rather_than_raised(
+    oracle, monkeypatch, capsys
+):
+    """The replay reaches back a full warmup — ~23 days for `state_machine_v1` at
+    15m — so it asks about far more funding than the live run ever did, and one
+    missed settlement anywhere in that span refuses the frame. That is
+    `required=True` doing its job; a gate whose design is to name what it could
+    not compare must not die while naming it."""
+    monkeypatch.setattr(
+        oracle, "_run_header",
+        lambda run_id: {
+            "strategy_id": "state_machine_v1", "strategy_version": "1.0.0",
+            "config": {"exchange": "binance", "market_type": "perp",
+                       "symbol": "BTC/USDT", "timeframe": "15m"},
+        },
+    )
+    monkeypatch.setattr(oracle, "load_signals", lambda **_: [])
+    monkeypatch.setattr(oracle, "load_bar_reasons", lambda **_: [_reason(1_700_000_000_000)])
+
+    def refuse(*_args, **_kwargs):
+        raise oracle.FundingUnavailable("no stored funding over that range")
+
+    monkeypatch.setattr(oracle, "_replay", refuse)
+    monkeypatch.setattr(oracle, "_closed_bar_stamps", lambda _p: [])
+    monkeypatch.setattr(sys, "argv", ["delayed_oracle.py", str(uuid.uuid4())])
+
+    assert oracle.main() == 3, "an uncoverable replay window failed the gate or passed it"
+    verdict = capsys.readouterr().out.rsplit("READING 1 on what ran", 1)[-1]
+    assert "reasons" in verdict and "signals" in verdict, (
+        "the verdict did not name the sections the replay failure took out"
     )

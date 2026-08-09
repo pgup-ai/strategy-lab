@@ -61,7 +61,7 @@ from pathlib import Path
 import pandas as pd
 from sqlalchemy import select
 
-from strategy_lab.backtests.funding_frame import with_funding_column
+from strategy_lab.backtests.funding_frame import FundingUnavailable, with_funding_column
 from strategy_lab.core.clock import SimClock
 from strategy_lab.core.types import InstrumentId
 from strategy_lab.db.candles import get_engine, load_candles
@@ -183,8 +183,15 @@ def _widened_start_ms(identity: MarketDataIdentity, start_ms: int, end_ms: int) 
     old widened by nothing at all, because the fourth newest settlement in the
     table was newer than the window, and the funding comparison then had no column
     to make.
+
+    The bound is the window's **right edge**, not its last bar's open.
+    ``funding_coverage_gaps`` counts settlements strictly below ``window_end``,
+    which is the last bar's open plus one interval, and Binance stamps them up to
+    47 ms *past* the boundary -- so bounding at the open asks about a different
+    set of settlements than the guard will count.
     """
-    return _funded_since_ms(identity, start_ms, before_ms=end_ms)
+    edge = end_ms + timeframe_to_millis(identity.timeframe) - 1
+    return _funded_since_ms(identity, start_ms, before_ms=edge)
 
 
 def _compare_bars(
@@ -398,7 +405,20 @@ def main() -> int:
         failed = failed or bool(counts) or compared == 0
 
     print("\n[2] replaying the same range from storage")
-    replay_signals, replay_reasons = _replay(header, start_ms, end_ms)
+    try:
+        replay_signals, replay_reasons = _replay(header, start_ms, end_ms)
+    except FundingUnavailable as exc:
+        # The replay reaches back a full warmup -- ~23 days for `state_machine_v1`
+        # at 15m -- so it asks about far more funding than the live run ever did,
+        # and one missed settlement anywhere in that span refuses the frame. That
+        # is `required=True` doing its job for a crowding-reading strategy, and a
+        # gate whose whole design is to name what it could not compare must not
+        # die while naming it.
+        print(f"  NOT EXERCISED: the replay window has no usable funding.\n  {exc}")
+        exercised -= {"signals", "reasons"}
+        message, code = _verdict(failed, exercised)
+        print(f"\n{message}")
+        return code
     print(f"  replay: {len(replay_signals)} signals, {len(replay_reasons)} reason rows")
 
     print("\n[3] signals")
