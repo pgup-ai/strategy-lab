@@ -235,6 +235,23 @@ __SHELL_CSS__
   }
   h2 .pin { text-transform: none; letter-spacing: 0; color: var(--ink); }
   section.why { padding: 16px 20px 8px; }
+  #transitions { display: flex; flex-direction: column; gap: 2px; max-height: 320px;
+    overflow-y: auto; }
+  .shift { display: grid; grid-template-columns: 148px 1fr 110px; gap: 10px;
+    align-items: baseline; padding: 5px 8px; border-radius: 4px; cursor: pointer;
+    border: 1px solid transparent; font-size: 13px; }
+  .shift:hover { background: #232733; }
+  .shift.selected { border-color: #4a5163; background: #232733; }
+  .shift-when { color: var(--ink-dim); font-variant-numeric: tabular-nums; }
+  .shift-to { font-weight: 600; }
+  .shift-from { color: var(--ink-dim); }
+  .shift-dwell { color: var(--ink-dim); text-align: right;
+    font-variant-numeric: tabular-nums; }
+  /* A transition before the strategy's warmup is a state the machine walked
+     through but never acted on -- dimmed rather than hidden, because it is real
+     and a reader must not mistake it for a decision. */
+  .shift.warmup .shift-to { font-weight: 400; opacity: 0.55; }
+  .shift.warmup .shift-when, .shift.warmup .shift-dwell { opacity: 0.55; }
   .why-chips { display: flex; gap: 8px; flex-wrap: wrap; }
   .why-chips .chip { min-width: 84px; }
   .why-chips .chip.state { border-color: #4a5163; background: #232733; }
@@ -360,6 +377,11 @@ __SHELL_CSS__
   <h2>Why this bar <span class="pin" id="why-bar"></span></h2>
   <div class="why-chips" id="why-chips"></div>
   <p class="note" id="why-note"></p>
+</section>
+<section class="why instrument-only" id="transitions-section" hidden>
+  <h2>State changes <span class="pin" id="transitions-count"></span></h2>
+  <div id="transitions"></div>
+  <p class="note" id="transitions-note"></p>
 </section>
 <footer>
   strategy-lab research browser · a live view, recomputed per request · the
@@ -665,6 +687,18 @@ __SHELL_CSS__
     }
 
     renderProvenance(payload.provenance);
+    view.shifts = null;
+    if (payload.why) {
+      view.shifts = shiftsFrom(payload.why.states, payload.bars);
+      // The dwell of the first change is measured from bar 0, which is the
+      // opening state rather than a state something moved into.
+      var previous = 0;
+      view.shifts.forEach(function (shift) {
+        shift.previousIndex = previous;
+        previous = shift.index;
+      });
+    }
+    renderShifts();
     view.pinned = null;
     renderBar(payload.bars.length - 1);
     document.title = payload.provenance.identity.symbol + ' · ' +
@@ -833,6 +867,103 @@ __SHELL_CSS__
         'has nothing further to show about why.';
   }
 
+  // ------------------------------------------------------- the state sequence
+
+  // Derived here from `why.states` rather than returned by the API, and that is
+  // the point: a transition is a `!==` over a series the payload already
+  // carries, so it cannot disagree with the per-bar state the chip shows or
+  // with the board tile. A second server-side derivation would be M36's third
+  // answer, free to drift from the two that already agree.
+  function shiftsFrom(states, bars) {
+    var out = [];
+    for (var i = 1; i < states.length; i += 1) {
+      if (states[i] === states[i - 1]) continue;
+      out.push({ index: i, from: states[i - 1], to: states[i], time: bars[i].time });
+    }
+    return out;
+  }
+
+  function dwellText(bars, fromIndex, toIndex) {
+    var count = toIndex - fromIndex;
+    var seconds = bars[toIndex].time - bars[fromIndex].time;
+    var hours = seconds / 3600;
+    var span = hours < 48 ? fmt(hours, 1) + 'h' : fmt(hours / 24, 1) + 'd';
+    return count + (count === 1 ? ' bar · ' : ' bars · ') + span;
+  }
+
+  function renderShifts() {
+    var section = el('transitions-section');
+    var host = el('transitions');
+    host.replaceChildren();
+    if (!view.shifts) {
+      section.hidden = true;
+      return;
+    }
+    section.hidden = false;
+
+    var warmup = view.payload.provenance.warmup_bars;
+    // Newest first: this is a monitor, and the question it answers most often is
+    // "what is it doing now", not "what did it do first".
+    view.shifts.slice().reverse().forEach(function (shift) {
+      var row = document.createElement('div');
+      row.className = 'shift' + (warmup !== null && shift.index < warmup ? ' warmup' : '');
+      row.dataset.index = shift.index;
+
+      var when = document.createElement('span');
+      when.className = 'shift-when';
+      when.textContent = new Date(shift.time * 1000).toISOString()
+        .slice(0, 16).replace('T', ' ');
+      var what = document.createElement('span');
+      var from = document.createElement('span');
+      from.className = 'shift-from';
+      from.textContent = shift.from + ' \u2192 ';
+      var to = document.createElement('span');
+      to.className = 'shift-to';
+      to.textContent = shift.to;
+      what.appendChild(from);
+      what.appendChild(to);
+      var dwell = document.createElement('span');
+      dwell.className = 'shift-dwell';
+      dwell.textContent = dwellText(view.bars, shift.previousIndex, shift.index);
+
+      row.appendChild(when);
+      row.appendChild(what);
+      row.appendChild(dwell);
+      row.addEventListener('click', function () { pinBar(shift.index); });
+      host.appendChild(row);
+    });
+
+    var inWarmup = view.shifts.filter(function (s) {
+      return warmup !== null && s.index < warmup;
+    }).length;
+    el('transitions-count').textContent = view.shifts.length +
+      (view.shifts.length === 1 ? ' change' : ' changes') + ' · newest first';
+    el('transitions-note').textContent = inWarmup
+      ? inWarmup + ' of these fall inside the ' + warmup + '-bar warmup and are dimmed: ' +
+        'the machine walked through them, but the strategy was not acting yet, so they ' +
+        'are not decisions.'
+      : 'Dwell is how long the previous state held. Click a row to pin that bar.';
+  }
+
+  function pinBar(i) {
+    view.pinned = i;
+    renderBar(i);
+    markSelectedShift(i);
+    var range = priceChart.timeScale().getVisibleLogicalRange();
+    // Only recentre when the bar is off screen: a click on a visible row should
+    // not yank the chart out from under someone comparing two of them.
+    if (range && (i < range.from || i > range.to)) {
+      var half = Math.max(20, (range.to - range.from) / 2);
+      priceChart.timeScale().setVisibleLogicalRange({ from: i - half, to: i + half });
+    }
+  }
+
+  function markSelectedShift(i) {
+    Array.prototype.forEach.call(el('transitions').children, function (row) {
+      row.classList.toggle('selected', Number(row.dataset.index) === i);
+    });
+  }
+
   priceChart.subscribeCrosshairMove(function (param) {
     if (view.pinned !== null) return;
     var i = param.time !== undefined ? view.index[param.time] : undefined;
@@ -843,6 +974,7 @@ __SHELL_CSS__
     if (i === undefined) return;
     view.pinned = view.pinned === i ? null : i;
     renderBar(i);
+    markSelectedShift(view.pinned === null ? -1 : i);
   });
 
   // ----------------------------------------------------------------- the board

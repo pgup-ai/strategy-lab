@@ -57,6 +57,10 @@ def page() -> str:
     return render_browser_html()
 
 
+def _style(page: str) -> str:
+    return page[page.index("<style>") : page.index("</style>")]
+
+
 def _script(page: str) -> str:
     """The page's own script, without the 191 KB of vendored chart under it."""
     return page[page.rindex("<script>") :]
@@ -815,3 +819,50 @@ def test_refresh_all_is_refused_while_the_board_is_still_arriving(page):
     assert done.index("if (token !== boardPending) return;") < done.index("disabled = false;")
     caught = board[board.index("}).catch("):]
     assert "disabled = false;" not in caught, "a truncated board must stay unrefreshable"
+
+
+def test_the_state_sequence_is_derived_from_the_series_the_page_already_has(page):
+    """A transition is a `!==` over `why.states`, computed in the page.
+
+    Deriving it server-side would be M36's third answer: the board tile, the
+    per-bar chip and the transition list would each have their own route to the
+    same fact, free to drift. Here there is one series and two renderings of it.
+    """
+    script = _script(page)
+
+    assert "function shiftsFrom(states, bars)" in script
+    assert "if (states[i] === states[i - 1]) continue;" in script
+    assert "shiftsFrom(payload.why.states, payload.bars)" in script
+
+
+def test_a_strategy_with_no_state_machine_shows_no_sequence(page):
+    """Eight of nine registered strategies compute no feature frame, so there is
+    no state to sequence — an empty list would claim there were no changes."""
+    script = _script(page)
+
+    assert "view.shifts = null;" in script
+    assert "if (payload.why) {" in script
+    after = script[script.index("function renderShifts()"):]
+    assert "if (!view.shifts) {" in after[: after.index("function pinBar")]
+    assert "section.hidden = true;" in after[: after.index("function pinBar")]
+
+
+def test_a_transition_inside_warmup_is_marked_rather_than_hidden(page):
+    """Measured on BTC/USDT perp 4h over 2023-01-01 → 2024-06-01: 8 of 50
+    changes fall inside `state_machine_v1`'s 2,192-bar warmup. The machine really
+    walked through them, so hiding them would misreport the sequence — but the
+    strategy was not acting yet, so showing them plain would read as decisions.
+    """
+    script = _script(page)
+
+    assert "shift.index < warmup ? ' warmup' : ''" in script
+    assert "are not decisions." in script
+    assert ".shift.warmup .shift-to" in _style(page)
+
+
+def test_clicking_a_transition_recentres_only_when_the_bar_is_off_screen(page):
+    """Otherwise comparing two rows yanks the chart on every click."""
+    script = _script(page)
+
+    assert "function pinBar(i)" in script
+    assert "if (range && (i < range.from || i > range.to))" in script

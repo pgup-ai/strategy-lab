@@ -5,13 +5,14 @@ Local Python research repo for crypto and stock strategy backtesting.
 The current stack is intentionally small:
 
 - Postgres 16 in Docker for reproducible OHLCV storage, plus an append-only
-  `runs`/`signals` store for replay and (later) live signal history
+  `runs`/`signals` store for replay and live signal history
 - `ccxt` for crypto candles
 - `yfinance` for stock candles
 - `pandas` and `numpy` for strategy research
 - `vectorbt` for fast signal-based backtests and plots
 - a small event-driven engine (`core/`, `feeds/`, `engine/`) so the same
-  strategy code can run in backtest, replay, and (later) live
+  strategy code runs in backtest, in replay, and against the live venue —
+  see [Paper Trading Against The Live Venue](#paper-trading-against-the-live-venue)
 
 ## Layout
 
@@ -341,7 +342,27 @@ strategy-lab replay \
 Run 99fe4a0f-9086-4047-ab0e-75fc5d84027d: emitted 916 signals, wrote 916.
 ```
 
-### Paper trading against the live venue
+Every invocation mints a fresh `run_id`, so replaying the same range twice
+stores two independent runs rather than zero rows the second time — that is
+the append-only audit trail working as intended, not a bug. Some
+strategy/window combinations legitimately emit nothing: `turnaround_v2`, the
+CLI default, fires only 126 times across the *entire* 83,348-bar stored
+BTC/USDT 15m history, so a quiet run by itself is not a sign anything is
+broken.
+
+Replay is O(n²) by construction: every bar re-evaluates the strategy over the
+whole buffer seen so far, not just the new bar. On that same 83,348-bar
+series, `turnaround_v2` produces the same 126 signals from both paths, but
+`backtest` takes 0.39 s and `replay` takes roughly 43 minutes to do it
+bar-by-bar. Use `--limit-bars` for anything beyond a few thousand bars, and
+keep using the vectorized `backtest` command — not `replay` — for
+whole-history research; `replay` exists to prove the live path matches
+backtest, not to replace it for day-to-day iteration.
+
+See [the Phase 1a design doc](docs/design/2026-08-02-realtime-trading-framework.md)
+for the full rationale.
+
+## Paper Trading Against The Live Venue
 
 `replay` drives the event engine from stored candles. `paper` drives the same
 runner from `LiveFeed`, which polls the venue, and hands what it decides to
@@ -389,26 +410,6 @@ none.
 what the venue serves for the same range *later*, and a process that stored its
 own bars as the record would be compared against itself. Fetch the range
 afterwards and replay it; `scripts/r10h/delayed_oracle.py` does the comparison.
-
-Every invocation mints a fresh `run_id`, so replaying the same range twice
-stores two independent runs rather than zero rows the second time — that is
-the append-only audit trail working as intended, not a bug. Some
-strategy/window combinations legitimately emit nothing: `turnaround_v2`, the
-CLI default, fires only 126 times across the *entire* 83,348-bar stored
-BTC/USDT 15m history, so a quiet run by itself is not a sign anything is
-broken.
-
-Replay is O(n²) by construction: every bar re-evaluates the strategy over the
-whole buffer seen so far, not just the new bar. On that same 83,348-bar
-series, `turnaround_v2` produces the same 126 signals from both paths, but
-`backtest` takes 0.39 s and `replay` takes roughly 43 minutes to do it
-bar-by-bar. Use `--limit-bars` for anything beyond a few thousand bars, and
-keep using the vectorized `backtest` command — not `replay` — for
-whole-history research; `replay` exists to prove the live path matches
-backtest, not to replace it for day-to-day iteration.
-
-See [the Phase 1a design doc](docs/design/2026-08-02-realtime-trading-framework.md)
-for the full rationale.
 
 ## Multi-Asset
 
@@ -587,6 +588,15 @@ candlesticks and arrows at every **fill** (not every signal — `from_signals`
 ignores a repeated same-direction entry, so signals would mark bars no backtest
 traded), and a `TargetExposure` strategy gets a baseline pane carrying the signed
 −1…+1 target, which no arrow can express.
+
+**The state sequence is below the chart** — every change the machine made, newest
+first, with how long the previous state held and the bar it changed on. Click a
+row to pin that bar and see what the strategy did there. Only
+`state_machine_v1`/`v2` have a state at all; the other strategies compute no
+feature frame and the section stays hidden rather than claiming there were no
+changes. Transitions inside warmup are dimmed — measured on BTC/USDT perp 4h over
+2023-01-01 → 2024-06-01, 8 of 50 fall there: the machine walked through them, but
+the strategy was not acting yet, so they are not decisions.
 
 Hover or click any bar and the panel below shows the state and feature values
 behind it; a strategy with no feature frame says so rather than showing an empty
