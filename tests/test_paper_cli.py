@@ -253,10 +253,19 @@ def test_a_funding_reading_strategy_logs_the_rate_and_others_do_not(
     monkeypatch.setattr(cli, "get_strategy", lambda name: _EveryBar())
     _invoke("--strategy", "every_bar", "--bars-csv", str(ignores))
 
-    assert pd.read_csv(reads)["funding_rate"].notna().all(), (
+    funded, bare = pd.read_csv(reads), pd.read_csv(ignores)
+    # Both `notna().all()` and `isna().all()` are True on an empty Series, so
+    # without this the whole comparison passes by having nothing in it. The two
+    # runs share one scripted bar budget and the second gets what the first left,
+    # which today is a single bar -- thin enough that drift would make this
+    # vacuous rather than red.
+    assert not funded.empty and not bare.empty, (
+        f"nothing to compare: {len(funded)} funded rows, {len(bare)} unfunded"
+    )
+    assert funded["funding_rate"].notna().all(), (
         "a strategy that reads crowding was fed bars with no rate"
     )
-    assert pd.read_csv(ignores)["funding_rate"].isna().all(), (
+    assert bare["funding_rate"].isna().all(), (
         "a strategy that reads no funding was made to depend on it anyway"
     )
 
@@ -389,9 +398,9 @@ def test_a_venue_revision_is_reported(monkeypatch, wired, tmp_path):
 
     output = _invoke("--strategy", "every_bar")
 
-    assert "bars revised after the fact: 0." not in output, (
-        f"a re-delivered bar was not counted as a revision: {output}"
-    )
+    # The exact count, not "not zero": the venue corrects one bar, so anything
+    # else means the tally is counting something other than what it claims.
+    assert "bars revised after the fact: 1." in output, output
 
 
 def test_an_unknown_exit_mode_is_refused_by_the_cli(monkeypatch, wired):
