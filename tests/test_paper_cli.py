@@ -392,3 +392,30 @@ def test_a_venue_revision_is_reported(monkeypatch, wired, tmp_path):
     assert "bars revised after the fact: 0." not in output, (
         f"a re-delivered bar was not counted as a revision: {output}"
     )
+
+
+def test_an_unknown_exit_mode_is_refused_by_the_cli(monkeypatch, wired):
+    """`backtest` already types this as `ExitMode`. Left as a free string, an
+    invalid value reached `StrategyRunner` and surfaced as a traceback after the
+    funding fetch and a full backfill had already run."""
+    monkeypatch.setattr(cli, "get_strategy", lambda name: _EveryBar())
+
+    result = runner.invoke(
+        cli.app,
+        ["paper", "--timeframe", TIMEFRAME, "--for-minutes", "0.01", "--exit-mode", "nonsense"],
+    )
+
+    assert result.exit_code != 0
+    assert "not one of" in result.output, result.output
+    assert not wired["runs"], "a rejected run still minted a header"
+
+
+def test_a_valid_exit_mode_reaches_the_header(monkeypatch, wired):
+    """The header is the only record of how a paper run was configured — its
+    window is gone and it cannot be re-run. `ExitMode` is a `str` subclass, so it
+    lands as its value with no conversion."""
+    monkeypatch.setattr(cli, "get_strategy", lambda name: _EveryBar())
+
+    _invoke("--strategy", "every_bar", "--exit-mode", "opposite_signal_only")
+
+    assert wired["runs"][0]["config"]["exit_mode"] == "opposite_signal_only"

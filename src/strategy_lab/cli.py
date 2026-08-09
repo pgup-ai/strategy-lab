@@ -959,8 +959,8 @@ def paper_command(
     symbol: str = typer.Option("BTC/USDT", help="Symbol to trade on paper."),
     timeframe: str = typer.Option("15m", help="Candle timeframe."),
     strategy_name: str = typer.Option("donchian", "--strategy", help="Strategy name."),
-    exit_mode: str | None = typer.Option(
-        None, help="Engine exit mode; the strategy's own if unset."
+    exit_mode: ExitMode | None = typer.Option(
+        None, help="Engine exit mode; the strategy's own exits if unset."
     ),
     for_minutes: float = typer.Option(60.0, help="Wall-clock minutes to run for."),
     cash: float = typer.Option(10_000.0, help="Starting cash for the paper book."),
