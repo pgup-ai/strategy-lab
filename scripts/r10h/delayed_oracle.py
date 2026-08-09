@@ -90,6 +90,10 @@ OHLCV = ("open", "high", "low", "close", "volume")
 # instrument here, and far above either representation's error.
 PRICE_TOLERANCE = 1e-9
 
+# Feature values round-trip through NUMERIC(38,18); the tolerance is far below
+# any feature's own resolution and far above that round-trip's error.
+FEATURE_TOLERANCE = 1e-9
+
 ALL_SECTIONS = frozenset({"bars", "signals", "reasons"})
 
 
@@ -254,8 +258,19 @@ def _compare_reasons(live, replayed) -> tuple[int, dict[str, int]]:
             counts["state"] += 1
         mine, theirs = reason.features or {}, other.features or {}
         for name in sorted(set(mine) | set(theirs)):
-            a, b = mine.get(name), theirs.get(name)
-            if a is None or b is None or abs(float(a) - float(b)) > 1e-9:
+            # Membership, not `.get`: a name carried by only one side is a real
+            # difference, and `.get` would return `None` for it -- the same
+            # `None` a measured-but-absent value has. Storage refuses NaN and
+            # requires the caller to have mapped it to `None`, so `None` is the
+            # spelling of "unmeasurable here" and `None` on both sides is
+            # agreement, not a mismatch.
+            if name not in mine or name not in theirs:
+                counts[name] += 1
+                continue
+            a, b = mine[name], theirs[name]
+            if a is None and b is None:
+                continue
+            if a is None or b is None or abs(float(a) - float(b)) > FEATURE_TOLERANCE:
                 counts[name] += 1
     return compared, dict(counts)
 

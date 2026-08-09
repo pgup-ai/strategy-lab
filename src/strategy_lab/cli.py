@@ -1084,7 +1084,7 @@ def paper_command(
     if persist:
         run_id = _create_run(
             run_id=uuid.uuid4(),
-        mode=Mode.PAPER,
+            mode=Mode.PAPER,
             strategy_id=strategy.name,
             strategy_version=strategy.version,
             config={
