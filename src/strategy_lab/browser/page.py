@@ -540,8 +540,10 @@ __SHELL_CSS__
   </div>
 </div>
 <p class="legend-strip instrument-only" id="chart-legend">
-  <span class="analysis-only"><b class="mk up">&uarr;</b> bought &mdash; opening a long or closing a short</span>
-  <span class="analysis-only"><b class="mk down">&darr;</b> sold &mdash; opening a short or closing a long</span>
+  <span class="analysis-only"><b class="mk up">&uarr;</b>
+    bought &mdash; opening a long or closing a short</span>
+  <span class="analysis-only"><b class="mk down">&darr;</b>
+    sold &mdash; opening a short or closing a long</span>
   <span id="state-legend" hidden>state ribbon: <span id="state-swatches"></span>
     <span class="swatch" id="warmup-swatch"><i class="hollow"></i>before warmup</span></span>
 </p>
@@ -2300,7 +2302,14 @@ __SHELL_CSS__
             ' bars before its first state and this set has ' +
             depth.toLocaleString()
           : 'switch to ' + timeframe;
-      button.addEventListener('click', function () { switchTimeframe(timeframe, stored); });
+      button.setAttribute('aria-disabled', String(Boolean(shallow)));
+      button.addEventListener('click', function () {
+        // Inert rather than `disabled`: a disabled button fires no mouse events
+        // in any browser, so the `title` explaining *why* the rung is out never
+        // appears — and that explanation is the whole reason it is drawn at all.
+        if (shallow) { setStatus(button.title); return; }
+        switchTimeframe(timeframe, stored);
+      });
       host.appendChild(button);
     });
   }

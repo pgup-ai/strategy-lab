@@ -600,6 +600,17 @@ from a page you refreshed, and only the second is honest about when it last did.
 
 ### The state view: regime only
 
+**How to run it:**
+
+```bash
+strategy-lab browse --port 8760
+```
+
+Then at `http://127.0.0.1:8760` set **View** to `state`. Pick a candle set —
+`BTC/USDT · 4h · binance/spot` is the one the machine was measured on — and the
+chart, the ribbon, the shading and the five features are all there. Nothing else
+to start: the same server serves the board, the instrument view and this one.
+
 The **`state`** rung of the view selector drops everything about trading and
 keeps the regime: candles, volume, the state ribbon, and the five features
 behind it — `direction`, `strength`, `stability`, `crowding`, `energy` — with the

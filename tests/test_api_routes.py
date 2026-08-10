@@ -479,6 +479,28 @@ def test_no_handler_blocks_the_event_loop():
     assert offenders == [], f"async handlers run on the event loop: {offenders}"
 
 
+def test_every_endpoint_that_slices_a_frame_reads_a_bound_the_same_way():
+    """The bound below is only useful if it is the *same* bound everywhere.
+
+    `/api/state` shipped with bare `start`/`end` strings and none of the
+    validation beside them, so the page sent one `<input type="date">` value to
+    both endpoints and got two different frames — the state view ending the
+    evening before the instrument view, on a path whose entire claim is that it
+    cannot disagree with `build_analysis`. Asserted against the base rather than
+    against a list of models, so a fourth endpoint inherits or is caught here.
+    """
+    from strategy_lab.api.models import AnalysisQuery, BoundedQuery, StateQuery
+
+    identity = dict(exchange="binance", market_type="perp", symbol="BTC/USDT",
+                    timeframe="4h", strategy="state_machine_v1")
+    analysis = AnalysisQuery(**identity, end="2023-10-31", start="2023-01-01")
+    state = StateQuery(**identity, end="2023-10-31", start="2023-01-01")
+
+    assert (state.start, state.end) == (analysis.start, analysis.end)
+    assert state.end == "2023-10-31 23:59:59"
+    assert issubclass(StateQuery, BoundedQuery) and issubclass(AnalysisQuery, BoundedQuery)
+
+
 def test_a_date_only_end_covers_the_whole_day_it_names(client):
     """``<input type="date">`` sends ``YYYY-MM-DD`` and storage filters ``<=``.
 

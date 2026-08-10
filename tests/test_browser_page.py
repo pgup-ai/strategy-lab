@@ -1147,6 +1147,22 @@ def test_a_rung_too_shallow_for_its_strategy_says_so_instead_of_refusing(page):
     assert "'absent'" in ladder
 
 
+def test_a_shallow_rung_does_not_navigate_into_the_refusal_it_replaces(page):
+    """Striking the rung through was only half of it. The click handler still
+    switched the dataset, so a struck-through rung landed on the 409 it exists to
+    save you from — and left the previous chart up under an error banner.
+
+    Inert rather than `disabled`, because a disabled button fires no mouse events
+    and the `title` naming the shortfall is the reason the rung is drawn at all.
+    """
+    ladder = _within(_script(page), "function renderLadder()")
+
+    assert "if (shallow) { setStatus(button.title); return; }" in ladder
+    assert "aria-disabled" in ladder
+    # And the guard must sit before the navigation, not after it.
+    assert ladder.index("if (shallow)") < ladder.index("switchTimeframe(timeframe, stored)")
+
+
 def test_the_state_view_asks_for_no_parameter_that_implies_execution(page):
     """A cost model on a path that opened no book would describe one that never
     ran, and `/api/state` refuses unknown parameters by name — so an exit mode
