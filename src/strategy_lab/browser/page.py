@@ -399,6 +399,7 @@ __SHELL_CSS__
   /* An open trade's PnL is a mark against the last close, not money -- it must
      not read like the closed rows it sits beside. */
   #trades tr.open td { opacity: 0.6; font-style: italic; }
+  .toggle.on { border-color: var(--accent); color: var(--ink); }
   .live { display: inline-flex; align-items: center; gap: 6px; }
   .live-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--ink-dim); }
   .live.on .live-dot { background: var(--up); }
@@ -515,6 +516,10 @@ __SHELL_CSS__
   <div class="chart-bar">
     <span id="ladder" class="ladder" role="group" aria-label="Candle timeframe"></span>
     <span class="chart-bar-right">
+      <button id="shade" type="button" class="toggle on"
+              title="Paint the machine's state behind the candles">
+        shade
+      </button>
       <button id="live" type="button" class="live off" hidden
               title="Draw the venue's forming candle, and recompute when it closes">
         <span class="live-dot"></span><span id="live-text">live</span>
@@ -597,6 +602,21 @@ __SHELL_CSS__
   };
 
   var priceChart = LWC.createChart(el('price-pane'), theme);
+
+  // **Added before the candles, because that is the only z-order control there
+  // is.** Series within a pane draw in the order they were added, so this one
+  // is behind price and volume; added after, it paints over the candles and the
+  // chart becomes unreadable rather than tinted.
+  //
+  // A full-height histogram on its own overlay scale, which is how a
+  // "background colour per bar" is expressed here -- Lightweight Charts has no
+  // per-bar background API. `scaleMargins` of 0/0 makes each bar span the pane.
+  var regionSeries = priceChart.addSeries(LWC.HistogramSeries, {
+    priceScaleId: 'state-shade', lastValueVisible: false, priceLineVisible: false,
+    priceFormat: { type: 'volume' }
+  });
+  regionSeries.priceScale().applyOptions({ scaleMargins: { top: 0, bottom: 0 } });
+
   var candleSeries = priceChart.addSeries(LWC.CandlestickSeries, {
     upColor: COLORS.up, downColor: COLORS.down, borderVisible: false,
     wickUpColor: COLORS.up, wickDownColor: COLORS.down
@@ -763,6 +783,8 @@ __SHELL_CSS__
   var streams = {};
   // How many bars each stored set holds, for the ladder's reach check.
   var depths = {};
+  // Whether the state is painted behind price as well as under it.
+  var shading = { on: true };
 
   function fillDatasets(rows) {
     var deepest = null;
@@ -843,10 +865,20 @@ __SHELL_CSS__
     }));
   }
 
+  // A state colour at the opacity a *background* can carry. The ribbon uses the
+  // colour itself; behind candles the same value drowns them, and the wick of a
+  // down bar against solid `exhaustion` red is the case that decides it.
+  function shade(hex) {
+    var n = parseInt(hex.slice(1), 16);
+    return 'rgba(' + ((n >> 16) & 255) + ',' + ((n >> 8) & 255) + ',' + (n & 255) +
+      ',0.17)';
+  }
+
   function drawStateRibbon(payload) {
     var states = payload.why ? payload.why.states : null;
     if (!states) {
       stateSeries.setData([]);
+      regionSeries.setData([]);
       el('state-legend').hidden = true;
       // With it: an explanation of a state left over from the last strategy,
       // sitting under a chart that has no states at all.
@@ -869,6 +901,13 @@ __SHELL_CSS__
       // `warmup + i`, because the slice re-based the index and `states` did not.
       return { time: bar.time, value: 1, color: CFG.stateColors[states[warmup + i]] };
     }));
+    // The same reading behind the candles, so a regime is legible without
+    // looking away from price. Same slice and same index rule as the ribbon --
+    // shading warmup would put the compression grey over the very bars the
+    // ribbon refuses to draw, which is the lie coming back through the window.
+    regionSeries.setData(shading.on ? payload.bars.slice(warmup).map(function (bar, i) {
+      return { time: bar.time, value: 1, color: shade(CFG.stateColors[states[warmup + i]]) };
+    }) : []);
     el('state-legend').hidden = false;
   }
 
@@ -1430,6 +1469,15 @@ __SHELL_CSS__
       if (live.socket) setLive('on', 'live');
     });
   }
+
+  el('shade').addEventListener('click', function () {
+    shading.on = !shading.on;
+    el('shade').classList.toggle('on', shading.on);
+    // No refetch: the states are already in the payload this chart was drawn
+    // from, and asking the server again would be a second answer to a question
+    // that has not changed.
+    if (view.payload) drawStateRibbon(view.payload);
+  });
 
   el('live').addEventListener('click', function () {
     live.on = !live.on;

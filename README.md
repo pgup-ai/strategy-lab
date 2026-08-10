@@ -646,6 +646,21 @@ The equity gaps are Yahoo's own limits, named in its errors, and no amount of
 fetching moves them. The weekly gap is arithmetic: 2,192 weeks is longer than
 most instruments have existed.
 
+#### The state is also the chart's background
+
+`shade` (on by default, beside the live pill) paints the same reading **behind
+the candles** at 17% opacity, so a regime is legible without looking away from
+price — grey compression, amber breakout, teal confirmed, green riding, red
+exhaustion, violet reset. It is a full-height histogram on its own overlay
+scale, because Lightweight Charts has no per-bar background API, and it is
+**added before the candlestick series**: series draw in the order they were
+added, and that is the only z-order control there is. Added after, it paints
+over the candles instead of behind them.
+
+It uses the same slice as the ribbon, so warmup is unshaded too — the boundary
+is visible as the point where the chart starts having colour at all. Toggling it
+redraws from the payload already in hand; it never refetches.
+
 #### The ribbon starts at warmup, and that is not a cosmetic choice
 
 The machine answers on **every** bar. Inside warmup its inputs are `NaN`, which

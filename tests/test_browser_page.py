@@ -1053,6 +1053,47 @@ def test_the_ribbon_starts_at_warmup_rather_than_at_bar_zero(page):
     assert "before warmup" in page
 
 
+def test_the_state_is_painted_behind_price_and_only_where_it_is_measured(page):
+    """The regime as a background tint, which is the reading a lifecycle chart
+    is actually for — and the same slice as the ribbon, or the compression grey
+    would come back over exactly the bars the ribbon refuses to draw.
+    """
+    script = _script(page)
+    draw = _within(script, "function drawStateRibbon(payload)")
+
+    assert "regionSeries.setData(shading.on ? payload.bars.slice(warmup)" in draw
+    assert "shade(CFG.stateColors[states[warmup + i]])" in draw
+    # Nothing to colour clears it, rather than leaving the last strategy's bands
+    # behind a chart that has no states at all.
+    assert "regionSeries.setData([]);" in draw
+
+
+def test_the_shading_is_added_before_the_candles_because_that_is_the_z_order(page):
+    """Series within a pane draw in the order they were added, and Lightweight
+    Charts offers no other control. Added after, a full-height histogram paints
+    over the candles and the chart is unreadable rather than tinted."""
+    script = _script(page)
+
+    assert script.index("var regionSeries = priceChart.addSeries(") < script.index(
+        "var candleSeries = priceChart.addSeries("
+    ), "the shading would be drawn on top of the candles"
+    # Its own overlay scale spanning the pane: this is what "background colour
+    # per bar" means here, since there is no such API.
+    region = _within(script, "var regionSeries = priceChart.addSeries(")
+    assert "priceScaleId: 'state-shade'" in region
+    assert "scaleMargins: { top: 0, bottom: 0 }" in script
+
+
+def test_toggling_the_shading_redraws_rather_than_refetches(page):
+    """The states are already in the payload the chart was drawn from. Asking the
+    server again would be a second answer to a question that has not changed —
+    and on a cold 18,842-bar frame it is a 500 ms one."""
+    body = _within(_script(page), "el('shade').addEventListener('click', function ()")
+
+    assert "drawStateRibbon(view.payload)" in body
+    assert "getJSON" not in body
+
+
 def test_the_lifecycle_keeps_its_own_order_and_its_colours_come_from_python(page):
     """Alphabetical would describe a different thing from the one the machine
     walks: compression → breakout → confirmed → riding → exhaustion → reset."""
