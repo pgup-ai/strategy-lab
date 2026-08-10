@@ -659,11 +659,22 @@ most instruments have existed.
 
 #### `direction` has only been validated at 4h
 
-The feature that sets the sign is `tanh(((EMA24 − EMA96)/close) / ATR / √36)` —
-a **4-day against 16-day** lean at 4h. The spans are counted in bars, so the same
-feature is a 1-day/4-day lean at 1h and a 6-hour/24-hour lean at 15m, and
-measured on BTC/USDT spot against the `[t+1, t+1+h]` forward return those are not
-the same feature at all:
+The feature that sets the sign is
+
+```text
+tanh( ((EMA24 − EMA96) / close) / mean₂₄(true_range / close) / √36 )
+```
+
+— a **4-day against 16-day** lean at 4h. The divisor is a *fraction*, not an
+absolute ATR: `true_range_fraction` is the rolling mean of `true_range / close`,
+so both it and the numerator are dimensionless and the ratio reads "how many
+bars' worth of range separates the two EMAs". Dividing by an absolute ATR
+instead gives a materially different number that still looks plausible. `√36` is
+`√((96 − 24) / 2)`, the spread a driftless series shows on its own.
+
+The spans are counted in **bars**, so the same feature is a 1-day/4-day lean at
+1h and a 6-hour/24-hour lean at 15m — and measured on BTC/USDT spot against the
+`[t+1, t+1+h]` forward return, those are not the same feature at all:
 
 | timeframe | lookback | IC@30 (halves) | IC@90 (halves) |
 |---|---|---|---|
