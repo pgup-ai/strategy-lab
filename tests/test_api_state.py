@@ -15,6 +15,8 @@ with the chart it links to.
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import pytest
 
 from strategy_lab.api.analysis import build_analysis, registered_strategies
@@ -27,6 +29,9 @@ _SPOT = MarketDataIdentity(
 )
 _MACHINE = "state_machine_v1"
 _WARMUP = 2192
+
+# `board_window`'s answer off-perp: no bounds, and no funding question asked.
+_WHOLE = SimpleNamespace(start=None, end=None)
 
 
 @pytest.fixture
@@ -90,6 +95,55 @@ def test_warmup_rows_are_null_features_rather_than_zeros(deep_frame):
     assert any(value is not None for value in direction[_WARMUP:]), (
         "nothing was measurable after warmup, so the null check above proves nothing"
     )
+
+
+@pytest.mark.db
+def test_a_perp_is_bounded_by_its_own_funding_before_being_asked_for(monkeypatch):
+    """**The bug this test exists for**, on the dataset it broke.
+
+    BTC/USDT perp 4h candles begin 2019-09-08 16:00 and the venue's first
+    settlement lands 2019-09-10 08:00 — the documented ~40h leading gap, which is
+    a fact about the venue rather than something to fetch. Asked unbounded, a
+    crowding-reading machine is refused over that head, and the state view had no
+    tile to hand it funded edges the way the instrument view does. So its default
+    view of the flagship perp was a 409.
+
+    Bounded by ``board_window`` — the board's own function, not a second rule —
+    so the frame starts at the first settlement instead.
+    """
+    from strategy_lab.api.board import board_window
+    from strategy_lab.market_data.base import MarketDataIdentity
+
+    identity = MarketDataIdentity(
+        exchange="binance", market_type="perp", symbol="BTC/USDT", timeframe="4h"
+    )
+    window = board_window(identity)
+    if window.start is None:
+        pytest.skip("no stored funding for BTC/USDT perp; nothing to bound by")
+
+    payload = build_state(identity, strategy_name=_MACHINE)
+
+    assert payload.provenance.first_bar >= window.start, (
+        "the frame reaches behind the first stored settlement, which is the "
+        "range the coverage guard refuses"
+    )
+    assert payload.provenance.crowding_measured is True
+
+
+def test_a_spot_frame_is_not_bounded_by_funding_it_does_not_have(deep_frame, monkeypatch):
+    """The other half of the dispatch. ``board_window`` returns the whole history
+    off-perp and never asks about funding — an instrument that settles nothing
+    must not have a window invented for it."""
+    seen = []
+    monkeypatch.setattr(
+        "strategy_lab.api.state.board_window",
+        lambda identity: (seen.append(identity.market_type) or _WHOLE),
+    )
+
+    payload = build_state(_SPOT, strategy_name=_MACHINE)
+
+    assert seen == ["spot"]
+    assert payload.provenance.bar_count == len(deep_frame)
 
 
 def test_a_strategy_with_no_state_is_refused_by_name(deep_frame):

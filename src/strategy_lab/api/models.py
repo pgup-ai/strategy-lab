@@ -312,6 +312,16 @@ class StateQuery(BoundedQuery):
     strategy: Annotated[str, Field(min_length=1, max_length=64)]
     funding: bool = True
 
+    @field_validator("strategy")
+    @classmethod
+    def _registered(cls, value: str) -> str:
+        # The same check `AnalysisQuery` makes, so one typo does not get a 422
+        # from one endpoint and a 400 from the other. Whether the strategy has a
+        # *state* is `build_state`'s to answer -- that is a 409 with a reason,
+        # not a malformed query.
+        resolve_strategy(value)
+        return value
+
 
 class StrategyModel(_Strict):
     name: str

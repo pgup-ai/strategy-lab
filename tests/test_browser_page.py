@@ -1142,6 +1142,11 @@ def test_a_rung_too_shallow_for_its_strategy_says_so_instead_of_refusing(page):
 
     assert "depth <= warmup" in ladder
     assert "'shallow'" in ladder
+    # `current` and `shallow` compose rather than exclude: the selected rung can
+    # also be the one that cannot answer — picked from the dropdown it drew plain
+    # while the page showed a 409, the one rung the strike-through never reached.
+    assert "timeframe === current ? 'current' : ''," in ladder
+    assert ".filter(Boolean).join(' ')" in ladder
     # Distinct from `absent`, which is one click from being fixed.
     assert ".ladder button.shallow" in _style(page)
     assert "'absent'" in ladder

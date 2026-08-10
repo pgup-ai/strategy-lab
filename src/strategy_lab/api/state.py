@@ -44,6 +44,7 @@ from strategy_lab.api.analysis import (
     prepare_frame,
     resolve_strategy,
 )
+from strategy_lab.api.board import board_window
 from strategy_lab.market_data.base import MarketDataIdentity
 from strategy_lab.server import build_candles_payload
 
@@ -108,8 +109,22 @@ def build_state(
             f"show; pick a state machine"
         )
 
+    # A perp with no bounds asked of it is asked over its whole stored candle
+    # span, and a funding-reading machine is then refused wherever the stored
+    # settlements fall short of that -- measured on the flagship dataset, BTC/USDT
+    # perp 4h candles start 2019-09-08 16:00 against a first settlement at
+    # 2019-09-10 08:00, so the state view 409'd on its own default view of it.
+    # The instrument view never hit this because a tile hands it funded edges;
+    # nothing hands the state view anything. Bounded by ``board_window``, which
+    # is the board's own function rather than a second rule that could disagree
+    # with it: perp-only, from stored funding, and ``WHOLE_HISTORY`` elsewhere.
+    window = board_window(identity)
     prepared = prepare_frame(
-        identity, strategy=strategy, start=start, end=end, funding=funding
+        identity,
+        strategy=strategy,
+        start=start or window.start,
+        end=end or window.end,
+        funding=funding,
     )
     measurable = len(prepared.df) - warmup
     if measurable < 1:

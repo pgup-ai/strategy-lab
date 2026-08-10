@@ -124,8 +124,10 @@ def test_a_board_over_every_stored_perp_answers_one_row_per_dataset():
         assert row["closes"], "a row with no sparkline tail"
         assert row["provenance"]["crowding_measured"] is True
 
-    refused = [row for row in rows if row["unavailable"] is not None]
-    assert len(answered) + len(refused) == len(rows), "a row was neither"
+    # Not `answered + refused == len(rows)`: those two are a boolean partition of
+    # the same list, so that sum is an identity and passes over a duplicated or
+    # missing dataset. The set above ignores duplicates; this is what catches one.
+    assert len(rows) == len(expected), "the board returned a duplicate or dropped a dataset"
 
 
 def test_a_refused_row_carries_the_reason_and_nothing_else(monkeypatch):
@@ -153,15 +155,16 @@ def test_a_refused_row_carries_the_reason_and_nothing_else(monkeypatch):
 
     assert "the frame has 25" in row["unavailable"]
     assert row["provenance"] is None
-    assert (row["state"], row["features"], row["latest_fill"], row["closes"]) == (
-        None,
-        None,
-        None,
-        [],
-    )
-    # Both facts about the stored candles survive a refusal: neither describes a
-    # run that did not happen.
-    assert row["dataset_last_bar"] and row["last_written"]
+    # `as_of` belongs in here: it is the bar the *analysis* reached, so a stale
+    # one beside a refusal describes a run that did not happen.
+    assert (
+        row["as_of"], row["state"], row["features"], row["latest_fill"], row["closes"]
+    ) == (None, None, None, None, [])
+    # Both facts about the stored candles survive a refusal — compared against the
+    # stub's own timestamps rather than for truthiness, which any wrong value passes.
+    stamped = pd.Timestamp("2024-01-01", tz="UTC")
+    assert pd.Timestamp(row["dataset_last_bar"]) == stamped
+    assert pd.Timestamp(row["last_written"]) == stamped
 
 
 def test_funding_that_cannot_cover_the_candles_is_reported_in_the_row(monkeypatch):

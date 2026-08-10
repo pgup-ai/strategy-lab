@@ -479,6 +479,22 @@ def test_no_handler_blocks_the_event_loop():
     assert offenders == [], f"async handlers run on the event loop: {offenders}"
 
 
+def test_an_unknown_strategy_is_refused_the_same_way_by_both_endpoints(client):
+    """One typo, one status. `/api/state` validated only the string's length, so
+    an unknown name fell through to `resolve_strategy` inside `build_state` and
+    came back as a generic 400 where `/api/analysis` gives a 422 naming the
+    field — from a module whose stated contract is that it "refuses what it does
+    not recognise and names the field it refused"."""
+    identity = dict(exchange="binance", market_type="perp", symbol="BTC/USDT",
+                    timeframe="4h", strategy="no_such_strategy")
+
+    analysis = client.get("/api/analysis", params=identity)
+    state = client.get("/api/state", params=identity)
+
+    assert analysis.status_code == state.status_code == 422
+    assert "strategy" in state.text
+
+
 def test_every_endpoint_that_slices_a_frame_reads_a_bound_the_same_way():
     """The bound below is only useful if it is the *same* bound everywhere.
 

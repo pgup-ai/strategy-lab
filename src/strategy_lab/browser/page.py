@@ -2292,9 +2292,14 @@ __SHELL_CSS__
       var button = document.createElement('button');
       button.type = 'button';
       button.textContent = timeframe;
-      button.className = timeframe === current
-        ? 'current'
-        : (stored ? (shallow ? 'shallow' : '') : 'absent');
+      // Combined, not exclusive: the selected rung can also be the one that
+      // cannot answer -- pick a too-short set in the dropdown and the ladder
+      // drew it plain while the page showed a 409, which is the single rung the
+      // strike-through was never reaching.
+      button.className = [
+        timeframe === current ? 'current' : '',
+        stored ? (shallow ? 'shallow' : '') : 'absent'
+      ].filter(Boolean).join(' ');
       button.title = !stored
         ? timeframe + ' is not stored for this instrument yet — click to fetch it'
         : shallow
