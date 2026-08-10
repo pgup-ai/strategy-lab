@@ -277,7 +277,7 @@ def test_a_recorded_reason_matches_the_whole_history_why_layer():
     for bar in bars_from(df.iloc[strategy.warmup_bars :]):
         runner.on_bar(bar)
 
-    why = _why_layer(strategy, df)
+    why, _ = _why_layer(strategy, df)
     for offset, reason in enumerate(runner.reasons):
         row = strategy.warmup_bars + offset
         assert reason.state == why.states[row]

@@ -218,7 +218,7 @@ def test_every_provenance_field_survives_the_response_model(client):
 
 
 def test_the_continuous_contract_answers_with_a_target_and_no_markers(monkeypatch):
-    """Past the warmup, because ``state_machine_v2`` declares 2,192 bars.
+    """Past the warmup, because ``state_machine_v2`` declares 847 bars.
 
     This ran on the 600-bar fixture and passed, which it could only do while the
     browser returned the strategy's raw target. The engine refuses a frame
@@ -477,6 +477,44 @@ def test_no_handler_blocks_the_event_loop():
     assert blocking, "no routes found; the check would pass vacuously"
     offenders = [fn.__name__ for fn in blocking if inspect.iscoroutinefunction(fn)]
     assert offenders == [], f"async handlers run on the event loop: {offenders}"
+
+
+def test_an_unknown_strategy_is_refused_the_same_way_by_both_endpoints(client):
+    """One typo, one status. `/api/state` validated only the string's length, so
+    an unknown name fell through to `resolve_strategy` inside `build_state` and
+    came back as a generic 400 where `/api/analysis` gives a 422 naming the
+    field — from a module whose stated contract is that it "refuses what it does
+    not recognise and names the field it refused"."""
+    identity = dict(exchange="binance", market_type="perp", symbol="BTC/USDT",
+                    timeframe="4h", strategy="no_such_strategy")
+
+    analysis = client.get("/api/analysis", params=identity)
+    state = client.get("/api/state", params=identity)
+
+    assert analysis.status_code == state.status_code == 422
+    assert "strategy" in state.text
+
+
+def test_every_endpoint_that_slices_a_frame_reads_a_bound_the_same_way():
+    """The bound below is only useful if it is the *same* bound everywhere.
+
+    `/api/state` shipped with bare `start`/`end` strings and none of the
+    validation beside them, so the page sent one `<input type="date">` value to
+    both endpoints and got two different frames — the state view ending the
+    evening before the instrument view, on a path whose entire claim is that it
+    cannot disagree with `build_analysis`. Asserted against the base rather than
+    against a list of models, so a fourth endpoint inherits or is caught here.
+    """
+    from strategy_lab.api.models import AnalysisQuery, BoundedQuery, StateQuery
+
+    identity = dict(exchange="binance", market_type="perp", symbol="BTC/USDT",
+                    timeframe="4h", strategy="state_machine_v1")
+    analysis = AnalysisQuery(**identity, end="2023-10-31", start="2023-01-01")
+    state = StateQuery(**identity, end="2023-10-31", start="2023-01-01")
+
+    assert (state.start, state.end) == (analysis.start, analysis.end)
+    assert state.end == "2023-10-31 23:59:59"
+    assert issubclass(StateQuery, BoundedQuery) and issubclass(AnalysisQuery, BoundedQuery)
 
 
 def test_a_date_only_end_covers_the_whole_day_it_names(client):

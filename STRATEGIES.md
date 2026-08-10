@@ -253,6 +253,49 @@ entry state, which is the Turtle asymmetry paying off structurally.
 
 ---
 
+## R12 restated every Sharpe on this page, and nothing else
+
+`_EWM_WARMUP_MULTIPLE` went from 20× to 5× on 2026-08-10, taking `direction`'s
+warmup from 1,920 bars to 480 and both state machines' from **2,192 to 847**.
+
+The 20× bought *bit-exactness* — a cold start reproducing a whole-history run to
+the last bit — not information. A span-96 EMA puts half its weight on the last
+34 bars and 99% on the last 222; the bar 1,920 back carries **8.9e-20**, four
+orders of magnitude below float64 epsilon. Measured across BTC, ETH and SOL perp
+4h plus BTC spot 4h, **0 of 52,864 states differ** over the bars both settings
+can compute.
+
+So the trades did not move — and neither did anything derived from them:
+
+| | before | after |
+|---|---|---|
+| net return, max drawdown, trade count, cost-stress rows | | **all identical** |
+| `state_machine_v1` trained Sharpe | +0.896 | **+0.979** |
+| `state_machine_v1` default Sharpe | +0.746 | **+0.816** |
+| `state_machine_v2` default Sharpe | +0.913 | **+0.998** |
+
+Sharpe is the one statistic computed over the *whole* equity curve, and the
+curve is now 1,345 bars shorter. Those bars were masked warmup the strategy
+could not trade, and they were dragging the ratio down. Verified on the R5
+harness: **73 trades against 73**, net delta 2.1e-14, max-drawdown delta
+1.3e-13, and all three cost-stress rows equal to 12 significant figures.
+
+**What that means for reading this page:** a Sharpe here was never a property of
+the strategy alone — it depended on how much warmup happened to sit in front of
+it. Two figures were *not* re-run and still carry the old denominator:
+`state_machine_v2`'s trained cell (+0.842) and the sweep-derived Sharpes in R5's
+training surface. Treat those as the old convention until someone re-measures.
+
+**What was given up:** a cold start is no longer bit-exact. The residual is
+9.2e-06 relative on an adversarial synthetic frame and **5e-08 on real stored
+frames**, and it reaches no decision — 0 state differences over 164 cold-start
+probes across four instruments, pinned in
+`tests/test_state_features.py::test_a_cold_start_reproduces_the_same_states_on_a_real_frame`.
+The guarantee moved from *provable* to *measured*, which is a real reduction and
+is why it is written here rather than only in a commit message.
+
+`ema_cross` keeps its own `_EWM_WARMUP_MULTIPLE = 20` and none of its figures move.
+
 ## state_machine_v1
 
 The MDE R5 strategy. It runs the six-state lifecycle in `state/machine.py` over four R4
@@ -310,7 +353,7 @@ a rule on, but it is not what the gate passed on.
   range runs `crowding` at a neutral 0.5 and emits different signals from a backtest of
   the same range.** The figures below are the backtest's. Without the column the trained
   cell returns +16.44% at Sharpe +0.801 over the R5 test half against the published
-  +15.45% / +0.896, so the gap is not cosmetic.
+  +15.45% / +0.979, so the gap is not cosmetic.
   `tests/test_replay_determinism.py` passes for this strategy because its synthetic frames
   carry no funding on either side; that is a limit of the suite, not a contradiction.
   Every run records which it was, as `crowding_measured` in `config.json`'s
@@ -335,17 +378,20 @@ a rule on, but it is not what the gate passed on.
   Nothing in the R5 figures moves — this is how to read them, not a
   correction. `state_machine_v2` is the same policy without that truncation.
 - **Params**: `rank_window=480`, `machine=StateMachine(enter_strength=2/3,
-  exit_strength=1/3, min_dwell=4, cooldown=8, …)`, `warmup_bars=2192` — derived as
+  exit_strength=1/3, min_dwell=4, cooldown=8, …)`, `warmup_bars=847` — derived as
   `deepest_feature + 8 x machine.convergence_bars`, so it tracks the machine it holds.
-  The R5-trained cell runs `cooldown=4` and therefore warms **2,160** bars, not 2,192.
+  The R5-trained cell runs `cooldown=4` and therefore warms **815** bars, not 847.
   Cutting its window at the default's number starts it 32 bars early, and it stops
-  reproducing §9.2 — +15.75% / Sharpe +0.907 / 74 trades against the published
-  +15.45% / +0.896 / 73. Take the warmup off the strategy object, never off the family.
-- **`warmup_bars` is not the max over its features.** `direction` declares 1920, and at
-  exactly 1920 the cold-start replay in `tests/test_strategy_metadata.py` disagrees with
-  the whole-history run on 52–156 of 300 probed bars depending on seed, because the
-  machine is a recursion on top of the features and has its own cold start. 60 more bars
-  takes it to zero on every seed tried; the declared 240 is four times that.
+  reproducing §9.2 — measured pre-R12 and quoted as the matched pair it was:
+  +15.75% / Sharpe +0.907 / 74 trades against that run's +15.45% / +0.896 / 73.
+  Take the warmup off the strategy object, never off the family.
+- **`warmup_bars` is not the max over its features.** The machine is a recursion on
+  top of them and has its own cold start, so `deepest_feature` alone is not enough:
+  measured pre-R12, at exactly `direction`'s then-declared 1920 the cold-start replay
+  in `tests/test_strategy_metadata.py` disagreed with the whole-history run on 52–156
+  of 300 probed bars depending on seed, and 60 more bars took it to zero on every seed
+  tried. `direction` now declares **480** and the machine's share is unchanged, which
+  is why the derivation adds it rather than assuming the features cover it.
 - **Run** (the canonical R5 command — the `--start` is the first stored funding
   settlement, and a perp run refuses to start earlier because Binance settled nothing over
   the contract's first 40 hours):
@@ -360,7 +406,7 @@ a rule on, but it is not what the gate passed on.
   funding to `run_backtest` for cost accounting but never attached a `funding_rate` column
   to the frame, so a CLI run read `crowding` as the neutral 0.5 fallback and recorded
   `crowding_measured=False`. Measured on the trained cell: **without the column +16.44% /
-  +0.801 / 6.08% / 71 trades; with it +15.45% / +0.896 / 4.67% / 73**, the second matching
+  +0.801 / 6.08% / 71 trades; with it +15.45% / +0.979 / 4.67% / 73**, the second matching
   every published digit. Found during the ETH replication (charter M20) and fixed the same
   day — `backtest` and `sweep` now attach it for perps. **Check `crowding_measured` in
   `config.json` before comparing two state-machine numbers**: a run made before that fix
@@ -368,9 +414,9 @@ a rule on, but it is not what the gate passed on.
 
 - **R5 gate: passes.** Parameters chosen on the first 60% of the 15,118-bar BTC/USDT perp
   4h frame (54 configurations), the last 40% evaluated once. Out of sample it returns
-  **+15.45% net of funding at Sharpe +0.896 and 4.67% max drawdown** on 73 trades,
+  **+15.45% net of funding at Sharpe +0.979 and 4.67% max drawdown** on 73 trades,
   against the R0 baseline `donchian` 40/10 at **−6.64% / +0.072 / 43.86%** over the
-  identical 6,048 bars. The untuned R4 default also passes (+15.52% / +0.746 / 7.11%).
+  identical 6,048 bars. The untuned R4 default also passes (+15.52% / +0.816 / 7.11%).
   Two limits belong with that: it wins on **risk, not return** (buy-and-hold is +85.78%
   over the same bars), and it **loses to the best donchian cell chosen with the test half
   in hand** (40/40 at +112.57% / Sharpe +1.070). It now **does** survive 3× costs
@@ -488,8 +534,8 @@ them.
 - **R6 result: the contract works, the taper does not earn.** Over R5's identical
   6,048-bar test half, 10bp/side, net of funding, at the 0.05 band: trained **+25.89% /
   Sharpe +0.842 / 10.85% max drawdown / 74 round trips / 276 fills** against v1's
-  +15.45% / +0.896 / 4.67% / 73 / 120; untuned default **+36.70% / +0.913 / 12.55% /
-  154 / 416** against v1's +15.52% / +0.746 / 7.11% / 153 / 211. Its fills equal its
+  +15.45% / +0.979 / 4.67% / 73 / 120; untuned default **+36.70% / +0.998 / 12.55% /
+  154 / 416** against v1's +15.52% / +0.816 / 7.11% / 153 / 211. Its fills equal its
   decision bars exactly (276/276, 416/416), and it **survives 3× costs in both
   configurations** (+9.24% and +3.38%) where v1's default does not (−6.54%). But **the
   taper is worth approximately zero**: v2 held *less* than v1 on 75 / 77 bars for

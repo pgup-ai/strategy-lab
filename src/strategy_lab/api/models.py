@@ -91,28 +91,19 @@ class IdentityQuery(_Strict):
         return value
 
 
-class AnalysisQuery(IdentityQuery):
-    """Everything that can change the numbers, and nothing that cannot.
+class BoundedQuery(IdentityQuery):
+    """An identity plus the window asked of it.
 
-    ``exit_mode`` is deliberately optional rather than defaulted here: the
-    continuous-exposure contract has no exit mode at all, so a model that
-    defaulted one would have to drop it silently for half the registry.
+    Shared by every endpoint that slices a frame, because the two bounds have to
+    *mean* the same thing everywhere. They did not: ``/api/state`` shipped with
+    bare ``start``/``end`` strings and none of this, so the page sent one
+    ``<input type="date">`` value to both endpoints and got two different frames
+    back — the state view ending the evening before the instrument view, which
+    is exactly the disagreement `/api/state` exists not to have.
     """
 
-    strategy: Annotated[str, Field(min_length=1, max_length=64)]
-    exit_mode: ExitMode | None = None
-    # Zero adverse closes would exit on every bar; the engine refuses it with a
-    # ValueError several layers down, which reaches a caller as a 400 rather
-    # than as the field it belongs to.
-    failure_bars: Annotated[int, Field(ge=1)] = DEFAULT_FAILURE_BARS
     start: str | None = None
     end: str | None = None
-    fees: Annotated[float, Field(ge=0.0, le=1.0)] = DEFAULT_FEES
-    slippage: Annotated[float, Field(ge=0.0, le=1.0)] = DEFAULT_SLIPPAGE
-    cash: Annotated[float, Field(gt=0.0)] = DEFAULT_CASH
-    position_pct: Annotated[float, Field(ge=0.01, le=1.0)] = DEFAULT_POSITION_PCT
-    funding: bool = True
-    allow_shorts: bool = True
 
     @field_validator("start", "end")
     @classmethod
@@ -147,6 +138,28 @@ class AnalysisQuery(IdentityQuery):
         if parsed == parsed.normalize() and len(value.strip()) <= 10:
             return str(parsed + pd.Timedelta(days=1) - pd.Timedelta(seconds=1))
         return value
+
+
+class AnalysisQuery(BoundedQuery):
+    """Everything that can change the numbers, and nothing that cannot.
+
+    ``exit_mode`` is deliberately optional rather than defaulted here: the
+    continuous-exposure contract has no exit mode at all, so a model that
+    defaulted one would have to drop it silently for half the registry.
+    """
+
+    strategy: Annotated[str, Field(min_length=1, max_length=64)]
+    exit_mode: ExitMode | None = None
+    # Zero adverse closes would exit on every bar; the engine refuses it with a
+    # ValueError several layers down, which reaches a caller as a 400 rather
+    # than as the field it belongs to.
+    failure_bars: Annotated[int, Field(ge=1)] = DEFAULT_FAILURE_BARS
+    fees: Annotated[float, Field(ge=0.0, le=1.0)] = DEFAULT_FEES
+    slippage: Annotated[float, Field(ge=0.0, le=1.0)] = DEFAULT_SLIPPAGE
+    cash: Annotated[float, Field(gt=0.0)] = DEFAULT_CASH
+    position_pct: Annotated[float, Field(ge=0.01, le=1.0)] = DEFAULT_POSITION_PCT
+    funding: bool = True
+    allow_shorts: bool = True
 
     @field_validator("strategy")
     @classmethod
@@ -287,11 +300,35 @@ class DatasetModel(_Strict):
     stream: str | None = None
 
 
+class StateQuery(BoundedQuery):
+    """What a state reading depends on, which is markedly less than an analysis.
+
+    No exit mode, no fees, no cash: none of them move a feature or a state, and
+    accepting one would imply this path executed something. The *bounds* are the
+    one thing it must share with ``AnalysisQuery`` exactly, which is why they
+    come from a common base rather than being restated here.
+    """
+
+    strategy: Annotated[str, Field(min_length=1, max_length=64)]
+    funding: bool = True
+
+    @field_validator("strategy")
+    @classmethod
+    def _registered(cls, value: str) -> str:
+        # The same check `AnalysisQuery` makes, so one typo does not get a 422
+        # from one endpoint and a 400 from the other. Whether the strategy has a
+        # *state* is `build_state`'s to answer -- that is a 409 with a reason,
+        # not a malformed query.
+        resolve_strategy(value)
+        return value
+
+
 class StrategyModel(_Strict):
     name: str
     contract: str
     version: str
     warmup_bars: int
+    has_state: bool
 
 
 class BarModel(_Strict):
@@ -358,6 +395,28 @@ class AnalysisModel(_Strict):
     target: list[float | None] | None
     why: WhyModel | None
     provenance: ProvenanceModel
+
+
+class StateProvenanceModel(_Strict):
+    identity: dict[str, str]
+    strategy: str
+    version: str
+    warmup_bars: int
+    bar_count: int
+    measurable_bars: int
+    first_bar: str
+    measurable_from: str
+    last_bar: str
+    reads_crowding: bool
+    crowding_measured: bool
+    funding_attached: bool
+    generated_at: str
+
+
+class StateModel(_Strict):
+    bars: list[BarModel]
+    why: WhyModel
+    provenance: StateProvenanceModel
 
 
 class BoardRowModel(_Strict):

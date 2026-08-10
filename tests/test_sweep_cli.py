@@ -24,7 +24,7 @@ from tests.conftest import synthetic_ohlcv, synthetic_ohlcv_with_funding
 runner = CliRunner()
 
 # state_machine_v1 is the only registered strategy that reads funding, and at
-# rank_window 480 it warms 2,192 bars.
+# rank_window 480 it warms 847 bars.
 _MACHINE_BARS = 2400
 _MACHINE_GRID = '{"rank_window":[440,480]}'
 _PERP = ["--market-type", "perp", "--symbol", "BTC/USDT", "--timeframe", "4h"]

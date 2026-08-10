@@ -34,7 +34,7 @@ from tests.conftest import synthetic_ohlcv, synthetic_ohlcv_with_funding
 _PERP = MarketDataIdentity(
     exchange="binance", market_type="perp", symbol="BTC/USDT", timeframe="4h"
 )
-# state_machine_v1 warms 2,192 bars, so anything exercising it needs a frame
+# state_machine_v1 warms 847 bars, so anything exercising it needs a frame
 # several times that before a single signal exists to compare.
 _MACHINE_BARS = 3000
 # Past BTC's permanent 40h leading funding gap, which would otherwise refuse the
@@ -105,7 +105,7 @@ _EQUITY = MarketDataIdentity(
 def equity_frame(monkeypatch):
     """Long enough for the state machine, on a market that settles nothing.
 
-    ``spot_frame`` is 900 bars and ``state_machine_v1`` warms 2,192, so it
+    ``spot_frame`` is 900 bars and ``state_machine_v1`` warms 847, so it
     refuses before reaching provenance -- and the whole point here is a frame
     that gets all the way to an answer with one of its features pinned.
     """
@@ -324,7 +324,7 @@ def test_provenance_records_that_crowding_was_measured_on_a_funded_perp(perp_fra
     assert payload.provenance.version == "1.0.0"
     assert payload.provenance.exit_mode == "opposite_signal_only"
     assert payload.provenance.failure_bars == 4
-    assert payload.provenance.warmup_bars == 2192
+    assert payload.provenance.warmup_bars == resolve_strategy("state_machine_v1").strategy.warmup_bars
     assert payload.provenance.contract == Contract.SIGNAL_SET.value
     assert payload.provenance.first_bar == str(perp_frame.index[0])
     assert payload.provenance.last_bar == str(perp_frame.index[-1])
@@ -556,7 +556,12 @@ def test_every_registered_strategy_is_listed_and_labelled_by_contract():
     assert set(by_name) == set(list_strategies()) | set(list_exposure_strategies())
     assert by_name["donchian"].contract == Contract.SIGNAL_SET.value
     assert by_name["state_machine_v2"].contract == Contract.TARGET_EXPOSURE.value
-    assert by_name["state_machine_v1"].warmup_bars == 2192
+    # Derived, not pinned — the point is that it is *published*, not that it is
+    # a particular number, and R12 moved it 2,192 -> 847.
+    assert by_name["state_machine_v1"].warmup_bars == (
+        resolve_strategy("state_machine_v1").strategy.warmup_bars
+    )
+    assert by_name["state_machine_v1"].warmup_bars > 0
     assert all(entry.version for entry in listed)
 
 

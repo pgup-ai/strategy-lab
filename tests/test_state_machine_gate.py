@@ -297,7 +297,7 @@ def test_the_baseline_is_a_cell_of_the_pinned_r0_surface():
 def test_both_sides_trade_the_same_out_of_sample_bars(machine_run, default_run, baseline_run):
     """The comparison is only a comparison if the runs cover one window.
 
-    The machine warms 2,192 bars and donchian 40, so a shared frame start would
+    The machine warms 847 bars and donchian 40, so a shared frame start would
     hand donchian 2,152 bars the machine cannot see.
     """
     for run in (machine_run, default_run, baseline_run):
@@ -325,12 +325,22 @@ def test_the_machine_beats_the_r0_baseline_out_of_sample(machine_run, baseline_r
     against +0.072, max drawdown 4.67% against 43.86%, net +15.45% against
     -6.64%. The margin is wide enough that the tolerances below are about
     surviving a dependency bump, not about the verdict being close.
+
+    **R12 restated the machine's Sharpe to +0.979 and nothing else.** Dropping
+    `_EWM_WARMUP_MULTIPLE` from 20x to 5x took this strategy's warmup from 2,192
+    bars to 847, and ``evaluate`` slices the frame to start ``warmup_bars``
+    before the first tradeable bar — so the *tradeable* range, the trades, the
+    net return and the drawdown are all bit-identical, and the equity curve is
+    1,345 bars shorter. Sharpe is the one statistic computed over the whole
+    curve, so it was being diluted by masked warmup bars the strategy could not
+    trade. The baseline is untouched: `donchian` has no EWM and its warmup did
+    not move.
     """
     assert machine_run["sharpe"] > baseline_run["sharpe"]
     assert machine_run["max_drawdown_pct"] < baseline_run["max_drawdown_pct"]
     assert machine_run["net_return_pct"] > baseline_run["net_return_pct"]
 
-    assert machine_run["sharpe"] == pytest.approx(0.896, abs=0.05)
+    assert machine_run["sharpe"] == pytest.approx(0.979, abs=0.05)
     assert machine_run["max_drawdown_pct"] == pytest.approx(4.67, abs=0.5)
     assert machine_run["net_return_pct"] == pytest.approx(15.45, abs=1.5)
     assert baseline_run["sharpe"] == pytest.approx(0.072, abs=0.05)
@@ -347,12 +357,15 @@ def test_the_untuned_machine_beats_the_baseline_too(default_run, baseline_run):
     one hypothesis too. Measured: Sharpe +0.746, max drawdown 7.11%, net
     +15.52% -- a hair more return than the trained cell, on twice the trades and
     a worse drawdown, which is why training's scalar preferred the other one.
+
+    **R12 restated this Sharpe to +0.816**, for the reason given above: same
+    trades, same net, same drawdown, an equity curve 1,345 bars shorter.
     """
     assert default_run["sharpe"] > baseline_run["sharpe"]
     assert default_run["max_drawdown_pct"] < baseline_run["max_drawdown_pct"]
     assert default_run["net_return_pct"] > baseline_run["net_return_pct"]
 
-    assert default_run["sharpe"] == pytest.approx(0.746, abs=0.05)
+    assert default_run["sharpe"] == pytest.approx(0.816, abs=0.05)
     assert default_run["max_drawdown_pct"] == pytest.approx(7.11, abs=0.5)
     assert default_run["net_return_pct"] == pytest.approx(15.52, abs=1.5)
 

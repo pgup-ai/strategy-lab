@@ -286,11 +286,17 @@ def fetch_etf_universe(
         target = [etf.symbol for etf in ETF_UNIVERSE]
 
     client = YahooFinanceClient()
+    # Collected, not raised on the spot: one unresolvable ticker must not cost
+    # the other seventeen their fetch, and must not let the command exit 0
+    # either -- `XIU` sat unfetched behind one "No data returned" line among
+    # eighteen while this returned success.
+    empty: list[str] = []
     for symbol in target:
         typer.echo(f"Fetching {symbol} {timeframe} from {start} ...")
         df = client.fetch_ohlcv(symbol, timeframe, start=start, end=end)
         if df.empty:
             typer.echo(f"  No data returned for {symbol}")
+            empty.append(symbol)
             continue
         records = normalize_candle_frame(
             df,
@@ -302,6 +308,16 @@ def fetch_etf_universe(
         )
         count = upsert_candles(records)
         typer.echo(f"  Upserted {count} candles for yahoo/equity/{symbol}/{timeframe}.")
+
+    if empty:
+        # Measured: a bare `XIU` returns nothing where `XIU.TO` returns 1,657
+        # daily bars over the same window. The rest of the why is in the message.
+        raise typer.BadParameter(
+            f"The venue returned no rows for {len(empty)} of {len(target)} symbols: "
+            f"{', '.join(empty)}. Yahoo answers an unknown ticker with an empty "
+            f"frame, so check the spelling and that a non-US listing carries its "
+            f"exchange suffix."
+        )
 
 
 @app.command("backtest")

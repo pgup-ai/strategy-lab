@@ -268,7 +268,7 @@ def test_a_live_window_yields_the_signals_a_replay_of_it_yields(frame):
 def test_a_cold_start_primes_from_backfill_and_reaches_the_replays_state(frame):
     """`backfill()` yields `Bar` and `prime_bars()` takes `Bar`, which before R10
     they did not — so a live process can warm itself from history rather than
-    waiting out a 2,192-bar warmup in real time."""
+    waiting out an 847-bar warmup in real time."""
     strategy = get_strategy("donchian")
     long_frame = synthetic_ohlcv_with_funding(n=strategy.warmup_bars + 200, freq=TIMEFRAME)
     split = strategy.warmup_bars + 100

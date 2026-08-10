@@ -31,7 +31,7 @@ _PERP = ["--exchange", "binance", "--market-type", "perp", "--symbol", "BTC/USDT
 _IDENTITY = MarketDataIdentity(
     exchange="binance", market_type="perp", symbol="BTC/USDT", timeframe="4h"
 )
-# state_machine_v1 warms 2,192 bars, so the funding-column tests need their own
+# state_machine_v1 warms 847 bars, so the funding-column tests need their own
 # frame rather than the 900-bar one the cost tests run on.
 _MACHINE_BARS = 2400
 

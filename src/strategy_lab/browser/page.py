@@ -354,6 +354,10 @@ __SHELL_CSS__
   .ladder button { padding: 4px 9px; font-size: 12px; }
   .ladder button.current { border-color: var(--accent); color: var(--ink); }
   .ladder button.absent { color: var(--ink-dim); border-style: dashed; }
+  /* Distinct from `absent`: that one is a fetch away, this one may never be.
+     Struck through because clicking it cannot help. */
+  .ladder button.shallow { color: var(--ink-dim); opacity: 0.5;
+    text-decoration: line-through; }
   .legend-strip { display: flex; flex-wrap: wrap; gap: 8px 18px; margin: 6px 20px 0;
     font-size: 12px; color: var(--ink-dim); align-items: center; }
   /* `hidden` is a UA rule that any author `display` defeats. */
@@ -364,6 +368,8 @@ __SHELL_CSS__
   .swatch { display: inline-flex; align-items: center; gap: 4px; margin-left: 8px; }
   .swatch i { width: 9px; height: 9px; border-radius: 2px; display: inline-block;
     flex: none; }
+  /* No fill, because the ribbon draws nothing there. */
+  .swatch i.hollow { background: transparent; border: 1px dashed #4a5163; }
   button.swatch { padding: 1px 5px 1px 3px; border: 1px solid transparent;
     background: transparent; color: inherit; font: inherit; font-size: 12px;
     cursor: help; border-radius: 4px; }
@@ -393,6 +399,7 @@ __SHELL_CSS__
   /* An open trade's PnL is a mark against the last close, not money -- it must
      not read like the closed rows it sits beside. */
   #trades tr.open td { opacity: 0.6; font-style: italic; }
+  .toggle.on { border-color: var(--accent); color: var(--ink); }
   .live { display: inline-flex; align-items: center; gap: 6px; }
   .live-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--ink-dim); }
   .live.on .live-dot { background: var(--up); }
@@ -404,9 +411,12 @@ __SHELL_CSS__
   .note { color: var(--ink-dim); font-size: 11.5px; margin: 0; max-width: 82ch; }
   #status { color: var(--ink-dim); font-size: 11.5px; }
   footer { padding: 14px 20px 20px; color: var(--ink-dim); font-size: 11px; }
-  /* One page, two views. Whichever is not showing is display:none rather than
+  /* One page, three views. Whichever is not showing is display:none rather than
      unmounted: the price chart keeps its size and its zoom across a switch. */
   body.board-view .instrument-only, body.instrument-view .board-only { display: none; }
+  /* `instrument-only` means "a chart view", which the state view also is. What
+     separates them is `analysis-only`: the parts that describe a book. */
+  body.state-view .board-only, body.state-view .analysis-only { display: none; }
   #board {
     display: grid; gap: 12px; padding: 14px 20px 6px;
     grid-template-columns: repeat(auto-fill, minmax(330px, 1fr));
@@ -449,6 +459,7 @@ __SHELL_CSS__
       <select id="view">
         <option value="board">board</option>
         <option value="instrument">instrument</option>
+        <option value="state">state</option>
       </select>
     </div>
     <div class="field board-only">
@@ -463,7 +474,7 @@ __SHELL_CSS__
       <label for="strategy">Strategy</label>
       <select id="strategy"></select>
     </div>
-    <div class="field">
+    <div class="field analysis-only">
       <label for="exit-mode">Exit mode</label>
       <select id="exit-mode"></select>
     </div>
@@ -505,6 +516,10 @@ __SHELL_CSS__
   <div class="chart-bar">
     <span id="ladder" class="ladder" role="group" aria-label="Candle timeframe"></span>
     <span class="chart-bar-right">
+      <button id="shade" type="button" class="toggle on"
+              title="Paint the machine's state behind the candles">
+        shade
+      </button>
       <button id="live" type="button" class="live off" hidden
               title="Draw the venue's forming candle, and recompute when it closes">
         <span class="live-dot"></span><span id="live-text">live</span>
@@ -525,12 +540,15 @@ __SHELL_CSS__
   </div>
 </div>
 <p class="legend-strip instrument-only" id="chart-legend">
-  <span><b class="mk up">&uarr;</b> bought &mdash; opening a long or closing a short</span>
-  <span><b class="mk down">&darr;</b> sold &mdash; opening a short or closing a long</span>
-  <span id="state-legend" hidden>state ribbon: <span id="state-swatches"></span></span>
+  <span class="analysis-only"><b class="mk up">&uarr;</b>
+    bought &mdash; opening a long or closing a short</span>
+  <span class="analysis-only"><b class="mk down">&darr;</b>
+    sold &mdash; opening a short or closing a long</span>
+  <span id="state-legend" hidden>state ribbon: <span id="state-swatches"></span>
+    <span class="swatch" id="warmup-swatch"><i class="hollow"></i>before warmup</span></span>
 </p>
 <p class="legend-strip instrument-only state-explainer" id="state-explainer" hidden></p>
-<section class="why instrument-only" id="trades-section" hidden>
+<section class="why instrument-only analysis-only" id="trades-section" hidden>
   <h2>Trades <span class="pin" id="trades-summary"></span></h2>
   <div id="trades"></div>
   <p class="note" id="trades-note"></p>
@@ -586,6 +604,18 @@ __SHELL_CSS__
   };
 
   var priceChart = LWC.createChart(el('price-pane'), theme);
+
+  // **Added before the candles, because that is the only z-order control there
+  // is.** Series within a pane draw in the order they were added; added after,
+  // this paints over them and the chart is unreadable rather than tinted.
+  // A full-height histogram on its own overlay scale is how "background colour
+  // per bar" is expressed at all -- Lightweight Charts has no such API.
+  var regionSeries = priceChart.addSeries(LWC.HistogramSeries, {
+    priceScaleId: 'state-shade', lastValueVisible: false, priceLineVisible: false,
+    priceFormat: { type: 'volume' }
+  });
+  regionSeries.priceScale().applyOptions({ scaleMargins: { top: 0, bottom: 0 } });
+
   var candleSeries = priceChart.addSeries(LWC.CandlestickSeries, {
     upColor: COLORS.up, downColor: COLORS.down, borderVisible: false,
     wickUpColor: COLORS.up, wickDownColor: COLORS.down
@@ -750,12 +780,15 @@ __SHELL_CSS__
   }
 
   var streams = {};
+  var depths = {};   // bars per stored set, for the ladder's reach check
+  var shading = { on: true };   // is the state painted behind price, not only under it
 
   function fillDatasets(rows) {
     var deepest = null;
     rows.forEach(function (row) {
       var id = datasetKey(row);
       streams[id] = row.stream || null;
+      depths[id] = row.candles;
       datasetSel.appendChild(option(
         id,
         row.symbol + ' · ' + row.timeframe + ' · ' + row.exchange + '/' +
@@ -776,8 +809,28 @@ __SHELL_CSS__
     rows.forEach(function (row) {
       var opt = option(row.name, row.name + '  (' + row.contract + ')');
       opt.dataset.contract = row.contract;
+      opt.dataset.hasState = row.has_state ? 'yes' : 'no';
+      opt.dataset.warmupBars = String(row.warmup_bars);
       strategySel.appendChild(opt);
     });
+  }
+
+  // Which strategies the state view can answer for, on the server's own
+  // predicate rather than a list of names kept here.
+  function syncStrategyChoices() {
+    var stateOnly = viewSel.value === 'state';
+    var options = strategySel.options;
+    for (var i = 0; i < options.length; i += 1) {
+      options[i].hidden = stateOnly && options[i].dataset.hasState !== 'yes';
+    }
+    // Landing on a hidden option would ask `/api/state` for a strategy it
+    // refuses, and the refusal would look like a bug in the dataset.
+    if (stateOnly && strategySel.selectedOptions[0] &&
+        strategySel.selectedOptions[0].hidden) {
+      for (var j = 0; j < options.length; j += 1) {
+        if (!options[j].hidden) { strategySel.value = options[j].value; break; }
+      }
+    }
   }
 
   function identity() {
@@ -809,23 +862,48 @@ __SHELL_CSS__
     }));
   }
 
+  // A state colour at the opacity a *background* can carry: the ribbon uses the
+  // colour itself, and behind candles that value drowns a down bar's wick.
+  function shade(hex) {
+    var n = parseInt(hex.slice(1), 16);
+    return 'rgba(' + ((n >> 16) & 255) + ',' + ((n >> 8) & 255) + ',' + (n & 255) +
+      ',0.17)';
+  }
+
   function drawStateRibbon(payload) {
     var states = payload.why ? payload.why.states : null;
     if (!states) {
       stateSeries.setData([]);
+      regionSeries.setData([]);
       el('state-legend').hidden = true;
       // With it: an explanation of a state left over from the last strategy,
       // sitting under a chart that has no states at all.
       el('state-explainer').hidden = true;
       return;
     }
+    // **The ribbon starts at warmup, not at bar zero.** The machine answers on
+    // every bar, and inside warmup its inputs are NaN, which it reads as
+    // *failing* -- and failing renders as COMPRESSION. Measured on BTC/USDT
+    // spot 1d with `state_machine_v1`, 3,144 bars against an 847-bar warmup:
+    // the machine reports `compression` on all 847 of them. Drawn from bar
+    // zero, 27% of this chart said "chop" over the range where the machine knew
+    // nothing, which is the exact reading it exists to give.
+    var warmup = payload.provenance.warmup_bars || 0;
     // Constant height: the ribbon says *which* state, never how much of it.
-    stateSeries.setData(payload.bars.map(function (bar, i) {
+    stateSeries.setData(payload.bars.slice(warmup).map(function (bar, i) {
       // No fallback colour: `STATE_COLORS` is asserted against `MarketState` in
       // Python, so a missing one means a state was added there and not here --
       // which should look wrong rather than quietly grey.
-      return { time: bar.time, value: 1, color: CFG.stateColors[states[i]] };
+      // `warmup + i`, because the slice re-based the index and `states` did not.
+      return { time: bar.time, value: 1, color: CFG.stateColors[states[warmup + i]] };
     }));
+    // The same reading behind the candles, so a regime is legible without
+    // looking away from price. Same slice and same index rule as the ribbon --
+    // shading warmup would put the compression grey over the very bars the
+    // ribbon refuses to draw, which is the lie coming back through the window.
+    regionSeries.setData(shading.on ? payload.bars.slice(warmup).map(function (bar, i) {
+      return { time: bar.time, value: 1, color: shade(CFG.stateColors[states[warmup + i]]) };
+    }) : []);
     el('state-legend').hidden = false;
   }
 
@@ -910,7 +988,10 @@ __SHELL_CSS__
     document.title = payload.provenance.identity.symbol + ' · ' +
       payload.provenance.strategy + ' · strategy-lab';
     el('title').textContent = payload.provenance.identity.symbol;
+    applyBarSpacing(payload);
+  }
 
+  function applyBarSpacing(payload) {
     // Smallest gap rather than the first one: an equity session ends on Friday
     // and resumes on Monday, so an hourly set can open with a three-day step and
     // would have its clock hidden as if it were daily.
@@ -947,16 +1028,33 @@ __SHELL_CSS__
     // reader learns to ignore it, so the false alarm is not the lesser half.
     var crowdingBlind = prov.reads_crowding && !prov.crowding_measured;
 
+    // Chips appear when the field does. A state reading has no contract, exit
+    // mode, shorts rule or cost model -- not defaulted here, absent, because
+    // `build_state` executed nothing that could have one, and a chip reading
+    // "none" would describe a book that was never opened.
     host.appendChild(chip('Strategy', prov.strategy + ' v' + prov.version));
-    host.appendChild(chip('Contract', prov.contract));
-    host.appendChild(chip(
-      'Exit mode', prov.exit_mode || 'none · a target of 0.0 is the exit'
-    ));
-    if (prov.failure_bars !== null) {
+    if (prov.contract) host.appendChild(chip('Contract', prov.contract));
+    if ('exit_mode' in prov) {
+      host.appendChild(chip(
+        'Exit mode', prov.exit_mode || 'none · a target of 0.0 is the exit'
+      ));
+    }
+    if (prov.failure_bars) {
       host.appendChild(chip('Failure bars', String(prov.failure_bars)));
     }
     host.appendChild(chip('Warmup', prov.warmup_bars.toLocaleString() + ' bars'));
-    host.appendChild(chip('Shorts', prov.allow_shorts ? 'allowed' : 'long only'));
+    // The number to judge this view by: warmup is counted in bars, so a frame
+    // can be long enough to answer and still answer over very little of itself.
+    if ('measurable_bars' in prov) {
+      host.appendChild(chip(
+        'State from',
+        prov.measurable_from.slice(0, 10) + '  (' +
+        prov.measurable_bars.toLocaleString() + ' bars)'
+      ));
+    }
+    if ('allow_shorts' in prov) {
+      host.appendChild(chip('Shorts', prov.allow_shorts ? 'allowed' : 'long only'));
+    }
     host.appendChild(chip(
       'crowding_measured',
       prov.crowding_measured ? 'yes' : 'no',
@@ -967,7 +1065,9 @@ __SHELL_CSS__
       prov.funding_attached ? 'attached' : 'absent',
       perp && !prov.funding_attached ? 'warn' : ''
     ));
-    host.appendChild(chip('Cost model', costText(prov.cost_model)));
+    if ('cost_model' in prov) {
+      host.appendChild(chip('Cost model', costText(prov.cost_model)));
+    }
     host.appendChild(chip(
       'Frame',
       prov.first_bar.slice(0, 10) + ' → ' + prov.last_bar.slice(0, 10) + '  (' +
@@ -1041,7 +1141,15 @@ __SHELL_CSS__
       ));
     });
     if (view.why) {
-      host.appendChild(chip('State', view.why.states[i], 'state'));
+      // Blank inside warmup, for the reason the ribbon is: the machine answers
+      // on every bar, and inside warmup that answer is `compression` because its
+      // inputs are NaN and it reads unmeasurable as failing. Showing it here
+      // while the ribbon refuses to draw it is the same lie through the panel --
+      // and the feature chips beside it already read `—` on those bars.
+      var measured = i >= (payload.provenance.warmup_bars || 0);
+      host.appendChild(chip(
+        'State', measured ? view.why.states[i] : '—', measured ? 'state' : 'absent'
+      ));
       Object.keys(view.why.features).forEach(function (name) {
         var value = view.why.features[name][i];
         host.appendChild(chip(
@@ -1155,9 +1263,11 @@ __SHELL_CSS__
       (view.shifts.length === 1 ? ' change' : ' changes') + ' · newest first';
     el('transitions-note').textContent = inWarmup
       ? inWarmup + ' of these fall inside the ' + warmup.toLocaleString() +
-        '-bar warmup and are dimmed: ' +
-        'the machine walked through them, but the strategy was not acting yet, so they ' +
-        'are not decisions.'
+        '-bar warmup and are dimmed — which is also why the ribbon starts where ' +
+        'it does. The machine answers on every bar, and inside warmup its inputs ' +
+        'are not measurable yet; it reads that as failing, which renders as ' +
+        'compression. So those are transitions of the machine, not readings of ' +
+        'the market, and the strategy was not acting on them either.'
       : 'Dwell is how long the previous state held. Click a row to pin that bar.';
   }
 
@@ -1357,12 +1467,21 @@ __SHELL_CSS__
     // timer: the one moment the stored candles are provably behind. Refresh
     // stores it and recomputes, so state and markers catch up to the bar the
     // chart already drew.
-    if (viewSel.value !== 'instrument') return;
+    if (viewSel.value === 'board') return;
     setLive('wait', 'bar closed · refreshing');
     refreshInstrument().then(function () {
       if (live.socket) setLive('on', 'live');
     });
   }
+
+  el('shade').addEventListener('click', function () {
+    shading.on = !shading.on;
+    el('shade').classList.toggle('on', shading.on);
+    // No refetch: the states are already in the payload this chart was drawn
+    // from, and asking the server again would be a second answer to a question
+    // that has not changed.
+    if (view.payload) drawStateRibbon(view.payload);
+  });
 
   el('live').addEventListener('click', function () {
     live.on = !live.on;
@@ -1965,6 +2084,71 @@ __SHELL_CSS__
       });
   }
 
+  function stateQuery() {
+    var params = new URLSearchParams(identity());
+    params.set('strategy', strategySel.value);
+    // No exit mode, no cost model: `/api/state` refuses any parameter it does
+    // not recognise, by name, and none of those move a feature or a state.
+    ['start', 'end'].forEach(function (bound) {
+      if (el(bound).value) params.set(bound, el(bound).value);
+    });
+    if (exactBounds) {
+      if (exactBounds.start) params.set('start', exactBounds.start);
+      if (exactBounds.end) params.set('end', exactBounds.end);
+    }
+    return params;
+  }
+
+  function loadState() {
+    if (!datasetSel.value || !strategySel.value) return Promise.resolve();
+    var token = ++pending;
+    setStatus('reading state …');
+    var started = performance.now();
+    return getJSON('/api/state?' + stateQuery().toString())
+      .then(function (payload) {
+        if (token !== pending) return;
+        setError('');
+        drawState(payload);
+        setStatus(Math.round(performance.now() - started) + ' ms · ' +
+          payload.provenance.measurable_bars.toLocaleString() + ' of ' +
+          payload.bars.length.toLocaleString() + ' bars carry a state' +
+          claimRefreshed('instrument'));
+      })
+      .catch(function (error) {
+        if (token === pending) setError(error.message);
+      });
+  }
+
+  function drawState(payload) {
+    view.payload = payload;
+    view.bars = payload.bars;
+    view.why = payload.why;
+    view.index = {};
+    payload.bars.forEach(function (bar, i) { view.index[bar.time] = i; });
+    // Nothing was executed, so there is nothing to mark -- assigned rather than
+    // left alone, so this view cannot inherit the last one's fills.
+    view.fills = {};
+    markerLayer.setMarkers([]);
+    el('exposure-wrap').hidden = true;
+
+    drawBars(payload.bars);
+    drawStateRibbon(payload);
+    renderLadder();
+    view.stream = streams[datasetSel.value] || null;
+    el('live').hidden = !view.stream;
+    openSocket();
+
+    renderProvenance(payload.provenance);
+    view.shifts = shiftsFrom(payload.why.states, payload.bars);
+    renderShifts();
+    renderTrades();
+    view.pinned = null;
+    renderBar(payload.bars.length - 1);
+    document.title = payload.provenance.identity.symbol + ' · state · strategy-lab';
+    el('title').textContent = payload.provenance.identity.symbol;
+    applyBarSpacing(payload);
+  }
+
   function syncExitEnabled() {
     var applies = exitModeApplies();
     exitSel.disabled = !applies;
@@ -1975,19 +2159,26 @@ __SHELL_CSS__
   function setView(name) {
     // Hidden rather than unmounted, so the price chart keeps its size and the
     // zoom survives a trip through the board.
-    document.body.className = name === 'board' ? 'board-view' : 'instrument-view';
+    document.body.className = name + '-view';
     viewSel.value = name;
+    syncStrategyChoices();
+    // `syncStrategyChoices` may reassign `strategySel.value`, and assigning it
+    // fires no `change` -- the one handler that keeps the exit-mode control in
+    // step with the contract. Called here rather than beside the assignment so
+    // it covers every route into a view, not just the reassigning one.
+    syncExitEnabled();
     // Whichever view is being left stops writing into the one being entered.
     // Neither switch starts a request on the side it leaves, so neither guard
     // fires on its own: leaving the board would keep appending tiles to a
     // hidden host and finishing a full recompute per dataset, and leaving the
     // instrument view would draw a chart over the board and retitle the page.
     if (name === 'board') { abandonInstrument(); closeSocket(); } else abortBoard();
-    return name === 'board' ? loadBoard() : load();
+    return reload();
   }
 
   function reload() {
-    return viewSel.value === 'board' ? loadBoard() : load();
+    if (viewSel.value === 'board') return loadBoard();
+    return viewSel.value === 'state' ? loadState() : load();
   }
 
   // `exactBounds` belongs to the tile that opened the view, and only to that
@@ -2006,7 +2197,7 @@ __SHELL_CSS__
   el('refresh-all').addEventListener('click', refreshAll);
   datasetSel.addEventListener('change', function () {
     exactBounds = null;
-    load();
+    reload();
   });
   strategySel.addEventListener('change', function () { syncExitEnabled(); reload(); });
   exitSel.addEventListener('change', reload);
@@ -2016,7 +2207,7 @@ __SHELL_CSS__
       // edges stop applying -- otherwise a user who moved `From` would still be
       // sent the tile's original bound and see their own change ignored.
       exactBounds = null;
-      load();
+      reload();
     });
   });
   function refreshInstrument() {
@@ -2055,7 +2246,7 @@ __SHELL_CSS__
         exactBounds = { start: exactBounds && exactBounds.start, end: null };
         el('end').value = '';
         if (viewSel.value !== startedIn) return null;
-        return load();
+        return reload();
       })
       .catch(function (error) { setError(error.message); })
       .then(function () { button.disabled = false; });
@@ -2094,14 +2285,42 @@ __SHELL_CSS__
       var wanted = datasetFor(timeframe);
       var stored = Object.prototype.hasOwnProperty.call(streams, wanted) ||
         Array.prototype.some.call(datasetSel.options, function (o) { return o.value === wanted; });
+      // Warmup is counted in *bars*, so the same strategy is comfortable on one
+      // rung and permanently impossible on another: 847 bars is 141 days at 4h
+      // and 16 years at 1w. Better said on the rung than discovered by clicking
+      // it and reading a refusal.
+      var warmup = Number(
+        strategySel.selectedOptions[0] &&
+        strategySel.selectedOptions[0].dataset.warmupBars
+      );
+      var depth = depths[wanted];
+      var shallow = stored && warmup && depth !== undefined && depth <= warmup;
       var button = document.createElement('button');
       button.type = 'button';
       button.textContent = timeframe;
-      button.className = timeframe === current ? 'current' : (stored ? '' : 'absent');
-      button.title = stored
-        ? 'switch to ' + timeframe
-        : timeframe + ' is not stored for this instrument yet — click to fetch it';
-      button.addEventListener('click', function () { switchTimeframe(timeframe, stored); });
+      // Combined, not exclusive: the selected rung can also be the one that
+      // cannot answer -- pick a too-short set in the dropdown and the ladder
+      // drew it plain while the page showed a 409, which is the single rung the
+      // strike-through was never reaching.
+      button.className = [
+        timeframe === current ? 'current' : '',
+        stored ? (shallow ? 'shallow' : '') : 'absent'
+      ].filter(Boolean).join(' ');
+      button.title = !stored
+        ? timeframe + ' is not stored for this instrument yet — click to fetch it'
+        : shallow
+          ? strategySel.value + ' needs ' + warmup.toLocaleString() +
+            ' bars before its first state and this set has ' +
+            depth.toLocaleString()
+          : 'switch to ' + timeframe;
+      button.setAttribute('aria-disabled', String(Boolean(shallow)));
+      button.addEventListener('click', function () {
+        // Inert rather than `disabled`: a disabled button fires no mouse events
+        // in any browser, so the `title` explaining *why* the rung is out never
+        // appears — and that explanation is the whole reason it is drawn at all.
+        if (shallow) { setStatus(button.title); return; }
+        switchTimeframe(timeframe, stored);
+      });
       host.appendChild(button);
     });
   }
@@ -2111,7 +2330,7 @@ __SHELL_CSS__
     if (stored) {
       datasetSel.value = wanted;
       exactBounds = null;
-      return load();
+      return reload();
     }
     setStatus('fetching ' + timeframe + ' candles …');
     var parts = wanted.split('|');
@@ -2129,7 +2348,7 @@ __SHELL_CSS__
         fillDatasets(rows);
         datasetSel.value = wanted;
         exactBounds = null;
-        return load();
+        return reload();
       })
       .catch(function (error) { setError(error.message); });
   }

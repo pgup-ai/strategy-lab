@@ -32,7 +32,8 @@ def require_signal_set_contract(strategy: object) -> None:
     """Refuse a strategy this runner cannot call, at construction (M40).
 
     Measured before this existed: ``StrategyRunner`` accepted
-    ``state_machine_v2`` and survived **2,192 bars -- 365.3 days at 4h** before
+    ``state_machine_v2`` and survived **2,192 bars -- the warmup of the day,
+    365.3 days at 4h** before
     raising ``AttributeError``, because :meth:`StrategyRunner.on_bar` returns
     before touching the strategy while the buffer is inside warmup. A contract
     mismatch was therefore invisible for exactly as long as the warmup, and the
@@ -155,8 +156,8 @@ class StrategyRunner:
         and hands the bars straight to this. Before R10 the only entry point
         took a DataFrame, and the two did not meet -- which was fatal rather
         than awkward, since
-        ``state_machine_v1`` emits nothing for its first 2,192 bars and a freshly
-        started process would have waited a year at 4h to say anything.
+        ``state_machine_v1`` emits nothing for its first 847 bars and a freshly
+        started process would have waited 141 days at 4h to say anything.
         """
         for bar in bars:
             self.buffer.append(bar)

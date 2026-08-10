@@ -53,7 +53,7 @@ class _FakeMachine:
     """The two-method surface ``_reason_for`` introspects for, and nothing else.
 
     A stand-in rather than the real ``StateMachine`` because this file's whole
-    point is to test the command's wiring without a database or 2,192 warmup
+    point is to test the command's wiring without a database or 847 warmup
     bars; what the machine decides is ``tests/test_state_machine.py``'s subject.
     """
 

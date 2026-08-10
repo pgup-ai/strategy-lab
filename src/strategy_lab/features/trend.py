@@ -28,7 +28,21 @@ from strategy_lab.strategies.base import require_positive_span, validate_ohlcv
 # BTC/USDT perp 4h closes at span 96: a cold start disagrees with the
 # whole-history value on 299/300 probed bars at 10x span and on 277/300 at 15x,
 # then on 0/300 at 20x. Phase 1a measured the same 20x at span 200.
-_EWM_WARMUP_MULTIPLE = 20
+#
+# **That 20x was bit-exactness, and R12 replaced it with 5x** -- the two are
+# very far apart. The weight this EMA puts on a bar decays geometrically: half
+# of it lies in the last 34 bars, 99% in 222, and the bar 1,920 back carries
+# 8.9e-20, four orders of magnitude *below* float64 epsilon. It cannot influence
+# the value at all, and the states prove it: over the 16,651 bars both settings
+# can compute on BTC/USDT spot 4h, **0 differ**.
+#
+# 5x rather than something smaller because `derive_warmup_bars` takes the
+# deepest feature, and below 5x the deepest stops being this one: `strength` and
+# `stability` cost `96 + (480 - 1) = 575`, so 5x, 4x and 3x all declare the same
+# 847-bar warmup. 5x is the most converged setting that reaches that floor --
+# cold-start error 5.1e-5 at 480 bars against 3.3e-3 at 288 -- so going lower
+# buys nothing and only degrades the feature inside a region the strategy masks.
+_EWM_WARMUP_MULTIPLE = 5
 
 
 @dataclass(frozen=True)
