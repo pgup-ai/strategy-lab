@@ -83,10 +83,19 @@ class Contract(str, Enum):
 
 @dataclass(frozen=True)
 class StrategyInfo:
+    """What a caller needs to pick a strategy without loading it.
+
+    ``has_state`` is what ``/api/state`` can answer for, and it is introspected
+    from ``feature_frame`` rather than matched against a list of names -- the
+    same rule ``_why_layer`` follows, so a strategy that grows one is offered
+    without anyone editing a second place.
+    """
+
     name: str
     contract: str
     version: str
     warmup_bars: int
+    has_state: bool
 
 
 @dataclass(frozen=True)
@@ -211,6 +220,14 @@ class AnalysisPayload:
     provenance: Provenance
 
 
+def _has_state(strategy: Strategy | ExposureStrategy) -> bool:
+    """Whether this strategy has a state to show, on ``_why_layer``'s own test."""
+    return (
+        getattr(strategy, "feature_frame", None) is not None
+        and getattr(strategy, "machine", None) is not None
+    )
+
+
 def registered_strategies() -> list[StrategyInfo]:
     """Every strategy either registry knows, labelled by the contract it answers on."""
     entries = [
@@ -219,6 +236,7 @@ def registered_strategies() -> list[StrategyInfo]:
             contract=Contract.SIGNAL_SET.value,
             version=get_strategy(name).version,
             warmup_bars=int(get_strategy(name).warmup_bars),
+            has_state=_has_state(get_strategy(name)),
         )
         for name in list_strategies()
     ]
@@ -228,6 +246,7 @@ def registered_strategies() -> list[StrategyInfo]:
             contract=Contract.TARGET_EXPOSURE.value,
             version=get_exposure_strategy(name).version,
             warmup_bars=int(get_exposure_strategy(name).warmup_bars),
+            has_state=_has_state(get_exposure_strategy(name)),
         )
         for name in list_exposure_strategies()
     )
@@ -384,7 +403,7 @@ def _signal_payload(
         trades=_trades(trades),
         position_size=_values(signals.position_size),
         target=None,
-        why=_why_layer(strategy, df),
+        why=_why_layer(strategy, df)[0],
         provenance=_provenance(
             identity,
             resolved,
@@ -430,7 +449,7 @@ def _exposure_payload(
         trades=[],
         position_size=None,
         target=_values(target),
-        why=_why_layer(strategy, df),
+        why=_why_layer(strategy, df)[0],
         provenance=_provenance(
             identity,
             resolved,
@@ -572,27 +591,41 @@ def _trades(trades: pd.DataFrame) -> list[Trade]:
     return rows
 
 
-def _why_layer(strategy: Strategy | ExposureStrategy, df: pd.DataFrame) -> WhyLayer | None:
-    """Per-bar state and features, for any strategy that can produce them.
+def _why_layer(
+    strategy: Strategy | ExposureStrategy, df: pd.DataFrame
+) -> tuple[WhyLayer | None, bool]:
+    """Per-bar state and features, and whether crowding in them is real.
 
     Introspected rather than matched against a list of state machines, following
     ``sweep_command``'s ``getattr(strategy, "features", ())``: a strategy that
     grows a ``feature_frame`` later is explained without anyone remembering to
     edit this function, and one that has no state to explain gets nothing rather
     than an empty shell that reads as an absence of state.
+
+    The flag rides along because ``build_feature_frame`` returns it here and the
+    signal paths get the same value from their run metadata. ``build_state`` has
+    no run, and inferring it from the values -- a constant crowding column means
+    the neutral fallback -- would be a second derivation of a fact this call
+    already holds.
     """
     feature_frame = getattr(strategy, "feature_frame", None)
     machine = getattr(strategy, "machine", None)
     if feature_frame is None or machine is None:
-        return None
+        return None, False
 
-    frame, _ = feature_frame(df)
+    frame, crowding_measured = feature_frame(df)
     # The machine answers on every bar, warmup included: an unmeasurable row is
     # a failure to it rather than a gap, so there is no missing state to encode.
+    # It is also why a warmup bar reports COMPRESSION -- failing input, not a
+    # quiet market -- and why every view has to draw the ribbon from
+    # ``warmup_bars`` rather than from bar zero.
     states = machine.run(frame)
-    return WhyLayer(
-        states=[state.value for state in states],
-        features={str(name): _values(frame[name]) for name in frame.columns},
+    return (
+        WhyLayer(
+            states=[state.value for state in states],
+            features={str(name): _values(frame[name]) for name in frame.columns},
+        ),
+        crowding_measured,
     )
 
 

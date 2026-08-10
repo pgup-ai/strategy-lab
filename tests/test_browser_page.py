@@ -101,14 +101,18 @@ def test_the_page_draws_a_baseline_series_for_the_level(page):
 
 
 def test_markers_are_only_ever_set_from_the_markers_primitive(page):
-    """The single ``setMarkers`` call is guarded, so a continuous payload cannot
-    put arrows on the chart even if one arrived carrying markers."""
+    """Arrows reach the chart from one place and only under one condition, so a
+    continuous payload cannot put them there even if one arrived carrying
+    markers. A view may *clear* them — the state view runs no book and does —
+    but nothing may set them from anything else."""
     script = _script(page)
     calls = re.findall(r"\.setMarkers\((.*?)\);", script, flags=re.S)
 
-    assert len(calls) == 1, "one place decides, or the guard below proves nothing"
-    assert "primitive === 'markers'" in calls[0]
-    assert ": []" in calls[0], "the other contract must be cleared, not left stale"
+    assert calls, "no setMarkers call at all; the regex stopped matching"
+    setting = [call for call in calls if call.strip() != "[]"]
+    assert len(setting) == 1, f"more than one place decides: {setting}"
+    assert "primitive === 'markers'" in setting[0]
+    assert ": []" in setting[0], "the other contract must be cleared, not left stale"
 
 
 def test_the_level_is_only_ever_set_from_the_baseline_primitive(page):
@@ -356,8 +360,9 @@ def test_the_page_writes_nowhere_but_the_existing_refresh_path(page):
     assert fetched == {
         "/api/analysis",
         "/api/board",
-        "/api/refresh",
         "/api/datasets",
+        "/api/refresh",
+        "/api/state",
         "/api/strategies",
     }
 
@@ -713,7 +718,7 @@ def test_opening_a_tile_carries_its_exact_edges_not_a_rounded_day(page):
         after = script[script.index(owner):]
         assert "exactBounds = null;" in after[: after.index("});")], owner
     # And editing a date, which makes the visible dates the truth again.
-    assert "exactBounds = null;\n      load();" in script
+    assert "exactBounds = null;\n      reload();" in script
 
 
 def test_refreshing_the_instrument_moves_only_the_edge_the_fetch_moved(page):
@@ -733,7 +738,7 @@ def test_refreshing_the_instrument_moves_only_the_edge_the_fetch_moved(page):
     body = _within(script, "function refreshInstrument()")
     assert "exactBounds = { start: exactBounds && exactBounds.start, end: null };" in body
     assert "el('end').value = '';" in body
-    assert body.index("end: null };") < body.index("return load();")
+    assert body.index("end: null };") < body.index("return reload();")
 
 
 def test_a_board_refresh_says_nothing_over_the_instrument_view(page):
@@ -884,7 +889,12 @@ def test_a_transition_inside_warmup_is_marked_rather_than_hidden(page):
     # with no count is a style nobody can act on.
     assert "if (early) inWarmup += 1;" in script
     assert "el('transitions-note').textContent = inWarmup" in script
-    assert "are not decisions." in script
+    # The note carries the *reason*, which is also the ribbon's: inside warmup
+    # the machine's inputs are not measurable, it reads that as failing, and
+    # failing renders as compression. Without it a reader has a dimmed row and a
+    # ribbon that starts late, and nothing connecting them.
+    assert "not measurable yet" in script
+    assert "not readings of" in script or "not readings of the market" in script
 
 
 def test_clicking_a_transition_recentres_only_when_the_bar_is_off_screen(page):
@@ -1013,11 +1023,34 @@ def test_the_state_ribbon_is_coloured_from_the_series_the_payload_carries(page):
     draw = _within(script, "function drawStateRibbon(payload)")
 
     assert "payload.why ? payload.why.states : null" in draw
-    assert "CFG.stateColors[states[i]]" in draw
+    assert "CFG.stateColors[states[warmup + i]]" in draw
     # Constant height: the ribbon says which state, never how much of it.
     assert "value: 1," in draw
     # And nothing to colour means no ribbon and no legend, rather than a blank band.
     assert "stateSeries.setData([]);" in draw
+
+
+def test_the_ribbon_starts_at_warmup_rather_than_at_bar_zero(page):
+    """The lie this view exists to not tell.
+
+    The machine answers on every bar. Inside warmup its inputs are NaN, it reads
+    that as *failing*, and failing renders as COMPRESSION — measured on BTC/USDT
+    spot 1d with `state_machine_v1`, 3,060 bars against a 2,192-bar warmup, the
+    machine reports `compression` on 2,114 of the 2,192 warmup bars. Drawn from
+    bar zero, 72% of that chart said "chop" over the range where the machine
+    knew nothing, which is the one reading a regime chart must never give.
+    """
+    draw = _within(_script(page), "function drawStateRibbon(payload)")
+
+    assert "payload.bars.slice(warmup)" in draw, "the ribbon still starts at bar zero"
+    assert "var warmup = payload.provenance.warmup_bars || 0;" in draw
+    # The slice re-bases the index and `states` is not sliced with it, so the
+    # offset has to be added back or every band shows a state from 2,192 bars
+    # earlier — which still renders, and still looks like a ribbon.
+    assert "states[warmup + i]" in draw
+    # And the blank stretch is named, or it reads as a rendering failure.
+    assert 'id="warmup-swatch"' in page
+    assert "before warmup" in page
 
 
 def test_the_lifecycle_keeps_its_own_order_and_its_colours_come_from_python(page):
@@ -1043,6 +1076,45 @@ def test_the_timeframe_rungs_sit_with_the_chart_not_with_the_query(page):
 
     assert charts < markup.index('id="ladder"') < markup.index('id="price-pane"')
     assert 'id="ladder"' not in markup[: markup.index('<span class="range"')]
+
+
+def test_the_state_view_offers_only_strategies_that_have_a_state(page):
+    """`/api/state` refuses a strategy with no feature frame, and the refusal
+    would read as a fault in the dataset. Filtered on the server's own
+    `has_state`, not on a list of names kept here — the same reason the contract
+    is published rather than inferred from the name."""
+    script = _script(page)
+    body = _within(script, "function syncStrategyChoices()")
+
+    assert "row.has_state ? 'yes' : 'no'" in script
+    assert "stateOnly && options[i].dataset.hasState !== 'yes'" in body
+    # Landing on a hidden option is the same refusal by another route.
+    assert "strategySel.selectedOptions[0].hidden" in body
+
+
+def test_a_rung_too_shallow_for_its_strategy_says_so_instead_of_refusing(page):
+    """Warmup is counted in *bars*, so one strategy is comfortable at 4h and
+    permanently impossible at 1w on the same instrument: 2,192 bars is 365 days
+    against 42 years. Measured — BTC/USDT spot 1w holds 438 bars, and no venue
+    has the other 1,754."""
+    ladder = _within(_script(page), "function renderLadder()")
+
+    assert "depth <= warmup" in ladder
+    assert "'shallow'" in ladder
+    # Distinct from `absent`, which is one click from being fixed.
+    assert ".ladder button.shallow" in _style(page)
+    assert "'absent'" in ladder
+
+
+def test_the_state_view_asks_for_no_parameter_that_implies_execution(page):
+    """A cost model on a path that opened no book would describe one that never
+    ran, and `/api/state` refuses unknown parameters by name — so an exit mode
+    sent from here is a 422, not a quietly ignored field."""
+    body = _within(_script(page), "function stateQuery()")
+
+    for absent in ("exit_mode", "fees", "slippage", "cash", "position_pct"):
+        assert absent not in body, f"the state view sent {absent}"
+    assert "params.set('strategy', strategySel.value);" in body
 
 
 def test_the_realised_total_counts_closed_trades_only(page):
@@ -1140,7 +1212,10 @@ def test_a_bar_close_refresh_does_not_redraw_over_the_board(page):
     script = _script(page)
 
     tick = _within(script, "function onTick(message)")
-    assert "if (viewSel.value !== 'instrument') return;" in tick
+    # Named as the view it must not draw over, rather than the one it may: a bar
+    # closing should refresh whichever chart is up, and an allow-list of one
+    # silently froze the state view's live pill the moment it was added.
+    assert "if (viewSel.value === 'board') return;" in tick
     refresh = _within(script, "function refreshInstrument()")
     assert "var startedIn = viewSel.value;" in refresh
     assert "if (viewSel.value !== startedIn) return null;" in refresh

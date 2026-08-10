@@ -21,6 +21,7 @@ after the question you arrived with.
 
 | I want to… | run | where it is explained |
 |---|---|---|
+| **just watch what state the market is in** | `strategy-lab browse` → view `state` | [The state view](#the-state-view-regime-only) |
 | **watch live prices, signals and state** | `strategy-lab browse` | [The live pill](#the-live-pill-a-forming-candle-and-a-refresh-when-it-closes) |
 | see any strategy on any stored candle set | `strategy-lab browse` | [browse — the live view](#two-ways-to-look-at-a-strategy) |
 | run a strategy against the venue, on paper | `strategy-lab paper` | [Paper Trading](#paper-trading-against-the-live-venue) |
@@ -596,6 +597,66 @@ of them where two ratio-based strategies differed on none. The board opens on
 Refresh is **explicit** — per tile or all tiles — and never on a *timer*. A
 background poll that talks to a venue on its own schedule is a different thing
 from a page you refreshed, and only the second is honest about when it last did.
+
+### The state view: regime only
+
+The **`state`** rung of the view selector drops everything about trading and
+keeps the regime: candles, volume, the state ribbon, and the five features
+behind it — `direction`, `strength`, `stability`, `crowding`, `energy` — with the
+same live pill and the same timeframe ladder. No arrows, no trades, no exit
+mode, no cost model: not hidden, **absent**, because none of them were computed.
+
+That last part is the reason it exists rather than being a checkbox on the
+instrument view. Measured on BTC/USDT spot 4h, 18,842 bars:
+
+| stage | cost |
+|---|---|
+| load candles | 181 ms |
+| `generate_signals` | 25 ms |
+| state + all five features | 45 ms |
+| `Portfolio.from_signals` | **2,951 ms** |
+
+The half you don't want is 92% of the time. `GET /api/state` skips it, and the
+same request that took 3,202 ms comes back in ~540 ms. It is still a *slice* of
+`build_analysis` rather than a cheaper route to the same answer — it calls the
+same `prepare_frame` and the same feature/machine code, and
+`tests/test_api_state.py` pins the two to agree bar for bar.
+
+**It only offers the strategies that have a state** (`state_machine_v1`,
+`state_machine_v2`), on the server's own `has_state` flag rather than a list of
+names.
+
+#### Not every timeframe can carry a state, and the ladder says which
+
+A state needs **2,192 bars** before its first reading — 1,920 of that is
+`direction`'s 20×span-96 EMA, plus 272 for the machine to converge. Warmup is
+counted in *bars*, so the same number is 365 days at 4h and **42 years at 1w**.
+A rung whose stored set is too short is struck through with the count, rather
+than clicking into a refusal:
+
+| | crypto (Binance) | equity (Yahoo) |
+|---|---|---|
+| **15m** | ✅ | ❌ Yahoo caps 15m at 60 days → 1,040 bars |
+| **1h** | ✅ | ⚠️ capped at 730 days → ~1,280 readings |
+| **4h** | ✅ | ❌ capped at 730 days → 993 bars |
+| **1d** | ✅ | ✅ |
+| **1w** | ❌ BTC has 438 weeks of the 2,192 needed | ❌ SPY has 1,750 |
+
+The equity gaps are Yahoo's own limits, named in its errors, and no amount of
+fetching moves them. The weekly gap is arithmetic: 2,192 weeks is longer than
+most instruments have existed.
+
+#### The ribbon starts at warmup, and that is not a cosmetic choice
+
+The machine answers on **every** bar. Inside warmup its inputs are `NaN`, which
+it reads as *failing* — and failing renders as `COMPRESSION`. Measured on
+BTC/USDT spot 1d with `state_machine_v1`, 3,060 bars against a 2,192-bar warmup:
+the machine reports `compression` on **2,114 of the 2,192 warmup bars**. Drawn
+from bar zero, 72% of that chart said "chop" over exactly the range where the
+machine knew nothing — the one reading a regime chart must never give. So the
+ribbon begins at `warmup_bars`, the legend names the blank stretch
+*before warmup*, and the provenance strip carries **State from** with the date
+and the count.
 
 ### The live pill: a forming candle, and a refresh when it closes
 

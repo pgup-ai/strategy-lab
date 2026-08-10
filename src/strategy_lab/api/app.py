@@ -1,4 +1,4 @@
-"""The research browser's HTTP surface: read-only, loopback, one page and five
+"""The research browser's HTTP surface: read-only, loopback, one page and six
 endpoints.
 
 Read-only means read-only. Nothing here writes to ``signals`` or
@@ -40,8 +40,11 @@ from strategy_lab.api.models import (
     DatasetModel,
     RefreshModel,
     RefreshQuery,
+    StateModel,
+    StateQuery,
     StrategyModel,
 )
+from strategy_lab.api.state import StateUnavailable, build_state
 from strategy_lab.backtests.funding_frame import FundingUnavailable
 from strategy_lab.db import list_candle_sets
 from strategy_lab.market_data.base import MarketDataIdentity
@@ -86,6 +89,13 @@ def create_app() -> FastAPI:
         # 409 rather than 404: the candles exist, and it is their funding history
         # that cannot support the strategy that was asked for. The message names
         # the fetch command that fixes it.
+        return JSONResponse({"detail": str(exc)}, status_code=409)
+
+    @app.exception_handler(StateUnavailable)
+    async def _no_state(request: Request, exc: StateUnavailable) -> JSONResponse:
+        # 409 for the same reason funding gets one: the request was well formed
+        # and the candles are there, and it is the frame that cannot answer. A
+        # 400 would send a reader looking for a typo in a query that had none.
         return JSONResponse({"detail": str(exc)}, status_code=409)
 
     @app.exception_handler(ValueError)
@@ -134,6 +144,28 @@ def create_app() -> FastAPI:
             position_pct=query.position_pct,
             funding=query.funding,
             allow_shorts=query.allow_shorts,
+        )
+        return asdict(payload)
+
+    @app.get("/api/state", response_model=StateModel)
+    def state(query: Annotated[StateQuery, Query()]) -> dict[str, Any]:
+        """Candles and the machine's reading of them — no book, no fills.
+
+        Not ``/api/analysis`` with the trading half switched off: this one skips
+        ``from_signals`` entirely, which is 92% of that call's time on a
+        18,842-bar frame.
+        """
+        payload = build_state(
+            MarketDataIdentity(
+                exchange=query.exchange,
+                market_type=query.market_type,
+                symbol=query.symbol,
+                timeframe=query.timeframe,
+            ),
+            strategy_name=query.strategy,
+            start=query.start,
+            end=query.end,
+            funding=query.funding,
         )
         return asdict(payload)
 

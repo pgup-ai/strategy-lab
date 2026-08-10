@@ -287,11 +287,25 @@ class DatasetModel(_Strict):
     stream: str | None = None
 
 
+class StateQuery(IdentityQuery):
+    """What a state reading depends on, which is markedly less than an analysis.
+
+    No exit mode, no fees, no cash: none of them move a feature or a state, and
+    accepting one would imply this path executed something.
+    """
+
+    strategy: Annotated[str, Field(min_length=1, max_length=64)]
+    start: str | None = None
+    end: str | None = None
+    funding: bool = True
+
+
 class StrategyModel(_Strict):
     name: str
     contract: str
     version: str
     warmup_bars: int
+    has_state: bool
 
 
 class BarModel(_Strict):
@@ -358,6 +372,28 @@ class AnalysisModel(_Strict):
     target: list[float | None] | None
     why: WhyModel | None
     provenance: ProvenanceModel
+
+
+class StateProvenanceModel(_Strict):
+    identity: dict[str, str]
+    strategy: str
+    version: str
+    warmup_bars: int
+    bar_count: int
+    measurable_bars: int
+    first_bar: str
+    measurable_from: str
+    last_bar: str
+    reads_crowding: bool
+    crowding_measured: bool
+    funding_attached: bool
+    generated_at: str
+
+
+class StateModel(_Strict):
+    bars: list[BarModel]
+    why: WhyModel
+    provenance: StateProvenanceModel
 
 
 class BoardRowModel(_Strict):
