@@ -21,7 +21,12 @@ BROAD_ETFS: list[EtfDefinition] = [
 
 # International equity ETFs
 INTERNATIONAL_ETFS: list[EtfDefinition] = [
-    EtfDefinition(symbol="XIU", name="iShares S&P/TSX 60 Index ETF", sector="broad", inception="1999-09-28"),
+    # `.TO` is the listing, not decoration: Yahoo resolves a bare `XIU` to
+    # nothing at all -- measured, 0 rows against 1,657 for `XIU.TO` over the same
+    # window -- and the fetcher reports that as an empty frame rather than as an
+    # unknown ticker. It is also the one instrument here priced in **CAD**, so a
+    # cross-sectional read over this universe spans two currencies.
+    EtfDefinition(symbol="XIU.TO", name="iShares S&P/TSX 60 Index ETF", sector="broad", inception="1999-09-28"),
     EtfDefinition(symbol="EFA", name="iShares MSCI EAFE ETF", sector="broad", inception="2001-08-14"),
     EtfDefinition(symbol="EEM", name="iShares MSCI Emerging Markets ETF", sector="broad", inception="2003-04-07"),
 ]

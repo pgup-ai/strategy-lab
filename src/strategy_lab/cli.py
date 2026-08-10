@@ -286,11 +286,19 @@ def fetch_etf_universe(
         target = [etf.symbol for etf in ETF_UNIVERSE]
 
     client = YahooFinanceClient()
+    # Collected rather than raised on the spot, then reported non-zero at the
+    # end. One unresolvable ticker must not cost the other seventeen their
+    # fetch, and it must not let the command exit 0 either -- `XIU` sat
+    # unfetched behind a single "No data returned" line among eighteen while
+    # this returned success, which is the same shape as the single-symbol
+    # `_raise_empty_fetch` exists to refuse.
+    empty: list[str] = []
     for symbol in target:
         typer.echo(f"Fetching {symbol} {timeframe} from {start} ...")
         df = client.fetch_ohlcv(symbol, timeframe, start=start, end=end)
         if df.empty:
             typer.echo(f"  No data returned for {symbol}")
+            empty.append(symbol)
             continue
         records = normalize_candle_frame(
             df,
@@ -302,6 +310,18 @@ def fetch_etf_universe(
         )
         count = upsert_candles(records)
         typer.echo(f"  Upserted {count} candles for yahoo/equity/{symbol}/{timeframe}.")
+
+    if empty:
+        # Yahoo answers an unknown ticker with an empty frame rather than an
+        # error, so "no rows" and "no such symbol" arrive identically. A foreign
+        # listing needs its suffix: a bare `XIU` returns nothing where `XIU.TO`
+        # returns 1,657 daily bars over the same window.
+        raise typer.BadParameter(
+            f"The venue returned no rows for {len(empty)} of {len(target)} symbols: "
+            f"{', '.join(empty)}. Yahoo answers an unknown ticker with an empty "
+            f"frame, so check the spelling and that a non-US listing carries its "
+            f"exchange suffix."
+        )
 
 
 @app.command("backtest")

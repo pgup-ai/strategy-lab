@@ -95,9 +95,15 @@ def test_a_board_over_every_stored_perp_answers_one_row_per_dataset():
     unbounded request raises ``FundingUnavailable`` permanently and correctly --
     a board that asked for "every dataset" and did not bound each frame by its
     own funding span would fail on the first instrument and show none of the
-    others. Storage also holds a 25-bar 1h probe set, which is shorter than any
-    state machine's warmup: that row reports the engine's own refusal and its
-    four neighbours are unaffected.
+    others.
+
+    A dataset shorter than the strategy's warmup reports the engine's own
+    refusal without touching its neighbours. That used to be asserted against a
+    25-bar 1h probe set that happened to be stored; a backfill took it to 57,915
+    bars and this failed — the test had been pinned to the data being broken.
+    The refused-row *shape* is proven deterministically in
+    ``test_a_refused_row_carries_the_reason_and_nothing_else``, and what belongs
+    here is that the two groups partition the board.
     """
     client = TestClient(app_module.create_app())
     stored = list_candle_sets()
@@ -119,18 +125,43 @@ def test_a_board_over_every_stored_perp_answers_one_row_per_dataset():
         assert row["provenance"]["crowding_measured"] is True
 
     refused = [row for row in rows if row["unavailable"] is not None]
-    assert refused, "the 25-bar 1h probe set should be unanswerable for a state machine"
-    for row in refused:
-        # A refused row carries the reason and nothing else. Half an answer
-        # beside an explanation is worse than neither: a reader cannot tell
-        # which fields the refusal invalidated.
-        assert row["provenance"] is None
-        assert (row["state"], row["features"], row["latest_fill"], row["closes"]) == (
-            None,
-            None,
-            None,
-            [],
+    assert len(answered) + len(refused) == len(rows), "a row was neither"
+
+
+def test_a_refused_row_carries_the_reason_and_nothing_else(monkeypatch):
+    """Half an answer beside an explanation is worse than neither: a reader
+    cannot tell which fields the refusal invalidated.
+
+    Constructed rather than found. This used to ride on a 25-bar probe set
+    sitting in the research database, so deepening that dataset deleted the
+    coverage — the assertion that mattered was never about *that* dataset.
+    """
+    _stub_datasets(monkeypatch, [("BTC/USDT", "4h")])
+
+    def _too_short(*_args, **_kwargs):
+        # The engine's own message, raised where the engine raises it: a frame
+        # shorter than the declared warmup.
+        raise ValueError(
+            "state_machine_v1 declares 2192 warmup bars but the frame has 25; "
+            "every bar would be masked"
         )
+
+    monkeypatch.setattr("strategy_lab.api.board.build_analysis", _too_short)
+    client = TestClient(app_module.create_app())
+
+    [row] = _rows(client.get("/api/board", params={"strategies": _MACHINE}))
+
+    assert "the frame has 25" in row["unavailable"]
+    assert row["provenance"] is None
+    assert (row["state"], row["features"], row["latest_fill"], row["closes"]) == (
+        None,
+        None,
+        None,
+        [],
+    )
+    # Both facts about the stored candles survive a refusal: neither describes a
+    # run that did not happen.
+    assert row["dataset_last_bar"] and row["last_written"]
 
 
 def test_funding_that_cannot_cover_the_candles_is_reported_in_the_row(monkeypatch):
@@ -596,9 +627,13 @@ def test_the_sparkline_tail_is_bounded_by_what_was_asked_for(monkeypatch):
 # R10c -- a second market type, on the same one computation.
 # --------------------------------------------------------------------------
 
-# Weekly ETF sets of 333 bars each: short enough that ``state_machine_v1`` (2,192
-# warmup bars) refuses them and long enough that ``donchian`` (96) does not,
-# which is what makes a board of real answers *and* refusals rather than a stub.
+# Weekly ETF sets: short enough that ``state_machine_v1`` (2,192 warmup bars)
+# refuses them and long enough that ``donchian`` (96) does not, which is what
+# makes a board of real answers *and* refusals rather than a stub. A weekly set
+# reaching 2,192 bars would be 42 years of history, so this stays true of any
+# fetch -- but the *count* in the refusal is read from the frame rather than
+# written down here, because a backfill moved these from 333 bars to 345 and the
+# literal was the only thing that failed.
 _SHORT_WEEKLIES = {("yahoo", "equity", symbol, "1w") for symbol in ("XLF", "XLK", "QQQ", "SMH")}
 
 _EQUITY_STRATEGIES = f"{_MACHINE},donchian"
@@ -623,7 +658,7 @@ def test_a_board_over_every_stored_equity_answers_one_row_per_dataset_and_strate
         for row in stored[stored["market_type"] == "equity"].itertuples()
     }
     assert equities, "no stored equity datasets; fetch one before running this"
-    assert _SHORT_WEEKLIES <= equities, "the 333-bar weekly sets are not stored"
+    assert _SHORT_WEEKLIES <= equities, "the short weekly sets are not stored"
 
     rows = _rows(
         client.get(
@@ -638,7 +673,12 @@ def test_a_board_over_every_stored_equity_answers_one_row_per_dataset_and_strate
     for key in _SHORT_WEEKLIES:
         refused = by_pair[(key, _MACHINE)]
         assert refused["unavailable"] is not None, key
-        assert "warmup bars but the frame has 333" in refused["unavailable"], key
+        # Read from the frame, so this asserts the message reports the real
+        # length rather than that the database still holds a particular one.
+        stored_bars = len(load_candles(
+            exchange=key[0], market_type=key[1], symbol=key[2], timeframe=key[3]
+        ))
+        assert f"but the frame has {stored_bars}" in refused["unavailable"], key
         # The refusal is the whole of the row, and the two facts about the stored
         # bars survive it -- neither describes a run that did not happen.
         assert refused["provenance"] is None
