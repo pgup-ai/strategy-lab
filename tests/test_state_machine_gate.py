@@ -297,7 +297,7 @@ def test_the_baseline_is_a_cell_of_the_pinned_r0_surface():
 def test_both_sides_trade_the_same_out_of_sample_bars(machine_run, default_run, baseline_run):
     """The comparison is only a comparison if the runs cover one window.
 
-    The machine warms 2,192 bars and donchian 40, so a shared frame start would
+    The machine warms 847 bars and donchian 40, so a shared frame start would
     hand donchian 2,152 bars the machine cannot see.
     """
     for run in (machine_run, default_run, baseline_run):

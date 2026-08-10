@@ -157,10 +157,18 @@ def test_a_strategy_with_no_state_is_refused_by_name(deep_frame):
 
 def test_what_the_state_view_offers_is_what_it_accepts():
     """``has_state`` is published so the page can filter, and read back by
-    ``build_state`` so the filter and the refusal cannot drift apart."""
+    ``build_state`` so the filter and the refusal cannot drift apart.
+
+    Asserted against the predicate rather than a list of names, which would fail
+    the day a third state machine is registered for a reason saying nothing.
+    """
+    from strategy_lab.api.analysis import _has_state, resolve_strategy
+
     offered = {entry.name for entry in registered_strategies() if entry.has_state}
 
-    assert offered == {"state_machine_v1", "state_machine_v2"}
+    assert offered, "nothing offers a state, so the filter below proves nothing"
+    for entry in registered_strategies():
+        assert entry.has_state == _has_state(resolve_strategy(entry.name).strategy)
 
 
 def test_the_reading_agrees_with_the_analysis_path_bar_for_bar(deep_frame):

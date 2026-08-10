@@ -5,7 +5,7 @@ wiring the command owns -- horizon parsing, funding attachment, which features a
 frame can support, the report directory, both artifacts and what it echoes --
 rather than Postgres.
 
-The frame is 4h and long enough to clear Direction's 1,920-bar warmup, since a
+The frame is 4h and long enough to clear Direction's 480-bar warmup, since a
 command that quietly diagnoses eight of nine features is exactly the failure the
 R4 gate exists to prevent.
 """
@@ -25,7 +25,7 @@ from tests.conftest import synthetic_ohlcv, synthetic_ohlcv_with_funding
 
 runner = CliRunner()
 
-# Direction needs 1,920 bars of warmup and the diagnostic needs a sample past it.
+# Direction needs 480 bars of warmup and the diagnostic needs a sample past it.
 _BARS = 2600
 
 

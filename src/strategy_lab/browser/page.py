@@ -606,13 +606,10 @@ __SHELL_CSS__
   var priceChart = LWC.createChart(el('price-pane'), theme);
 
   // **Added before the candles, because that is the only z-order control there
-  // is.** Series within a pane draw in the order they were added, so this one
-  // is behind price and volume; added after, it paints over the candles and the
-  // chart becomes unreadable rather than tinted.
-  //
-  // A full-height histogram on its own overlay scale, which is how a
-  // "background colour per bar" is expressed here -- Lightweight Charts has no
-  // per-bar background API. `scaleMargins` of 0/0 makes each bar span the pane.
+  // is.** Series within a pane draw in the order they were added; added after,
+  // this paints over them and the chart is unreadable rather than tinted.
+  // A full-height histogram on its own overlay scale is how "background colour
+  // per bar" is expressed at all -- Lightweight Charts has no such API.
   var regionSeries = priceChart.addSeries(LWC.HistogramSeries, {
     priceScaleId: 'state-shade', lastValueVisible: false, priceLineVisible: false,
     priceFormat: { type: 'volume' }
@@ -783,10 +780,8 @@ __SHELL_CSS__
   }
 
   var streams = {};
-  // How many bars each stored set holds, for the ladder's reach check.
-  var depths = {};
-  // Whether the state is painted behind price as well as under it.
-  var shading = { on: true };
+  var depths = {};   // bars per stored set, for the ladder's reach check
+  var shading = { on: true };   // is the state painted behind price, not only under it
 
   function fillDatasets(rows) {
     var deepest = null;
@@ -867,9 +862,8 @@ __SHELL_CSS__
     }));
   }
 
-  // A state colour at the opacity a *background* can carry. The ribbon uses the
-  // colour itself; behind candles the same value drowns them, and the wick of a
-  // down bar against solid `exhaustion` red is the case that decides it.
+  // A state colour at the opacity a *background* can carry: the ribbon uses the
+  // colour itself, and behind candles that value drowns a down bar's wick.
   function shade(hex) {
     var n = parseInt(hex.slice(1), 16);
     return 'rgba(' + ((n >> 16) & 255) + ',' + ((n >> 8) & 255) + ',' + (n & 255) +
@@ -890,10 +884,10 @@ __SHELL_CSS__
     // **The ribbon starts at warmup, not at bar zero.** The machine answers on
     // every bar, and inside warmup its inputs are NaN, which it reads as
     // *failing* -- and failing renders as COMPRESSION. Measured on BTC/USDT
-    // spot 1d with `state_machine_v1`, 3,060 bars against a 2,192-bar warmup:
-    // the machine reports `compression` on 2,114 of those 2,192 bars. Drawn
-    // from bar zero, 72% of this chart said "chop" over the range where the
-    // machine knew nothing, which is the exact reading it exists to give.
+    // spot 1d with `state_machine_v1`, 3,144 bars against an 847-bar warmup:
+    // the machine reports `compression` on all 847 of them. Drawn from bar
+    // zero, 27% of this chart said "chop" over the range where the machine knew
+    // nothing, which is the exact reading it exists to give.
     var warmup = payload.provenance.warmup_bars || 0;
     // Constant height: the ribbon says *which* state, never how much of it.
     stateSeries.setData(payload.bars.slice(warmup).map(function (bar, i) {
@@ -2123,9 +2117,8 @@ __SHELL_CSS__
     view.why = payload.why;
     view.index = {};
     payload.bars.forEach(function (bar, i) { view.index[bar.time] = i; });
-    // Nothing was executed, so there is nothing to mark. Assigned rather than
-    // left alone for the reason `draw` assigns both of its layers: a view must
-    // not inherit the last one's fills.
+    // Nothing was executed, so there is nothing to mark -- assigned rather than
+    // left alone, so this view cannot inherit the last one's fills.
     view.fills = {};
     markerLayer.setMarkers([]);
     el('exposure-wrap').hidden = true;
@@ -2280,8 +2273,8 @@ __SHELL_CSS__
       var stored = Object.prototype.hasOwnProperty.call(streams, wanted) ||
         Array.prototype.some.call(datasetSel.options, function (o) { return o.value === wanted; });
       // Warmup is counted in *bars*, so the same strategy is comfortable on one
-      // rung and permanently impossible on another: 2,192 bars is 365 days at 4h
-      // and 42 years at 1w. Better said on the rung than discovered by clicking
+      // rung and permanently impossible on another: 847 bars is 141 days at 4h
+      // and 16 years at 1w. Better said on the rung than discovered by clicking
       // it and reading a refusal.
       var warmup = Number(
         strategySel.selectedOptions[0] &&

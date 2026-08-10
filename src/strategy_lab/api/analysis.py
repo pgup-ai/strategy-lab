@@ -435,7 +435,7 @@ def _exposure_payload(
     exposure = strategy.compute_target(df)
     # Flattened by the engine's own function, not returned raw. A strategy may
     # emit a non-zero target inside its declared warmup -- measured,
-    # ``state_machine_v2`` does so on 45 of its 2,192 warmup rows -- and
+    # ``state_machine_v2`` does so on 62 of its 847 warmup rows -- and
     # ``run_exposure_backtest`` zeroes those before executing anything. Drawing
     # the raw target would put exposure on the page over bars a backtest holds
     # nothing on, which is the continuous contract's version of marking signals

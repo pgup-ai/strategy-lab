@@ -24,10 +24,10 @@ chart it links to.
 never runs the engine, and without its own check the failure is silent and
 specific: the machine answers on every bar, an unmeasurable row reads to it as
 *failing*, and failing renders as ``COMPRESSION``. Measured on BTC/USDT spot 1d
-with ``state_machine_v1`` -- 3,060 bars against a 2,192-bar warmup -- the
-machine reports ``compression`` on **2,114 of the 2,192 warmup bars**. A view
-whose whole purpose is "when is this chopping" would answer "chopping" over
-exactly the range where it knows nothing.
+with ``state_machine_v1`` -- 3,144 bars against an 847-bar warmup -- the machine
+reports ``compression`` on **847 of the 847 warmup bars**. A view whose whole
+purpose is "when is this chopping" would answer "chopping" over exactly the
+range where it knows nothing.
 """
 
 from __future__ import annotations

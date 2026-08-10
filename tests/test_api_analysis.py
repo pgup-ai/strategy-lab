@@ -34,7 +34,7 @@ from tests.conftest import synthetic_ohlcv, synthetic_ohlcv_with_funding
 _PERP = MarketDataIdentity(
     exchange="binance", market_type="perp", symbol="BTC/USDT", timeframe="4h"
 )
-# state_machine_v1 warms 2,192 bars, so anything exercising it needs a frame
+# state_machine_v1 warms 847 bars, so anything exercising it needs a frame
 # several times that before a single signal exists to compare.
 _MACHINE_BARS = 3000
 # Past BTC's permanent 40h leading funding gap, which would otherwise refuse the
@@ -105,7 +105,7 @@ _EQUITY = MarketDataIdentity(
 def equity_frame(monkeypatch):
     """Long enough for the state machine, on a market that settles nothing.
 
-    ``spot_frame`` is 900 bars and ``state_machine_v1`` warms 2,192, so it
+    ``spot_frame`` is 900 bars and ``state_machine_v1`` warms 847, so it
     refuses before reaching provenance -- and the whole point here is a frame
     that gets all the way to an answer with one of its features pinned.
     """

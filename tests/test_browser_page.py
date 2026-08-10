@@ -140,7 +140,7 @@ def test_every_registered_strategy_resolves_to_a_primitive(client, strategy, con
 def test_the_level_a_continuous_strategy_answers_with_is_unmarkable(monkeypatch):
     """The other half of the claim, and the measurement behind it: this target
     takes values markers have no word for, so drawing it as fills is not a
-    styling choice. ``state_machine_v2`` warms 2,192 bars, so the frame has to
+    styling choice. ``state_machine_v2`` warms 847 bars, so the frame has to
     clear that before there is a level to look at at all."""
     monkeypatch.setattr(
         "strategy_lab.api.analysis.load_candles",
@@ -872,8 +872,8 @@ def test_a_strategy_with_no_state_machine_shows_no_sequence(page):
 
 
 def test_a_transition_inside_warmup_is_marked_rather_than_hidden(page):
-    """Measured on BTC/USDT perp 4h over 2023-01-01 → 2024-06-01: 8 of 50
-    changes fall inside `state_machine_v1`'s 2,192-bar warmup. The machine really
+    """Measured on BTC/USDT perp 4h over 2023-01-01 → 2024-06-01: 11 of 107
+    changes fall inside `state_machine_v1`'s 847-bar warmup. The machine really
     walked through them, so hiding them would misreport the sequence — but the
     strategy was not acting yet, so showing them plain would read as decisions.
     """
@@ -1035,17 +1035,17 @@ def test_the_ribbon_starts_at_warmup_rather_than_at_bar_zero(page):
 
     The machine answers on every bar. Inside warmup its inputs are NaN, it reads
     that as *failing*, and failing renders as COMPRESSION — measured on BTC/USDT
-    spot 1d with `state_machine_v1`, 3,060 bars against a 2,192-bar warmup, the
-    machine reports `compression` on 2,114 of the 2,192 warmup bars. Drawn from
-    bar zero, 72% of that chart said "chop" over the range where the machine
-    knew nothing, which is the one reading a regime chart must never give.
+    spot 1d with `state_machine_v1`, 3,144 bars against an 847-bar warmup, the
+    machine reports `compression` on all 847 of them. Drawn from bar zero, 27%
+    of that chart said "chop" over the range where the machine knew nothing,
+    which is the one reading a regime chart must never give.
     """
     draw = _within(_script(page), "function drawStateRibbon(payload)")
 
     assert "payload.bars.slice(warmup)" in draw, "the ribbon still starts at bar zero"
     assert "var warmup = payload.provenance.warmup_bars || 0;" in draw
     # The slice re-bases the index and `states` is not sliced with it, so the
-    # offset has to be added back or every band shows a state from 2,192 bars
+    # offset has to be added back or every band shows a state from 847 bars
     # earlier — which still renders, and still looks like a ribbon.
     assert "states[warmup + i]" in draw
     # And the blank stretch is named, or it reads as a rendering failure.
@@ -1135,36 +1135,28 @@ def test_the_state_view_offers_only_strategies_that_have_a_state(page):
 
 def test_a_rung_too_shallow_for_its_strategy_says_so_instead_of_refusing(page):
     """Warmup is counted in *bars*, so one strategy is comfortable at 4h and
-    permanently impossible at 1w on the same instrument: 2,192 bars is 365 days
-    against 42 years. Measured — BTC/USDT spot 1w holds 438 bars, and no venue
-    has the other 1,754."""
+    permanently impossible at 1w on the same instrument: 847 bars is 141 days
+    against 16 years. Measured — BTC/USDT spot 1w holds 450 bars, and no venue
+    has the other 397."""
     ladder = _within(_script(page), "function renderLadder()")
 
     assert "depth <= warmup" in ladder
     assert "'shallow'" in ladder
+    # Distinct from `absent`, which is one click from being fixed.
+    assert ".ladder button.shallow" in _style(page)
+    assert "'absent'" in ladder
+
     # `current` and `shallow` compose rather than exclude: the selected rung can
     # also be the one that cannot answer — picked from the dropdown it drew plain
     # while the page showed a 409, the one rung the strike-through never reached.
     assert "timeframe === current ? 'current' : ''," in ladder
     assert ".filter(Boolean).join(' ')" in ladder
-    # Distinct from `absent`, which is one click from being fixed.
-    assert ".ladder button.shallow" in _style(page)
-    assert "'absent'" in ladder
 
-
-def test_a_shallow_rung_does_not_navigate_into_the_refusal_it_replaces(page):
-    """Striking the rung through was only half of it. The click handler still
-    switched the dataset, so a struck-through rung landed on the 409 it exists to
-    save you from — and left the previous chart up under an error banner.
-
-    Inert rather than `disabled`, because a disabled button fires no mouse events
-    and the `title` naming the shortfall is the reason the rung is drawn at all.
-    """
-    ladder = _within(_script(page), "function renderLadder()")
-
+    # And it is inert rather than `disabled`: a disabled button fires no mouse
+    # events, so the `title` naming the shortfall — the reason the rung is drawn
+    # at all — would never appear. The guard sits before the navigation.
     assert "if (shallow) { setStatus(button.title); return; }" in ladder
     assert "aria-disabled" in ladder
-    # And the guard must sit before the navigation, not after it.
     assert ladder.index("if (shallow)") < ladder.index("switchTimeframe(timeframe, stored)")
 
 

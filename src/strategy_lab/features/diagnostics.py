@@ -245,7 +245,7 @@ def diagnose_features(
         for feature in ordered
     )
     # Pairwise-complete by construction: pandas drops rows where either column is
-    # NaN, per pair, which is the only workable rule when Direction needs 1,920
+    # NaN, per pair, which is the only workable rule when Direction needs 480
     # bars of warmup and Persistence needs 96.
     matrix = pd.DataFrame(computed).corr()
     return DiagnosticSet(

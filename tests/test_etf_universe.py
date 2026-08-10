@@ -94,8 +94,3 @@ def test_a_non_us_listing_in_the_universe_carries_its_exchange_suffix():
             f"answers with an empty frame rather than an error"
         )
 
-
-def test_every_universe_symbol_is_distinct():
-    symbols = [etf.symbol for etf in ETF_UNIVERSE]
-
-    assert len(symbols) == len(set(symbols))

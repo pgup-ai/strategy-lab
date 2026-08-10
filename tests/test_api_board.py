@@ -630,10 +630,10 @@ def test_the_sparkline_tail_is_bounded_by_what_was_asked_for(monkeypatch):
 # R10c -- a second market type, on the same one computation.
 # --------------------------------------------------------------------------
 
-# Weekly ETF sets: short enough that ``state_machine_v1`` (2,192 warmup bars)
+# Weekly ETF sets: short enough that ``state_machine_v1`` (847 warmup bars)
 # refuses them and long enough that ``donchian`` (96) does not, which is what
 # makes a board of real answers *and* refusals rather than a stub. A weekly set
-# reaching 2,192 bars would be 42 years of history, so this stays true of any
+# reaching 847 bars would be 16 years of history, so this stays true of any
 # fetch -- but the *count* in the refusal is read from the frame rather than
 # written down here, because a backfill moved these from 333 bars to 345 and the
 # literal was the only thing that failed.

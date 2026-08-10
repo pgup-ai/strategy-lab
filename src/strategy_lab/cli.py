@@ -286,12 +286,10 @@ def fetch_etf_universe(
         target = [etf.symbol for etf in ETF_UNIVERSE]
 
     client = YahooFinanceClient()
-    # Collected rather than raised on the spot, then reported non-zero at the
-    # end. One unresolvable ticker must not cost the other seventeen their
-    # fetch, and it must not let the command exit 0 either -- `XIU` sat
-    # unfetched behind a single "No data returned" line among eighteen while
-    # this returned success, which is the same shape as the single-symbol
-    # `_raise_empty_fetch` exists to refuse.
+    # Collected, not raised on the spot: one unresolvable ticker must not cost
+    # the other seventeen their fetch, and must not let the command exit 0
+    # either -- `XIU` sat unfetched behind one "No data returned" line among
+    # eighteen while this returned success.
     empty: list[str] = []
     for symbol in target:
         typer.echo(f"Fetching {symbol} {timeframe} from {start} ...")
@@ -312,10 +310,8 @@ def fetch_etf_universe(
         typer.echo(f"  Upserted {count} candles for yahoo/equity/{symbol}/{timeframe}.")
 
     if empty:
-        # Yahoo answers an unknown ticker with an empty frame rather than an
-        # error, so "no rows" and "no such symbol" arrive identically. A foreign
-        # listing needs its suffix: a bare `XIU` returns nothing where `XIU.TO`
-        # returns 1,657 daily bars over the same window.
+        # Measured: a bare `XIU` returns nothing where `XIU.TO` returns 1,657
+        # daily bars over the same window. The rest of the why is in the message.
         raise typer.BadParameter(
             f"The venue returned no rows for {len(empty)} of {len(target)} symbols: "
             f"{', '.join(empty)}. Yahoo answers an unknown ticker with an empty "

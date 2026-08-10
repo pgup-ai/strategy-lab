@@ -155,7 +155,8 @@ def test_setup_invalidation_stop_is_refused_rather_than_approximated():
 
 def test_an_exposure_strategy_is_refused_at_construction_not_a_warmup_later():
     """M40. Measured before the check existed: ``StrategyRunner`` accepted
-    ``state_machine_v2`` and survived 2,192 bars -- 365.3 days at 4h -- because
+    ``state_machine_v2`` and survived 2,192 bars -- the warmup of the day,
+    365.3 days at 4h -- because
     ``on_bar`` returns before touching the strategy while inside warmup. The
     assertion is that it raises with **no** bars fed, which is what distinguishes
     the fix from the bug."""

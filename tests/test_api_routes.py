@@ -218,7 +218,7 @@ def test_every_provenance_field_survives_the_response_model(client):
 
 
 def test_the_continuous_contract_answers_with_a_target_and_no_markers(monkeypatch):
-    """Past the warmup, because ``state_machine_v2`` declares 2,192 bars.
+    """Past the warmup, because ``state_machine_v2`` declares 847 bars.
 
     This ran on the 600-bar fixture and passed, which it could only do while the
     browser returned the strategy's raw target. The engine refuses a frame

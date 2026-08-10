@@ -138,7 +138,7 @@ def test_every_feature_leaves_its_warmup_as_nan(name):
     """``mask_warmup``, stated as a test.
 
     ``ewm(adjust=False)`` returns a number from bar zero, so without the mask
-    Direction emits values from bar 23 against a declared warmup of 1,920 -- the
+    Direction emits values from bar 23 against a declared warmup of 480 -- the
     convention's exact inverse. That those rows are *filled* past warmup is
     asserted in ``tests/test_feature_lookahead.py``, which needs it to be true
     before its own probe means anything.

@@ -64,7 +64,7 @@ REPEAT_SPAN = 400
 #
 # The offset and the seed are both load-bearing and both measured rather than
 # picked. Under-declaring ``state_machine_v1``'s warmup by its whole machine
-# margin -- 2,192 bars down to the features' own 1,920 -- still produces
+# margin -- 847 bars down to the features' own 575 -- still produces
 # *identical* signal lists at offset 500 on every seed tried, and at offset
 # 1,500 on seed 7: a state disagreement only shows here if it lands on a bar
 # that emits, and the runner deliberately emits sides only, never

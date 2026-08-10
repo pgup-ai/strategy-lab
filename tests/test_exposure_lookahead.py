@@ -57,7 +57,7 @@ def exposure_probe_frame(warm: int, seed: int = 7) -> pd.DataFrame:
 
     Sized ``warm + PROBE_SPAN`` for the reason ``tests/test_lookahead`` records:
     a fixed total length silently yields zero probe points as soon as a
-    strategy's warmup exceeds it, and ``state_machine_v2``'s is 2,192.
+    strategy's warmup exceeds it, and ``state_machine_v2``'s is 847.
     """
     return synthetic_ohlcv_with_funding(n=warm + PROBE_SPAN, seed=seed)
 
