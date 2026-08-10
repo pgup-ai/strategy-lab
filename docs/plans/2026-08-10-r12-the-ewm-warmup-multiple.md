@@ -1,6 +1,6 @@
 # R12 — the EWM warmup multiple, from 20× to 5×
 
-**Status:** pre-registered. Written before any number below the line exists.
+**Status:** run 2026-08-10. **All four gates passed and the change shipped.** Results are at the bottom; everything above them is as committed, before any of them existed.
 
 ## Why
 
@@ -99,3 +99,68 @@ silently would be worse than not making it.
 G1 is the oracle and it is exact: two configurations, one frame, identical
 states over the common range. It cannot be satisfied by a change that alters the
 model, which is what separates this from a re-parameterisation.
+
+
+---
+
+# Result — 2026-08-10
+
+**G1 — identical states over the common range. PASSED, exactly.**
+
+| instrument | common bars | differing | readings gained |
+|---|---|---|---|
+| binance/perp/BTC/USDT/4h | 12,973 | **0** | +1,345 |
+| binance/perp/ETH/USDT/4h | 12,496 | **0** | +1,345 |
+| binance/perp/SOL/USDT/4h | 10,744 | **0** | +1,345 |
+| binance/spot/BTC/USDT/4h | 16,651 | **0** | +1,345 |
+
+**G2 / G3 — suites green.** 1,182 tests pass, ruff clean. Nine tests failed on
+the first run and every one was a figure or a literal that this change is
+*supposed* to move; each is addressed below rather than loosened.
+
+**G4 — figures re-measured.** On the R5 harness, at both settings: **78 trades
+against 78**, net delta **1.6e-13**, max-drawdown delta **2.2e-14**. The only
+figures that move are Sharpes:
+
+| | before | after |
+|---|---|---|
+| `state_machine_v1` trained | +0.896 | **+0.979** |
+| `state_machine_v1` default | +0.746 | **+0.816** |
+| `state_machine_v2` default | +0.913 | **+0.998** |
+
+Sharpe is computed over the whole equity curve and the curve is 1,345 bars
+shorter — those bars were masked warmup the strategy could not trade. Not
+re-run and still on the old denominator: `state_machine_v2`'s trained cell
+(+0.842) and R5's training-surface Sharpes. Said so in `STRATEGIES.md`.
+
+## What was given up, stated plainly
+
+**Bit-exactness of a cold start is gone.** The pre-registration listed five
+safety files under G2 and `tests/test_state_features.py` was not among them — it
+holds `test_directions_ema_is_bit_exact_after_its_declared_warmup`, which
+encodes the 20× standard directly and fails at 5×. That was a gap in the gate,
+not a surprise in the result, and it is worth recording as a gate-writing
+lesson: naming examples inside "the whole suite" invites checking only the
+examples.
+
+Measured residual after the declared warmup: **9.2e-06** relative on the
+adversarial synthetic frame, **5e-08** on real stored frames. Bit-exactness
+arrives at 20× and nowhere earlier (18× still fails 41/60 probes).
+
+What replaced it is a stronger claim about the thing that matters:
+`test_a_cold_start_reproduces_the_same_states_on_a_real_frame` primes exactly
+`warmup_bars` and asserts the **state** matches whole history — 0 differences
+over 164 probes across four instruments. The old test was rewritten to assert
+the residual's bound rather than deleted, because a residual nobody bounds is
+how a tolerance becomes decoration.
+
+The guarantee moved from **provable** to **measured**. That is a real reduction
+and reversing it is one constant.
+
+## The finding worth carrying forward
+
+**A Sharpe on this program was never a property of a strategy alone.** It
+depended on how many masked warmup bars happened to sit in front of the run —
+1,345 of them here, worth +0.08 on the headline figure. Nothing about the
+strategy changed. Any future comparison of two strategies with different
+warmups has been comparing their warmups as well as their returns.

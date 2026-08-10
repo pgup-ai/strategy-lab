@@ -22,13 +22,16 @@ import pytest
 from strategy_lab.api.analysis import build_analysis, registered_strategies
 from strategy_lab.api.state import StateUnavailable, build_state
 from strategy_lab.market_data.base import MarketDataIdentity
+from strategy_lab.strategies.registry import get_strategy
 from tests.conftest import synthetic_ohlcv
 
 _SPOT = MarketDataIdentity(
     exchange="binance", market_type="spot", symbol="BTC/USDT", timeframe="4h"
 )
 _MACHINE = "state_machine_v1"
-_WARMUP = 2192
+# Derived, not pinned: R12 moved it 2,192 -> 847 and a literal here would fail
+# for a reason that says nothing about what these tests are checking.
+_WARMUP = get_strategy(_MACHINE).warmup_bars
 
 # `board_window`'s answer off-perp: no bounds, and no funding question asked.
 _WHOLE = SimpleNamespace(start=None, end=None)
@@ -50,13 +53,14 @@ def shallow_frame(monkeypatch):
 
 
 def test_a_frame_inside_warmup_is_refused_with_the_reason(shallow_frame):
-    """**The gate.** Not "no data" — there are 2,191 candles here. The machine
-    would answer on every one of them, and the answer would be compression."""
+    """**The gate.** Not "no data" — the frame is one bar short of the warmup.
+    The machine would answer on every one of those bars, and the answer would be
+    compression."""
     with pytest.raises(StateUnavailable) as refused:
         build_state(_SPOT, strategy_name=_MACHINE)
 
     message = str(refused.value)
-    assert "2,192" in message and "2,191" in message
+    assert f"{_WARMUP:,}" in message and f"{_WARMUP - 1:,}" in message
     assert "compression" in message, (
         "the refusal did not say what would have been drawn instead"
     )

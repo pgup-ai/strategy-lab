@@ -639,23 +639,25 @@ names.
 
 #### Not every timeframe can carry a state, and the ladder says which
 
-A state needs **2,192 bars** before its first reading — 1,920 of that is
-`direction`'s 20×span-96 EMA, plus 272 for the machine to converge. Warmup is
-counted in *bars*, so the same number is 365 days at 4h and **42 years at 1w**.
-A rung whose stored set is too short is struck through with the count, rather
-than clicking into a refusal:
+A state needs **847 bars** before its first reading — 575 of that is
+`strength`/`stability`'s 96-bar window under a 480-bar trailing rank, plus 272
+for the machine to converge. Warmup is counted in *bars*, so the same number is
+141 days at 4h and **16 years at 1w**. A rung whose stored set is too short is
+struck through with the count, rather than clicking into a refusal:
 
 | | crypto (Binance) | equity (Yahoo) |
 |---|---|---|
-| **15m** | ✅ | ❌ Yahoo caps 15m at 60 days → 1,040 bars |
-| **1h** | ✅ | ⚠️ capped at 730 days → ~1,280 readings |
-| **4h** | ✅ | ❌ capped at 730 days → 993 bars |
+| **15m** | ✅ | ⚠️ Yahoo caps 15m at 60 days → 1,040 bars, ~190 readings |
+| **1h** | ✅ | ✅ |
+| **4h** | ✅ | ⚠️ capped at 730 days → 993 bars, ~150 readings |
 | **1d** | ✅ | ✅ |
-| **1w** | ❌ BTC has 438 weeks of the 2,192 needed | ❌ SPY has 1,750 |
+| **1w** | ❌ BTC has 450 weeks of the 847 needed | ✅ SPY 1wk has 1,750 |
 
-The equity gaps are Yahoo's own limits, named in its errors, and no amount of
-fetching moves them. The weekly gap is arithmetic: 2,192 weeks is longer than
-most instruments have existed.
+**R12 is what moved this table.** At the previous 2,192-bar warmup every equity
+daily set was impossible, weekly was impossible everywhere, and equity 15m and
+4h could never reach it at all. Yahoo's 60-day and 730-day caps are still its
+own and still unmovable — they just no longer put those two rungs out of reach.
+The remaining ❌ is arithmetic: BTC has not existed for 847 weeks.
 
 #### `direction` has only been validated at 4h
 
@@ -711,10 +713,12 @@ redraws from the payload already in hand; it never refetches.
 
 The machine answers on **every** bar. Inside warmup its inputs are `NaN`, which
 it reads as *failing* — and failing renders as `COMPRESSION`. Measured on
-BTC/USDT spot 1d with `state_machine_v1`, 3,060 bars against a 2,192-bar warmup:
-the machine reports `compression` on **2,114 of the 2,192 warmup bars**. Drawn
-from bar zero, 72% of that chart said "chop" over exactly the range where the
-machine knew nothing — the one reading a regime chart must never give. So the
+BTC/USDT spot 1d with `state_machine_v1`, 3,144 bars against an 847-bar warmup:
+the machine reports `compression` on **847 of the 847 warmup bars**, every one
+of them. Drawn from bar zero, 27% of that chart would say "chop" over exactly
+the range where the machine knows nothing — the one reading a regime chart must
+never give. (Before R12 the same frame was 2,114 of 2,192, or 72% of the
+chart.) So the
 ribbon begins at `warmup_bars`, the legend names the blank stretch
 *before warmup*, and the provenance strip carries **State from** with the date
 and the count.
@@ -859,7 +863,7 @@ writes no such file and stores the per-bar `crowding` values themselves, in the
 `bar_reasons` rows it writes for every bar past warmup.
 
 `state_machine_v1` clears the R0 baseline out of sample on risk-adjusted terms — Sharpe
-+0.896 against `donchian` 40/10's +0.072 over the same held-out 6,048 bars — while
++0.979 against `donchian` 40/10's +0.072 over the same held-out 6,048 bars — while
 returning far less than buy-and-hold. Read
 [STRATEGIES.md](STRATEGIES.md#state_machine_v1) before quoting any of that.
 

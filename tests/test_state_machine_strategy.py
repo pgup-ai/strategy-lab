@@ -24,7 +24,10 @@ PROBE_SPAN = 800
 # both narrower than ``tests/test_strategy_metadata.py``'s, which owns the same
 # check for every registered strategy. This one exists only for machines that
 # are not registered, so it is scoped to what this adapter actually emits.
-COLD_START_PROBES = 200
+# Raised from 200 by R12: the shorter warmup starts the probe window earlier,
+# where the machine holds a position on fewer bars, and the guard below
+# rightly refused to compare mostly-flat against mostly-flat.
+COLD_START_PROBES = 600
 SIGNAL_FIELDS = ("long_entries", "long_exits", "short_entries", "short_exits", "position_size")
 
 

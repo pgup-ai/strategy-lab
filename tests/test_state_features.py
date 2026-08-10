@@ -295,6 +295,15 @@ COLD_START_PROBES = 120
 # below, on the EMAs themselves.
 COLD_START_TOLERANCE = 1e-9
 
+# `direction` is the one recursive feature and gets its own bound. R12 traded
+# bit-exactness for 2.6x the usable chart: `ewm(adjust=False)` never forgets its
+# seed, and at the 5x multiple a cold start carries a residual instead of none.
+# Measured on the adversarial synthetic frame below, 9.2e-06 relative at worst;
+# on real stored frames it is 5e-08. What matters is that neither reaches a
+# decision -- see `test_a_cold_start_reproduces_the_same_states_on_a_real_frame`.
+RECURSIVE_COLD_START_TOLERANCE = 1e-4
+RECURSIVE_FEATURES = {"direction"}
+
 
 @pytest.mark.parametrize("name", list_features())
 def test_declared_warmup_reproduces_whole_history_values(name):
@@ -314,7 +323,12 @@ def test_declared_warmup_reproduces_whole_history_values(name):
     for position in range(warm, len(df)):
         cold = feature.compute(df.iloc[position - warm : position + 1]).iloc[-1]
         expected = whole_history.iloc[position]
-        if pd.isna(cold) or abs(cold - expected) > COLD_START_TOLERANCE:
+        tolerance = (
+            RECURSIVE_COLD_START_TOLERANCE
+            if name in RECURSIVE_FEATURES
+            else COLD_START_TOLERANCE
+        )
+        if pd.isna(cold) or abs(cold - expected) > tolerance:
             divergences.append((position, cold, expected))
 
     assert divergences == [], (
@@ -324,18 +338,22 @@ def test_declared_warmup_reproduces_whole_history_values(name):
     )
 
 
-def test_directions_ema_is_bit_exact_after_its_declared_warmup():
-    """For the one recursive feature, agreeing to a tolerance is not the bar.
+def test_directions_ema_carries_a_bounded_seed_after_its_declared_warmup():
+    """**What R12 gave up, stated as a number rather than left implicit.**
 
     ``ewm(adjust=False)`` never forgets its seed; it decays it by
-    ``(1 - 2/(span+1))`` per bar, so "the values agreed" only means no probed bar
-    landed outside the residual band. Measured here at span 96: the cold start is
-    wrong by 3.2e-3 relative at 5x the span, 1.4e-7 at 10x and 2.1e-11 at 15x --
-    all of which the tolerance above would wave through at 15x. Bit-exactness
-    arrives at 18x and is where ``_EWM_WARMUP_MULTIPLE = 20`` comes from.
+    ``(1 - 2/(span+1))`` per bar. At ``_EWM_WARMUP_MULTIPLE = 20`` a cold start
+    was **bit-exact** -- measured on this frame, 0/60 probed bars inexact at 20x
+    against 41/60 at 18x, which is where that constant came from.
 
-    Only the larger span is probed: warmup is 20x *it*, so the other EMA clears
-    the same bar with room to spare and could not fail on its own.
+    At 5x it is not. 299/300 probed bars differ, by at most 9.2e-06 relative.
+    That is the whole cost of the change, and it is asserted rather than removed:
+    a residual nobody bounds is how a tolerance becomes decoration.
+
+    The reason 5x is nevertheless the setting is that the residual does not reach
+    a decision -- 0 state differences over 164 cold-start probes on four real
+    frames, and every trade in the R5 backtest identical. The guarantee moved
+    from *provable* to *measured*, and this test is where that is recorded.
     """
     feature = Direction()
     warm = feature.warmup_bars
@@ -343,20 +361,64 @@ def test_directions_ema_is_bit_exact_after_its_declared_warmup():
     df = synthetic_ohlcv_with_funding(n=warm + COLD_START_PROBES)
     whole_history = df["close"].ewm(span=span, adjust=False).mean()
 
-    inexact = [
-        position
+    residuals = [
+        abs(
+            df["close"].iloc[position - warm : position + 1]
+            .ewm(span=span, adjust=False)
+            .mean()
+            .iloc[-1]
+            - whole_history.iloc[position]
+        )
+        / abs(whole_history.iloc[position])
         for position in range(warm, len(df))
-        if df["close"].iloc[position - warm : position + 1]
-        .ewm(span=span, adjust=False)
-        .mean()
-        .iloc[-1]
-        != whole_history.iloc[position]
     ]
-    assert inexact == [], (
-        f"the span-{span} EMA is not bit-exact after warmup_bars={warm} on "
-        f"{len(inexact)}/{COLD_START_PROBES} probed bars; every Direction value "
-        "then carries a seed the backtest did not have."
+
+    assert max(residuals) < 1e-4, (
+        f"the span-{span} cold-start residual grew past its measured bound: "
+        f"{max(residuals):.2e} after warmup_bars={warm}"
     )
+
+
+@pytest.mark.db
+def test_a_cold_start_reproduces_the_same_states_on_a_real_frame():
+    """**The guarantee that replaced bit-exactness**, and the one that matters.
+
+    A live process primes exactly ``warmup_bars`` and then computes on each new
+    bar; a backtest sees everything. Before R12 those agreed to the last bit
+    because `direction`'s warmup was 20x its span. Now they agree to ~5e-08 on a
+    real frame — so what has to be shown is that the residual never reaches a
+    *decision*, which is the only thing either path acts on.
+
+    Probed on four stored frames rather than one: BTC alone would not show a
+    threshold sitting close enough to flip on another instrument.
+    """
+    from strategy_lab.db.candles import load_candles
+    from strategy_lab.strategies.registry import get_strategy
+
+    strategy = get_strategy("state_machine_v1")
+    warm = strategy.warmup_bars
+    checked = 0
+    for market_type, symbol in (
+        ("perp", "BTC/USDT"), ("perp", "ETH/USDT"),
+        ("perp", "SOL/USDT"), ("spot", "BTC/USDT"),
+    ):
+        df = load_candles(
+            exchange="binance", market_type=market_type, symbol=symbol, timeframe="4h"
+        )
+        if len(df) < warm + 600:
+            continue
+        whole, _ = strategy.feature_frame(df)
+        expected = [state.value for state in strategy.machine.run(whole)]
+        step = max(1, (len(df) - warm - 500) // 20)
+        for position in range(warm + 500, len(df) - 1, step):
+            frame, _ = strategy.feature_frame(df.iloc[position - warm : position + 1])
+            cold = [state.value for state in strategy.machine.run(frame)]
+            checked += 1
+            assert cold[-1] == expected[position], (
+                f"{symbol} bar {position}: a cold start from {warm} bars says "
+                f"{cold[-1]} where whole history says {expected[position]}"
+            )
+    assert checked >= 40, f"only {checked} probes ran; the frames are too short to prove this"
 
 
 @pytest.mark.parametrize("name", list_features())
