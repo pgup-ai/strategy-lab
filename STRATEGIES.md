@@ -277,7 +277,8 @@ So the trades did not move — and neither did anything derived from them:
 Sharpe is the one statistic computed over the *whole* equity curve, and the
 curve is now 1,345 bars shorter. Those bars were masked warmup the strategy
 could not trade, and they were dragging the ratio down. Verified on the R5
-harness: 78 trades against 78, net delta 1.6e-13, max-drawdown delta 2.2e-14.
+harness: **73 trades against 73**, net delta 2.1e-14, max-drawdown delta
+1.3e-13, and all three cost-stress rows equal to 12 significant figures.
 
 **What that means for reading this page:** a Sharpe here was never a property of
 the strategy alone — it depended on how much warmup happened to sit in front of
@@ -377,17 +378,20 @@ a rule on, but it is not what the gate passed on.
   Nothing in the R5 figures moves — this is how to read them, not a
   correction. `state_machine_v2` is the same policy without that truncation.
 - **Params**: `rank_window=480`, `machine=StateMachine(enter_strength=2/3,
-  exit_strength=1/3, min_dwell=4, cooldown=8, …)`, `warmup_bars=2192` — derived as
+  exit_strength=1/3, min_dwell=4, cooldown=8, …)`, `warmup_bars=847` — derived as
   `deepest_feature + 8 x machine.convergence_bars`, so it tracks the machine it holds.
   The R5-trained cell runs `cooldown=4` and therefore warms **815** bars, not 847.
   Cutting its window at the default's number starts it 32 bars early, and it stops
-  reproducing §9.2 — +15.75% / Sharpe +0.907 / 74 trades against the published
-  +15.45% / +0.979 / 73. Take the warmup off the strategy object, never off the family.
-- **`warmup_bars` is not the max over its features.** `direction` declares 1920, and at
-  exactly 1920 the cold-start replay in `tests/test_strategy_metadata.py` disagrees with
-  the whole-history run on 52–156 of 300 probed bars depending on seed, because the
-  machine is a recursion on top of the features and has its own cold start. 60 more bars
-  takes it to zero on every seed tried; the declared 240 is four times that.
+  reproducing §9.2 — measured pre-R12 and quoted as the matched pair it was:
+  +15.75% / Sharpe +0.907 / 74 trades against that run's +15.45% / +0.896 / 73.
+  Take the warmup off the strategy object, never off the family.
+- **`warmup_bars` is not the max over its features.** The machine is a recursion on
+  top of them and has its own cold start, so `deepest_feature` alone is not enough:
+  measured pre-R12, at exactly `direction`'s then-declared 1920 the cold-start replay
+  in `tests/test_strategy_metadata.py` disagreed with the whole-history run on 52–156
+  of 300 probed bars depending on seed, and 60 more bars took it to zero on every seed
+  tried. `direction` now declares **480** and the machine's share is unchanged, which
+  is why the derivation adds it rather than assuming the features cover it.
 - **Run** (the canonical R5 command — the `--start` is the first stored funding
   settlement, and a perp run refuses to start earlier because Binance settled nothing over
   the contract's first 40 hours):

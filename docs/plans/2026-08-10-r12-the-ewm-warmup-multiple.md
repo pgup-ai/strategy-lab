@@ -118,9 +118,10 @@ model, which is what separates this from a re-parameterisation.
 the first run and every one was a figure or a literal that this change is
 *supposed* to move; each is addressed below rather than loosened.
 
-**G4 — figures re-measured.** On the R5 harness, at both settings: **78 trades
-against 78**, net delta **1.6e-13**, max-drawdown delta **2.2e-14**. The only
-figures that move are Sharpes:
+**G4 — figures re-measured.** On the R5 gate's own configuration, at both
+settings: **73 trades against 73**, 6,048 tradeable bars against 6,048, net delta
+**2.1e-14**, max-drawdown delta **1.3e-13**. The only figures that move are
+Sharpes:
 
 | | before | after |
 |---|---|---|

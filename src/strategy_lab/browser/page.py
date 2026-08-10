@@ -1141,7 +1141,15 @@ __SHELL_CSS__
       ));
     });
     if (view.why) {
-      host.appendChild(chip('State', view.why.states[i], 'state'));
+      // Blank inside warmup, for the reason the ribbon is: the machine answers
+      // on every bar, and inside warmup that answer is `compression` because its
+      // inputs are NaN and it reads unmeasurable as failing. Showing it here
+      // while the ribbon refuses to draw it is the same lie through the panel --
+      // and the feature chips beside it already read `—` on those bars.
+      var measured = i >= (payload.provenance.warmup_bars || 0);
+      host.appendChild(chip(
+        'State', measured ? view.why.states[i] : '—', measured ? 'state' : 'absent'
+      ));
       Object.keys(view.why.features).forEach(function (name) {
         var value = view.why.features[name][i];
         host.appendChild(chip(

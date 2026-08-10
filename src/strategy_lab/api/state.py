@@ -44,7 +44,7 @@ from strategy_lab.api.analysis import (
     prepare_frame,
     resolve_strategy,
 )
-from strategy_lab.api.board import board_window
+from strategy_lab.api.board import WHOLE_HISTORY, board_window
 from strategy_lab.market_data.base import MarketDataIdentity
 from strategy_lab.server import build_candles_payload
 
@@ -118,7 +118,11 @@ def build_state(
     # nothing hands the state view anything. Bounded by ``board_window``, which
     # is the board's own function rather than a second rule that could disagree
     # with it: perp-only, from stored funding, and ``WHOLE_HISTORY`` elsewhere.
-    window = board_window(identity)
+    # ...but only when funding is actually being attached. With `funding=False`
+    # `with_funding_column` returns before loading anything, so there is no
+    # coverage guard to satisfy and bounding would silently narrow the window
+    # the caller asked for -- plus a funding-span query for a run that ignores it.
+    window = board_window(identity) if funding else WHOLE_HISTORY
     prepared = prepare_frame(
         identity,
         strategy=strategy,

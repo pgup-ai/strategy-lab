@@ -150,6 +150,22 @@ def test_a_spot_frame_is_not_bounded_by_funding_it_does_not_have(deep_frame, mon
     assert payload.provenance.bar_count == len(deep_frame)
 
 
+def test_switching_funding_off_asks_for_the_whole_frame(deep_frame, monkeypatch):
+    """Bounding a perp by its stored funding exists to keep the coverage guard
+    happy. With `funding=False` no funding is loaded and no guard runs, so the
+    bound would only narrow the window the caller asked for — silently, and after
+    a span query for a run that ignores it."""
+    seen = []
+    monkeypatch.setattr(
+        "strategy_lab.api.state.board_window",
+        lambda identity: (seen.append(identity) or _WHOLE),
+    )
+
+    build_state(_SPOT, strategy_name=_MACHINE, funding=False)
+
+    assert seen == [], "a funding span was fetched for a run that loads no funding"
+
+
 def test_a_strategy_with_no_state_is_refused_by_name(deep_frame):
     with pytest.raises(StateUnavailable, match="no feature frame"):
         build_state(_SPOT, strategy_name="donchian")

@@ -397,28 +397,31 @@ def test_a_cold_start_reproduces_the_same_states_on_a_real_frame():
 
     strategy = get_strategy("state_machine_v1")
     warm = strategy.warmup_bars
-    checked = 0
+    probes: dict[str, int] = {}
     for market_type, symbol in (
         ("perp", "BTC/USDT"), ("perp", "ETH/USDT"),
         ("perp", "SOL/USDT"), ("spot", "BTC/USDT"),
     ):
+        key = f"{market_type}/{symbol}"
         df = load_candles(
             exchange="binance", market_type=market_type, symbol=symbol, timeframe="4h"
         )
-        if len(df) < warm + 600:
-            continue
         whole, _ = strategy.feature_frame(df)
         expected = [state.value for state in strategy.machine.run(whole)]
-        step = max(1, (len(df) - warm - 500) // 20)
+        step = max(1, (len(df) - warm - 500) // 10)
         for position in range(warm + 500, len(df) - 1, step):
             frame, _ = strategy.feature_frame(df.iloc[position - warm : position + 1])
             cold = [state.value for state in strategy.machine.run(frame)]
-            checked += 1
+            probes[key] = probes.get(key, 0) + 1
             assert cold[-1] == expected[position], (
-                f"{symbol} bar {position}: a cold start from {warm} bars says "
+                f"{key} bar {position}: a cold start from {warm} bars says "
                 f"{cold[-1]} where whole history says {expected[position]}"
             )
-    assert checked >= 40, f"only {checked} probes ran; the frames are too short to prove this"
+    # Per frame, not pooled: a shared counter lets BTC alone clear the minimum
+    # while the other three are skipped, and the guarantee is about four frames.
+    assert len(probes) == 4, f"a declared frame contributed nothing: {probes}"
+    for key, count in probes.items():
+        assert count >= 10, f"{key} contributed only {count} probes"
 
 
 @pytest.mark.parametrize("name", list_features())

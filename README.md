@@ -717,8 +717,8 @@ BTC/USDT spot 1d with `state_machine_v1`, 3,144 bars against an 847-bar warmup:
 the machine reports `compression` on **847 of the 847 warmup bars**, every one
 of them. Drawn from bar zero, 27% of that chart would say "chop" over exactly
 the range where the machine knows nothing — the one reading a regime chart must
-never give. (Before R12 the same frame was 2,114 of 2,192, or 72% of the
-chart.) So the
+never give. (Before R12 the warmup was 2,192 bars — 72% of that frame — and the
+machine reported compression on 2,114 of them.) So the
 ribbon begins at `warmup_bars`, the legend names the blank stretch
 *before warmup*, and the provenance strip carries **State from** with the date
 and the count.

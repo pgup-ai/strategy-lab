@@ -199,11 +199,20 @@ def test_the_exit_modes_offered_are_the_engines_own(page):
 
 def test_a_bar_shows_the_state_and_every_feature_behind_it(page):
     """A chart that shows only *that* a signal fired is ``plot.html``, which
-    already exists. The state and the feature values are what this adds."""
-    script = _script(page)
+    already exists. The state and the feature values are what this adds.
 
-    assert "chip('State', view.why.states[i], 'state')" in script
-    assert "Object.keys(view.why.features).forEach" in script
+    Blank inside warmup, for the reason the ribbon is. The panel printed
+    `compression` there while the ribbon refused to draw it — one lie through two
+    surfaces, reachable by pinning a dimmed transition — and the feature chips
+    beside it already read `—` on those bars, so the state chip was the only one
+    claiming a reading.
+    """
+    body = _within(_script(page), "function renderBar(i)")
+
+    assert "Object.keys(view.why.features).forEach" in body
+    assert "var measured = i >= (payload.provenance.warmup_bars || 0);" in body
+    assert "measured ? view.why.states[i] : '—'" in body
+    assert "measured ? 'state' : 'absent'" in body
 
 
 def test_a_strategy_with_no_feature_frame_says_so_rather_than_showing_nothing(page):
