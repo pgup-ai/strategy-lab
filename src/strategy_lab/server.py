@@ -145,7 +145,9 @@ def refresh_candles(
     }
 
 
-def _split_forming(frame: pd.DataFrame, bar_ms: int) -> tuple[pd.DataFrame, pd.DataFrame | None]:
+def _split_forming(
+    frame: pd.DataFrame, bar_ms: int
+) -> tuple[pd.DataFrame, pd.DataFrame | None]:
     """The bars whose interval has closed, and the one still open if there is one.
 
     Only the final row can be forming: the venue serves ascending bars up to now,
