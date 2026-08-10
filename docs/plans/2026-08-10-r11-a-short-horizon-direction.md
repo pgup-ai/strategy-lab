@@ -1,6 +1,6 @@
 # R11 — a direction feature built for a short horizon
 
-**Status:** pre-registered. Written before any number below the line exists.
+**Status:** run, **failed its own gate on 2026-08-10. `thrust` is not registered and its module is deleted.** The numbers that killed it are at the bottom; everything above the results section is as it was committed, before any of them existed.
 
 ## Why
 
@@ -131,3 +131,58 @@ The existing machinery, not a new script:
 Nothing here needs a bespoke measurement harness, and that is deliberate: R10h
 shipped one with two correctness bugs, and the lesson recorded then was that
 measurement code is the thing least likely to be checked by what comes after it.
+
+
+---
+
+# Result — 2026-08-10
+
+BTC and ETH perp 4h, scored from row 1,920 (the deepest warmup compared, which is
+`direction`'s — `thrust`'s own is 47). SOL was never looked at: the gate was
+decided before the holdout was due, and it did not get that far.
+
+| | h=6 | h=30 | h=90 | corr vs `direction` |
+|---|---|---|---|---|
+| **BTC** `thrust` | −0.0117 (−.0283/**+**.0090) | −0.0110 (−.0087/−.0118) | +0.0249 (+.0293/+.0184) | +0.3206 |
+| BTC `direction` | +0.0157 (+.0211/+.0091) | +0.0396 (+.0422/+.0344) | +0.0877 (+.0561/+.1193) | — |
+| **ETH** `thrust` | −0.0192 (−.0275/−.0093) | −0.0050 (−.0043/−.0055) | +0.0130 (+.0074/+.0187) | +0.3102 |
+| ETH `direction` | +0.0017 (+.0114/**−**.0128) | +0.0235 (+.0354/+.0034) | +0.0846 (+.0627/+.0945) | — |
+
+Against the gate committed above:
+
+- **G1 — `|IC@6| >= 0.03` on both. FAILED.** −0.0117 on BTC and −0.0192 on ETH,
+  both well under the threshold. `thrust` is not a short-horizon signal; on BTC
+  it is *weaker* at h=6 than the feature it was built to complement.
+- **G2 — both halves agree in sign on both. FAILED.** BTC h=6 splits
+  −0.0283 / +0.0090. By this repo's own rule that is a regime, not a signal.
+- **G3 — `|corr|` with `direction` under 0.7. Passed**, +0.32 on both. It is
+  genuinely a different statistic. It is just not an informative one.
+
+Two of three fail, so `thrust` is removed. The pre-registration said what
+happens in this case and this is it: an unregistered feature is an untested one
+here, since the registry is what enrols the poison probe, so the module is
+deleted rather than left in the tree.
+
+## What it did show, which is not the same as passing
+
+At **h=30 both halves agree in sign on both instruments** — BTC −0.0110
+(−.0087/−.0118), ETH −0.0050 (−.0043/−.0055) — and the sign is **negative**. Sitting
+high in your own recent range predicts a slightly *lower* forward return over
+the next five days. That is consistent across four instrument-halves, which is
+more than several registered features manage, and it is mean reversion rather
+than trend.
+
+It is far too small to trade on its own (|IC| ~0.01 against `direction`'s 0.04)
+and it is emphatically **not** what this phase set out to find. Recorded as a
+lead, not a result: the useful precedent is R4, where `direction`'s unconditional
++0.0385 hid a −0.113 inside one `strength` tercile. Whether this does the same is
+a different question, with a different pre-registration, on a phase nobody has
+written.
+
+## What this phase actually settles
+
+**The registry still has no directional read that works at a short horizon, and
+one obvious candidate has now been measured and rejected rather than assumed.**
+The state view's 15m and 1h rungs remain exploratory for the reason documented in
+the README, and nothing about `direction`, either state machine, or the EWM
+multiple moved.
