@@ -24,10 +24,12 @@ turns that omission into an error instead of a quiet loss.
 
 from __future__ import annotations
 
+import re
+
 from typing import Annotated, Literal
 
 import pandas as pd
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from strategy_lab.api.analysis import (
     DEFAULT_CASH,
@@ -237,6 +239,11 @@ class BoardQuery(_Strict):
         return self
 
 
+# A trailing `Z`, `+hh:mm` or `-hh:mm` after the time part.
+_HAS_TIMEZONE = re.compile(r"(?:[zZ]|[+-]\d{2}:?\d{2})$")
+_DATE_ONLY = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+
 class RefreshQuery(IdentityQuery):
     """``after`` is an epoch-second cursor: the caller already has bars up to it.
 
@@ -245,6 +252,26 @@ class RefreshQuery(IdentityQuery):
     """
 
     after: Annotated[int, Field(ge=0)] | None = None
+    # Only for a timeframe with nothing stored yet -- see `refresh_candles`.
+    # A real datetime rather than a string, so an unparseable one is a 422 from
+    # the boundary instead of a traceback from `pd.Timestamp` inside the route,
+    # and a naive one is made UTC rather than raising later against an aware
+    # comparison deep in the fetch.
+    since: AwareDatetime | None = None
+
+    @field_validator("since", mode="before")
+    @classmethod
+    def _assume_utc(cls, value: object) -> object:
+        if not isinstance(value, str) or not value:
+            return value
+        # A bare date is what `AnalysisQuery` already accepts for its own bounds,
+        # so refusing it here would make one date mean two things depending on
+        # the endpoint. Midnight, because a start is the beginning of its day.
+        if _DATE_ONLY.match(value):
+            return value + "T00:00:00+00:00"
+        if not _HAS_TIMEZONE.search(value):
+            return value + "+00:00"
+        return value
 
 
 class DatasetModel(_Strict):
@@ -255,6 +282,9 @@ class DatasetModel(_Strict):
     candles: int
     first_timestamp: str
     last_timestamp: str
+    # `None` for most: Yahoo publishes no stream and `1wk` is its spelling of a
+    # week. The page shows a live control only where this is set.
+    stream: str | None = None
 
 
 class StrategyModel(_Strict):
@@ -279,6 +309,19 @@ class MarkerModel(_Strict):
     side: Literal["long", "short"]
     price: float
     size: float
+
+
+class TradeModel(_Strict):
+    entry_time: int
+    exit_time: int | None
+    direction: Literal["long", "short"]
+    size: float
+    entry_price: float
+    exit_price: float | None
+    fees: float
+    pnl: float
+    return_pct: float
+    status: Literal["closed", "open"]
 
 
 class WhyModel(_Strict):
@@ -310,6 +353,7 @@ class ProvenanceModel(_Strict):
 class AnalysisModel(_Strict):
     bars: list[BarModel]
     markers: list[MarkerModel]
+    trades: list[TradeModel]
     position_size: list[float | None] | None
     target: list[float | None] | None
     why: WhyModel | None

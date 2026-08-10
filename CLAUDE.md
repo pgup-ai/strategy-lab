@@ -181,6 +181,31 @@ Key design decisions that span multiple files:
   only return `None` is how a coverage guard gets invented for a market that has
   none, and the test asserts the absent statement rather than the absent error.
 
+- **The browser draws a live candle it never analyses, and a closing bar — not a
+  timer — is what makes it refresh.** `browse`'s standing rule was that refresh
+  is explicit and never on a timer, because a background poll on its own
+  schedule is a different thing from a page you refreshed. The rule's *reason*
+  was honesty about when the page last spoke to a venue, and a websocket keeps
+  it: the venue sets `x: true` on the one update where the stored candles are
+  provably behind, so the refresh happens exactly then rather than on a clock.
+  `setInterval` stays banned; the bar-close refresh is the one fetch nobody
+  clicked. **The forming bar is drawn and never analysed** — a tick reaching
+  `build_analysis` produces a state and a marker that flip when the bar closes,
+  which is the reading `include_forming=False` exists to refuse — so the
+  why-layer stays as of the last closed bar and the page says so over the live
+  one. **The forming bar also never reaches storage**: the venue always
+  returns it -- measured, a 15m fetch at 23:29:48 ends with the 23:15 bar -- and
+  `refresh_candles` withholds it, because a `market_candles` row is treated as
+  final by the backtest, the replay feed and `include_forming=False`, and a
+  partial one is *restated* on the next refresh. It stays in the refresh payload,
+  which is how `serve` still draws it. **And "live" means a frame arrived, not that a socket opened**: measured,
+  `fstream.binance.com` (every perp dataset here) accepts the connection and
+  sends nothing while `stream.binance.com` delivers 6 frames in 12 s on the same
+  pair, so reporting off `onopen` is a green dot over a frozen chart. Which URL
+  a stream lives at is venue knowledge and lives in `market_data/streams.py`,
+  not the page — `1wk` maps to nothing, because a timeframe is an identity here
+  rather than a duration.
+
 - **A perp refresh advances candles and funding together, because the coverage
   guard refuses the pair when they drift.** `refresh_candles` fetches bars up to
   the present; funding settles on the venue's own schedule, so refreshing only

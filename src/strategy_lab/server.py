@@ -51,7 +51,9 @@ def build_candles_payload(df: pd.DataFrame) -> dict:
     return {"bars": bars}
 
 
-def refresh_candles(identity: MarketDataIdentity, after: int | None) -> dict:
+def refresh_candles(
+    identity: MarketDataIdentity, after: int | None, since: datetime | None = None
+) -> dict:
     """Fetch the newest bars, store them, and hand back the tail from storage.
 
     On a perp the settlements move with them. Candles reach the present on every
@@ -62,9 +64,11 @@ def refresh_candles(identity: MarketDataIdentity, after: int | None) -> dict:
     drift itself, and it is invisible in a payload that only carries bars.
     """
     bar_ms = timeframe_to_millis(identity.timeframe)
-    lookback_start = datetime.now(UTC) - timedelta(
-        milliseconds=bar_ms * REFRESH_LOOKBACK_BARS
-    )
+    # `since` is for a timeframe that has no stored bars at all: the five-bar
+    # lookback tops up a series that exists, and would leave a brand new one
+    # holding five candles and a warmup error.
+    funding_start = datetime.now(UTC) - timedelta(milliseconds=bar_ms * REFRESH_LOOKBACK_BARS)
+    lookback_start = since or funding_start
 
     # Both fetches before either write. Storing candles first and then fetching
     # funding meant a venue outage on the funding call left the bars committed
@@ -72,7 +76,12 @@ def refresh_candles(identity: MarketDataIdentity, after: int | None) -> dict:
     # exists to prevent, reported as a 502 rather than avoided by it. Failing
     # before anything is written leaves the pair where it was.
     fetched = _fetch_recent(identity, lookback_start)
-    pending_funding = _fetch_funding(identity, lookback_start)
+    # Funding keeps its own five-bar catch-up even when the candles reach back
+    # years. It is keyed `(exchange, market_type, symbol)` with no timeframe, so
+    # a new *timeframe* adds nothing to it -- and `_fetch_funding` starts at the
+    # earlier of its argument and the last stored settlement, so handing it the
+    # candle `since` re-pages the whole ~7,700-row history to write duplicates.
+    pending_funding = _fetch_funding(identity, funding_start)
 
     # Settlements before bars, which makes the remaining failure a harmless one.
     # The two upserts cannot share a transaction without threading a connection
@@ -91,6 +100,16 @@ def refresh_candles(identity: MarketDataIdentity, after: int | None) -> dict:
         from strategy_lab.db.funding import upsert_funding
 
         settlements = upsert_funding(pending_funding)
+
+    # The venue always returns the bar in progress -- measured, a 15m fetch at
+    # 23:29:48 ends with the bar that opened 23:15 -- and storing it puts a
+    # partial candle in `market_candles`, where every consumer treats a row as
+    # final. It is then *restated* on the next refresh, which is the in-place
+    # rewrite of history the equity caveat warns about, and `build_analysis`
+    # meanwhile computes a state and markers for a bar that has not finished.
+    # It stays in the payload for `serve`, whose chart draws it as forming on
+    # purpose; it just never reaches storage.
+    fetched, forming = _split_forming(fetched, bar_ms)
 
     candles = 0
     if not fetched.empty:
@@ -117,11 +136,29 @@ def refresh_candles(identity: MarketDataIdentity, after: int | None) -> dict:
         timeframe=identity.timeframe,
         start=start,
     )
+    if forming is not None:
+        df = pd.concat([df, forming])
     return {
         **build_candles_payload(df),
         "candles_upserted": candles,
         "funding_upserted": settlements,
     }
+
+
+def _split_forming(
+    frame: pd.DataFrame, bar_ms: int
+) -> tuple[pd.DataFrame, pd.DataFrame | None]:
+    """The bars whose interval has closed, and the one still open if there is one.
+
+    Only the final row can be forming: the venue serves ascending bars up to now,
+    so everything before the last one closed when the next began.
+    """
+    if frame.empty:
+        return frame, None
+    ends = frame.index[-1] + pd.Timedelta(milliseconds=bar_ms)
+    if ends <= pd.Timestamp.now(tz="UTC"):
+        return frame, None
+    return frame.iloc[:-1], frame.iloc[-1:]
 
 
 def _fetch_funding(identity: MarketDataIdentity, lookback_start: datetime):

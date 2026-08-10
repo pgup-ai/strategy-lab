@@ -5,13 +5,29 @@ Local Python research repo for crypto and stock strategy backtesting.
 The current stack is intentionally small:
 
 - Postgres 16 in Docker for reproducible OHLCV storage, plus an append-only
-  `runs`/`signals` store for replay and (later) live signal history
+  `runs`/`signals` store for replay and live signal history
 - `ccxt` for crypto candles
 - `yfinance` for stock candles
 - `pandas` and `numpy` for strategy research
 - `vectorbt` for fast signal-based backtests and plots
 - a small event-driven engine (`core/`, `feeds/`, `engine/`) so the same
-  strategy code can run in backtest, replay, and (later) live
+  strategy code runs in backtest, in replay, and against the live venue —
+  see [Paper Trading Against The Live Venue](#paper-trading-against-the-live-venue)
+
+## What do you want to do?
+
+Every section below is named after a piece of the machinery. This table is named
+after the question you arrived with.
+
+| I want to… | run | where it is explained |
+|---|---|---|
+| **watch live prices, signals and state** | `strategy-lab browse` | [The live pill](#the-live-pill-a-forming-candle-and-a-refresh-when-it-closes) |
+| see any strategy on any stored candle set | `strategy-lab browse` | [browse — the live view](#two-ways-to-look-at-a-strategy) |
+| run a strategy against the venue, on paper | `strategy-lab paper` | [Paper Trading](#paper-trading-against-the-live-venue) |
+| backtest and keep a reproducible record | `strategy-lab backtest` | [Backtest](#backtest) |
+| re-read a backtest I already ran | `strategy-lab serve` | [serve — the frozen record](#two-ways-to-look-at-a-strategy) |
+| prove the live path matches the backtest | `strategy-lab replay` | [Replay](#replay) |
+| get data in before any of the above | `strategy-lab fetch-*` | [Fetch Data](#fetch-data) |
 
 ## Layout
 
@@ -341,7 +357,29 @@ strategy-lab replay \
 Run 99fe4a0f-9086-4047-ab0e-75fc5d84027d: emitted 916 signals, wrote 916.
 ```
 
-### Paper trading against the live venue
+A run that persists something mints a fresh `run_id`, so replaying the same
+range twice stores two independent runs rather than zero rows the second time —
+that is the append-only audit trail working as intended, not a bug.
+`--no-persist`, and a replay that emits neither a signal nor a reason, write no
+run header at all rather than leaving an orphan behind. Some
+strategy/window combinations legitimately emit nothing: `turnaround_v2`, the
+CLI default, fires only 126 times across the *entire* 83,348-bar stored
+BTC/USDT 15m history, so a quiet run by itself is not a sign anything is
+broken.
+
+Replay is O(n²) by construction: every bar re-evaluates the strategy over the
+whole buffer seen so far, not just the new bar. On that same 83,348-bar
+series, `turnaround_v2` produces the same 126 signals from both paths, but
+`backtest` takes 0.39 s and `replay` takes roughly 43 minutes to do it
+bar-by-bar. Use `--limit-bars` for anything beyond a few thousand bars, and
+keep using the vectorized `backtest` command — not `replay` — for
+whole-history research; `replay` exists to prove the live path matches
+backtest, not to replace it for day-to-day iteration.
+
+See [the Phase 1a design doc](docs/design/2026-08-02-realtime-trading-framework.md)
+for the full rationale.
+
+## Paper Trading Against The Live Venue
 
 `replay` drives the event engine from stored candles. `paper` drives the same
 runner from `LiveFeed`, which polls the venue, and hands what it decides to
@@ -389,26 +427,6 @@ none.
 what the venue serves for the same range *later*, and a process that stored its
 own bars as the record would be compared against itself. Fetch the range
 afterwards and replay it; `scripts/r10h/delayed_oracle.py` does the comparison.
-
-Every invocation mints a fresh `run_id`, so replaying the same range twice
-stores two independent runs rather than zero rows the second time — that is
-the append-only audit trail working as intended, not a bug. Some
-strategy/window combinations legitimately emit nothing: `turnaround_v2`, the
-CLI default, fires only 126 times across the *entire* 83,348-bar stored
-BTC/USDT 15m history, so a quiet run by itself is not a sign anything is
-broken.
-
-Replay is O(n²) by construction: every bar re-evaluates the strategy over the
-whole buffer seen so far, not just the new bar. On that same 83,348-bar
-series, `turnaround_v2` produces the same 126 signals from both paths, but
-`backtest` takes 0.39 s and `replay` takes roughly 43 minutes to do it
-bar-by-bar. Use `--limit-bars` for anything beyond a few thousand bars, and
-keep using the vectorized `backtest` command — not `replay` — for
-whole-history research; `replay` exists to prove the live path matches
-backtest, not to replace it for day-to-day iteration.
-
-See [the Phase 1a design doc](docs/design/2026-08-02-realtime-trading-framework.md)
-for the full rationale.
 
 ## Multi-Asset
 
@@ -575,9 +593,51 @@ bars moved** against a fresh fetch (median 0.257%), and `donchian` differed on 3
 of them where two ratio-based strategies differed on none. The board opens on
 `perp` so that caveat is something you choose to look at rather than inherit.
 
-Refresh is **explicit** — per tile or all tiles — and never on a timer. A
+Refresh is **explicit** — per tile or all tiles — and never on a *timer*. A
 background poll that talks to a venue on its own schedule is a different thing
 from a page you refreshed, and only the second is honest about when it last did.
+
+### The live pill: a forming candle, and a refresh when it closes
+
+**This is how you watch real-time prices with signals and state on one chart:**
+
+```bash
+strategy-lab browse --port 8760
+```
+
+Then at `http://127.0.0.1:8760` — pick a strategy in the selector, click any
+tile's **open**, and the **live** pill is already on. Try
+`BTC/USDT · 15m · binance/spot` with `state_machine_v1` to get a moving candle,
+markers, the state panel and the state-change list together.
+
+On a Binance dataset at a timeframe the venue streams, the instrument view
+offers that **live** toggle, default on.
+It opens the venue's kline websocket and draws the forming candle as it moves.
+
+**The forming bar is drawn and never analysed.** A tick reaching
+`build_analysis` would produce a state and a marker that flip when the bar
+closes — the one reading the event path refuses everywhere else. So the candle
+moves while the state panel, the markers and the transition list stay as of the
+last *closed* bar, and hovering the live one says `live bar · not analysed until
+it closes` rather than showing the previous bar's state as if it were this one's.
+
+**A closing bar is what triggers a refresh, and that is not a timer.** The
+stream sets `x: true` on the one update where the stored candles are provably
+behind, so the page refreshes exactly then rather than guessing on a clock. The
+rule it keeps is the one above — the page still says when it last spoke to the
+venue — and `setInterval` remains banned.
+
+**"live" means data, not a socket.** Measured against Binance from one network:
+`fstream.binance.com`, which serves **every perp dataset here**, accepts the
+connection and then sends nothing — on both the raw and combined stream forms,
+at 1m and 4h — while `stream.binance.com` delivers 6 frames in 12 s on the same
+pair. Reporting the pill off `onopen` would have left a green dot over a frozen
+chart, so it turns green on the first frame and says `connected · no data` if
+none arrives within 15 s. If your perp charts sit there, that is what you are
+seeing, and spot streams fine.
+
+Only Binance, and only because the stored candles are Binance: a second venue's
+ticks drawn onto this venue's candles is two markets' prices in one line.
 
 Signals are computed by the same whole-history `generate_signals(df)` call
 `run_backtest` makes over the same stored candles — never read from the `signals`
@@ -587,6 +647,45 @@ candlesticks and arrows at every **fill** (not every signal — `from_signals`
 ignores a repeated same-direction entry, so signals would mark bars no backtest
 traded), and a `TargetExposure` strategy gets a baseline pane carrying the signed
 −1…+1 target, which no arrow can express.
+
+**The chart carries the lifecycle, not just the fills.** Under the candles is a
+**state ribbon** — one band per bar, coloured by the state the machine was in,
+so a regime is visible as a shape rather than one bar at a time. A legend under
+the chart says what the arrows mean (**↑ bought** — opening a long *or* closing
+a short; **↓ sold** — the reverse) and what each ribbon colour is. Click or focus
+a ribbon colour and it explains what that state means and what risk the policy
+holds there. Volume is an overlay in the bottom fifth of the price pane rather
+than a pane of its own, which used to take half the chart.
+
+**A timeframe ladder** sits directly above the price pane: `1h 4h 1d 1w`, plus
+whatever else this instrument already has stored. A rung with data switches to
+it; a dashed rung has nothing stored and **fetches that timeframe** over the
+frame you are looking at, then switches. It never resamples on the client — a 1h
+bar built from four 15m bars is not the venue's 1h bar, and a dataset is keyed on
+its timeframe precisely so the two cannot be confused. There is deliberately no
+month: `timeframe_to_millis("1M")` raises, because a month is not a fixed width
+and warmup, funding windows and the poll cadence are all bar-width arithmetic.
+
+**The state sequence is below the chart** — every change the machine made, newest
+first, with how long the previous state held and the bar it changed on. Click a
+row to pin that bar and see what the strategy did there. Only
+`state_machine_v1`/`v2` have a state at all; the other strategies compute no
+feature frame and the section stays hidden rather than claiming there were no
+changes. Transitions inside warmup are dimmed — measured on BTC/USDT perp 4h over
+2023-01-01 → 2024-06-01, 8 of 50 fall there: the machine walked through them, but
+the strategy was not acting yet, so they are not decisions.
+
+**And what the fills made.** A trade table under the chart carries every round
+trip — opened, closed, side, quantity, both prices, fees, PnL and return — sliced
+from the same `Portfolio` the arrows are drawn from, so it cannot disagree with
+them. The header nets **closed trades only**: a position still open is valued
+against the last bar, and that mark moves on the next one and on whatever range
+you asked for, so it is shown italic and left out of the total. This is what the
+strategy would have made over the frame on screen at the cost model in the
+provenance strip — non-compounding from initial cash, like every backtest here —
+not an account. A `TargetExposure` strategy gets no table at all, because
+`build_analysis` runs no book for that contract; an empty one would read as "this
+strategy never traded".
 
 Hover or click any bar and the panel below shows the state and feature values
 behind it; a strategy with no feature frame says so rather than showing an empty

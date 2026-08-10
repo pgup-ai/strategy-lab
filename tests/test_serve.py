@@ -318,3 +318,114 @@ def test_a_failed_candle_write_leaves_funding_ahead_rather_than_behind(monkeypat
         "candles were written before settlements, so a half-failure leaves the "
         "candle window past the last settlement -- the state the guard refuses"
     )
+
+
+def test_a_since_reaches_back_to_it_rather_than_five_bars(monkeypatch):
+    """The five-bar lookback tops up a series that exists. The timeframe ladder
+    fetches one with *nothing* stored, where five bars leaves a chart holding
+    five candles and a warmup error, so it names its own start."""
+    asked: list = []
+    stored = _frame()
+    monkeypatch.setattr(
+        "strategy_lab.server._fetch_recent",
+        lambda identity, start: asked.append(start) or stored,
+    )
+    monkeypatch.setattr("strategy_lab.server.upsert_candles", len)
+    monkeypatch.setattr("strategy_lab.server.load_candles", lambda **_: stored)
+
+    wanted = datetime(2021, 6, 1, tzinfo=UTC)
+    refresh_candles(_SPOT, None, wanted)
+    five_bars_back = asked[0]
+
+    refresh_candles(_SPOT, None)
+
+    assert five_bars_back == wanted, "the caller's own start was ignored"
+    assert asked[1] > wanted, "a plain top-up must not re-fetch the whole history"
+
+
+def _with_forming() -> pd.DataFrame:
+    """Two closed bars and one still open, which is what a venue actually
+    returns: measured, a 15m fetch at 23:29:48 ended with the 23:15 bar.
+
+    Spaced at ``_SPOT``'s own 4h, because `_split_forming` decides with the
+    identity's bar width -- a frame spaced differently would be split by a rule
+    that has nothing to do with it.
+    """
+    now = pd.Timestamp.now(tz="UTC").floor("4h")
+    index = pd.DatetimeIndex(
+        [now - pd.Timedelta(hours=8), now - pd.Timedelta(hours=4), now], name="timestamp"
+    )
+    return pd.DataFrame(
+        {"open": [1.0, 2.0, 3.0], "high": [1.0, 2.0, 3.0], "low": [1.0, 2.0, 3.0],
+         "close": [1.0, 2.0, 3.0], "volume": [1.0, 1.0, 1.0]},
+        index=index,
+    )
+
+
+def test_the_bar_still_forming_is_never_stored(monkeypatch):
+    """`market_candles` rows are treated as final everywhere -- the backtest, the
+    replay feed, `include_forming=False`. A partial one is also *restated* on the
+    next refresh, which is the in-place rewrite of history the equity caveat
+    warns about, and `build_analysis` meanwhile computes a state and markers for
+    a bar that has not finished.
+    """
+    fetched = _with_forming()
+    stored: list[pd.DataFrame] = []
+    monkeypatch.setattr("strategy_lab.server._fetch_recent", lambda *_: fetched)
+    monkeypatch.setattr(
+        "strategy_lab.server.upsert_candles", lambda rows: stored.append(rows) or len(rows)
+    )
+    monkeypatch.setattr("strategy_lab.server.load_candles", lambda **_: fetched.iloc[:-1])
+
+    payload = refresh_candles(_SPOT, None)
+
+    assert payload["candles_upserted"] == 2, "the forming bar reached storage"
+    written = {row["timestamp"] for row in stored[0]}
+    assert fetched.index[-1].to_pydatetime() not in written
+
+
+def test_the_forming_bar_still_reaches_the_caller(monkeypatch):
+    """`serve`'s chart draws it as forming on purpose. Withheld from storage is
+    not the same as withheld from the reader."""
+    fetched = _with_forming()
+    monkeypatch.setattr("strategy_lab.server._fetch_recent", lambda *_: fetched)
+    monkeypatch.setattr("strategy_lab.server.upsert_candles", len)
+    monkeypatch.setattr("strategy_lab.server.load_candles", lambda **_: fetched.iloc[:-1])
+
+    payload = refresh_candles(_SPOT, None)
+
+    assert len(payload["bars"]) == 3
+    assert payload["bars"][-1]["time"] == int(fetched.index[-1].timestamp())
+
+
+def test_a_fetch_that_ends_on_a_closed_bar_keeps_all_of_it(monkeypatch):
+    """The bound on the above: only the final row can be open, and only when its
+    interval has not elapsed. Dropping it unconditionally loses a real bar."""
+    closed = _with_forming().iloc[:-1]
+    monkeypatch.setattr("strategy_lab.server._fetch_recent", lambda *_: closed)
+    monkeypatch.setattr("strategy_lab.server.upsert_candles", len)
+    monkeypatch.setattr("strategy_lab.server.load_candles", lambda **_: closed)
+
+    assert refresh_candles(_SPOT, None)["candles_upserted"] == 2
+
+
+def test_a_candle_backfill_does_not_re_page_the_funding_history(monkeypatch):
+    """Funding is keyed `(exchange, market_type, symbol)` with no timeframe, so a
+    new *timeframe* adds nothing to it — and `_fetch_funding` starts at the
+    earlier of its argument and the last stored settlement, so handing it a 2019
+    candle edge re-pages ~7,700 settlements to write duplicates."""
+    asked: dict = {}
+    stored = _with_forming().iloc[:-1]
+    monkeypatch.setattr("strategy_lab.server._fetch_recent", lambda *_: stored)
+    monkeypatch.setattr(
+        "strategy_lab.server._fetch_funding",
+        lambda identity, start: asked.update(start=start) or None,
+    )
+    monkeypatch.setattr("strategy_lab.server.upsert_candles", len)
+    monkeypatch.setattr("strategy_lab.server.load_candles", lambda **_: stored)
+
+    ancient = datetime(2019, 9, 10, tzinfo=UTC)
+    refresh_candles(_PERP, None, ancient)
+
+    assert asked["start"] > ancient, "the candle edge dragged funding back with it"
+    assert (datetime.now(UTC) - asked["start"]).days < 1

@@ -144,6 +144,89 @@ if DEFAULT_MARKET_TYPE not in MARKET_TYPES:
     )
 
 
+# What a chart offers to switch between.
+#
+# **No month.** Binance publishes `1M` klines, but a month is not a fixed width
+# and every bar calculation here assumes one -- `timeframe_to_millis("1M")`
+# raises, and warmup, funding windows and the poll cadence are all `bar_ms`
+# arithmetic. A rung that fetches candles and then cannot be analysed is the
+# same defect as a live control that cannot connect: better absent than broken.
+# Per venue, because a week is not spelled the same way twice. Yahoo's own
+# error names its set -- `[1m, 2m, 5m, 15m, 30m, 60m, 90m, 1h, 4h, 1d, 5d, 1wk,
+# 1mo, 3mo]` -- so `4h` is fine there and `1w` returns nothing, which is the
+# `1w`/`1wk` split this repo already keys datasets on. A rung that fetches
+# nothing is the live control that cannot connect, again.
+TIMEFRAME_LADDERS: dict[str, tuple[str, ...]] = {
+    "binance": ("1h", "4h", "1d", "1w"),
+    "yahoo": ("1h", "4h", "1d", "1wk"),
+}
+DEFAULT_TIMEFRAME_LADDER: tuple[str, ...] = ("1h", "4h", "1d")
+
+# Shortest first, for ordering rungs the ladder did not name. A timeframe this
+# instrument already has is worth a rung even when it is not one of the four
+# above -- otherwise leaving 15m for 1h strands you in the dropdown.
+TIMEFRAME_ORDER: tuple[str, ...] = (
+    "1s", "1m", "3m", "5m", "15m", "30m", "1h", "2h", "4h",
+    "6h", "8h", "12h", "1d", "3d", "1w", "1wk",
+)
+
+# The lifecycle in order, with a colour per state. In Python because the order
+# is the machine's -- compression -> breakout -> confirmed -> riding ->
+# exhaustion -> reset -- and a legend that listed them alphabetically would
+# describe a different thing from the one the strategy walks.
+STATE_COLORS: dict[str, str] = {
+    "compression": "#4a5163",
+    "breakout": "#d1a54a",
+    "confirmed": "#26a69a",
+    "riding": "#1de9b6",
+    "exhaustion": "#ef5350",
+    "reset": "#7e6bab",
+}
+
+# What each state means, for the legend. The percentages are
+# ``state.policy.STATE_TARGET_RISK`` -- the whole of what a state *does*, since
+# the policy maps state to a target risk and nothing else -- and they are quoted
+# rather than imported because the browser shows the machine's own vocabulary,
+# not one strategy's tuning of it.
+#
+# ``riding`` carries R6's finding rather than the row's intent, because that is
+# the sentence a reader of this chart most needs: the machine spends real time
+# there, the ribbon shows it, and no entry has ever been sized by it.
+STATE_DESCRIPTIONS: dict[str, str] = {
+    "compression": (
+        "Quiet. The entry gate has not opened, so the policy holds nothing (0% risk). "
+        "This is the state the thesis is about: chop, waited out."
+    ),
+    "breakout": (
+        "The gate opened — enough directional lean, energy under its ceiling. "
+        "First and smallest position (35% risk)."
+    ),
+    "confirmed": (
+        "The move survived the breakout's minimum dwell. Size steps up (70% risk)."
+    ),
+    "riding": (
+        "The trend is running: the row sized highest (100% risk). It is only ever "
+        "reached with a position already open, and an entry needs a change of side "
+        "— so no entry has ever been sized here, and a position that reaches it "
+        "keeps whatever size its entry bar carried."
+    ),
+    "exhaustion": (
+        "The advance stopped. Sized down (55% risk), and served out a dwell before "
+        "the machine will reset."
+    ),
+    "reset": (
+        "A finished or failed move, flat (0% risk). The cooldown is served here so "
+        "the machine cannot re-enter on the next bar of the same chop."
+    ),
+}
+
+if set(STATE_DESCRIPTIONS) != set(STATE_COLORS):
+    raise RuntimeError(
+        "every state the ribbon colours must also be explained: "
+        f"{sorted(set(STATE_COLORS) ^ set(STATE_DESCRIPTIONS))}"
+    )
+
+
 def bootstrap_config() -> dict[str, object]:
     """Everything the page script must not decide for itself, as one JSON blob."""
     return {
@@ -155,6 +238,15 @@ def bootstrap_config() -> dict[str, object]:
         "restatedMarketType": RESTATED_MARKET_TYPE,
         "restatementStaleDays": RESTATEMENT_STALE_DAYS,
         "colors": {"up": UP, "down": DOWN, "upDim": UP_DIM, "downDim": DOWN_DIM},
+        "stateColors": STATE_COLORS,
+        "stateDescriptions": STATE_DESCRIPTIONS,
+        # The rungs a chart offers, in order. Not every one is stored for every
+        # instrument -- the switcher fetches the missing one rather than hiding
+        # it, because "this timeframe does not exist here" is a fact about
+        # storage, not about the market.
+        "timeframeLadders": {k: list(v) for k, v in TIMEFRAME_LADDERS.items()},
+        "defaultTimeframeLadder": list(DEFAULT_TIMEFRAME_LADDER),
+        "timeframeOrder": list(TIMEFRAME_ORDER),
     }
 
 
@@ -235,6 +327,76 @@ __SHELL_CSS__
   }
   h2 .pin { text-transform: none; letter-spacing: 0; color: var(--ink); }
   section.why { padding: 16px 20px 8px; }
+  #transitions { display: flex; flex-direction: column; gap: 2px; max-height: 320px;
+    overflow-y: auto; }
+  .shift { display: grid; grid-template-columns: 148px 1fr 110px; gap: 10px;
+    width: 100%; align-items: baseline; padding: 5px 8px; border-radius: 4px;
+    cursor: pointer; border: 1px solid transparent; background: transparent;
+    color: inherit; font: inherit; font-size: 13px; text-align: left; }
+  .shift:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+  .shift:hover { background: #232733; }
+  .shift.selected { border-color: #4a5163; background: #232733; }
+  .shift-when { color: var(--ink-dim); font-variant-numeric: tabular-nums; }
+  .shift-to { font-weight: 600; }
+  .shift-from { color: var(--ink-dim); }
+  .shift-dwell { color: var(--ink-dim); text-align: right;
+    font-variant-numeric: tabular-nums; }
+  /* Dimmed rather than hidden: the machine really walked through these, but the
+     strategy was not acting yet, so they are not decisions. */
+  .shift.warmup { opacity: 0.55; }
+  .shift.warmup .shift-to { font-weight: 400; }
+  /* Above the price pane rather than in the header: the rungs change what the
+     chart is, where the header's fields change what is being asked. */
+  .chart-bar { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; }
+  .chart-bar-right { margin-left: auto; display: inline-flex; gap: 6px;
+    align-items: center; }
+  .ladder { display: inline-flex; gap: 2px; }
+  .ladder button { padding: 4px 9px; font-size: 12px; }
+  .ladder button.current { border-color: var(--accent); color: var(--ink); }
+  .ladder button.absent { color: var(--ink-dim); border-style: dashed; }
+  .legend-strip { display: flex; flex-wrap: wrap; gap: 8px 18px; margin: 6px 20px 0;
+    font-size: 12px; color: var(--ink-dim); align-items: center; }
+  /* `hidden` is a UA rule that any author `display` defeats. */
+  .legend-strip[hidden] { display: none; }
+  .legend-strip .mk { font-size: 14px; }
+  .legend-strip .mk.up { color: var(--up); }
+  .legend-strip .mk.down { color: var(--down); }
+  .swatch { display: inline-flex; align-items: center; gap: 4px; margin-left: 8px; }
+  .swatch i { width: 9px; height: 9px; border-radius: 2px; display: inline-block;
+    flex: none; }
+  button.swatch { padding: 1px 5px 1px 3px; border: 1px solid transparent;
+    background: transparent; color: inherit; font: inherit; font-size: 12px;
+    cursor: help; border-radius: 4px; }
+  button.swatch:hover, button.swatch:focus-visible { border-color: #4a5163;
+    background: #232733; color: var(--ink); }
+  /* Block, not the strip's flex: the swatch and its sentence are one run of
+     text, and as flex items the dash wraps onto a line of its own. */
+  .state-explainer { display: block; max-width: 104ch; line-height: 1.6; }
+  .state-explainer i { width: 9px; height: 9px; border-radius: 2px;
+    display: inline-block; margin-right: 6px; }
+  .state-explainer b { color: var(--ink); font-weight: 600; }
+  #trades { max-height: 320px; overflow-y: auto; }
+  #trades table { border-collapse: collapse; width: 100%; font-size: 13px; }
+  #trades th {
+    position: sticky; top: 0; background: var(--bg); z-index: 1; text-align: right;
+    color: var(--ink-dim); font-weight: 500; font-size: 11px; letter-spacing: 0.4px;
+    text-transform: uppercase; padding: 4px 8px; border-bottom: 1px solid var(--border-soft);
+  }
+  #trades td { padding: 4px 8px; font-variant-numeric: tabular-nums; text-align: right; }
+  #trades th:first-child, #trades td:first-child { text-align: left; }
+  #trades tbody tr { cursor: pointer; }
+  #trades tbody tr:hover { background: #232733; }
+  #trades .side-long { color: var(--up); }
+  #trades .side-short { color: var(--down); }
+  #trades .gain { color: var(--up); }
+  #trades .loss { color: var(--down); }
+  /* An open trade's PnL is a mark against the last close, not money -- it must
+     not read like the closed rows it sits beside. */
+  #trades tr.open td { opacity: 0.6; font-style: italic; }
+  .live { display: inline-flex; align-items: center; gap: 6px; }
+  .live-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--ink-dim); }
+  .live.on .live-dot { background: var(--up); }
+  .live.wait .live-dot { background: #d1a54a; }
   .why-chips { display: flex; gap: 8px; flex-wrap: wrap; }
   .why-chips .chip { min-width: 84px; }
   .why-chips .chip.state { border-color: #4a5163; background: #232733; }
@@ -313,12 +475,6 @@ __SHELL_CSS__
       <label for="end">To</label>
       <input id="end" type="date">
     </div>
-    <div class="field instrument-only">
-      <label for="refresh">Candles</label>
-      <button id="refresh" type="button" title="Fetch the newest bars and recompute">
-        refresh
-      </button>
-    </div>
     <div class="field board-only">
       <label for="refresh-all">Candles</label>
       <button id="refresh-all" type="button"
@@ -346,6 +502,18 @@ __SHELL_CSS__
 </div>
 <div class="provenance instrument-only" id="provenance"></div>
 <div class="charts instrument-only">
+  <div class="chart-bar">
+    <span id="ladder" class="ladder" role="group" aria-label="Candle timeframe"></span>
+    <span class="chart-bar-right">
+      <button id="live" type="button" class="live off" hidden
+              title="Draw the venue's forming candle, and recompute when it closes">
+        <span class="live-dot"></span><span id="live-text">live</span>
+      </button>
+      <button id="refresh" type="button" title="Fetch the newest bars and recompute">
+        refresh
+      </button>
+    </span>
+  </div>
   <div class="pane" id="price-pane">
     <span class="pane-tag">PRICE · VOLUME</span>
     <div id="legend"></div>
@@ -356,10 +524,26 @@ __SHELL_CSS__
     </div>
   </div>
 </div>
+<p class="legend-strip instrument-only" id="chart-legend">
+  <span><b class="mk up">&uarr;</b> bought &mdash; opening a long or closing a short</span>
+  <span><b class="mk down">&darr;</b> sold &mdash; opening a short or closing a long</span>
+  <span id="state-legend" hidden>state ribbon: <span id="state-swatches"></span></span>
+</p>
+<p class="legend-strip instrument-only state-explainer" id="state-explainer" hidden></p>
+<section class="why instrument-only" id="trades-section" hidden>
+  <h2>Trades <span class="pin" id="trades-summary"></span></h2>
+  <div id="trades"></div>
+  <p class="note" id="trades-note"></p>
+</section>
 <section class="why instrument-only">
   <h2>Why this bar <span class="pin" id="why-bar"></span></h2>
   <div class="why-chips" id="why-chips"></div>
   <p class="note" id="why-note"></p>
+</section>
+<section class="why instrument-only" id="transitions-section" hidden>
+  <h2>State changes <span class="pin" id="transitions-count"></span></h2>
+  <div id="transitions"></div>
+  <p class="note" id="transitions-note"></p>
 </section>
 <footer>
   strategy-lab research browser · a live view, recomputed per request · the
@@ -407,10 +591,27 @@ __SHELL_CSS__
     wickUpColor: COLORS.up, wickDownColor: COLORS.down
   });
   candleSeries.priceScale().applyOptions({ scaleMargins: { top: 0.08, bottom: 0.06 } });
+  // An overlay on the price pane rather than a pane of its own. As a pane it
+  // took half the chart -- `panes()[1].setHeight(80)` did not hold, and the
+  // separator would not drag -- which left the price series squeezed into the
+  // top half of an already wide range. Overlaid, price keeps the whole pane and
+  // volume lives in the bottom fifth of it, which is what TradingView does.
   var volumeSeries = priceChart.addSeries(LWC.HistogramSeries, {
-    priceFormat: { type: 'volume' }, lastValueVisible: false, priceLineVisible: false
+    priceFormat: { type: 'volume' }, lastValueVisible: false, priceLineVisible: false,
+    priceScaleId: ''
+  });
+  volumeSeries.priceScale().applyOptions({ scaleMargins: { top: 0.82, bottom: 0 } });
+
+  // One bar per candle at constant height, coloured by the state the machine was
+  // in. The state was already in the payload and readable only one bar at a time
+  // by hovering; as a ribbon the shape of a regime is visible at a glance, which
+  // is the thing a lifecycle strategy is actually about.
+  var stateSeries = priceChart.addSeries(LWC.HistogramSeries, {
+    priceFormat: { type: 'volume' }, lastValueVisible: false, priceLineVisible: false,
+    priceScaleId: 'state'
   }, 1);
-  priceChart.panes()[1].setHeight(80);
+  priceChart.panes()[1].setStretchFactor(12);
+  priceChart.panes()[0].setStretchFactor(88);
   var markerLayer = LWC.createSeriesMarkers(candleSeries, []);
 
   var exposureChart = LWC.createChart(el('exposure-pane'), theme);
@@ -492,6 +693,13 @@ __SHELL_CSS__
     if (message) setStatus('showing the last run that succeeded');
   }
 
+  // A bar's own time, to the minute. Bars are UTC everywhere in this lab, so
+  // rendering one in the reader's zone would put a chart, a state change and a
+  // trade on three different clocks.
+  function utcMinute(seconds) {
+    return new Date(seconds * 1000).toISOString().slice(0, 16).replace('T', ' ');
+  }
+
   function fmt(value, digits) {
     if (value === null || value === undefined) return '—';
     return Number(value).toLocaleString(undefined, {
@@ -541,10 +749,13 @@ __SHELL_CSS__
     });
   }
 
+  var streams = {};
+
   function fillDatasets(rows) {
     var deepest = null;
     rows.forEach(function (row) {
       var id = datasetKey(row);
+      streams[id] = row.stream || null;
       datasetSel.appendChild(option(
         id,
         row.symbol + ' · ' + row.timeframe + ' · ' + row.exchange + '/' +
@@ -598,6 +809,26 @@ __SHELL_CSS__
     }));
   }
 
+  function drawStateRibbon(payload) {
+    var states = payload.why ? payload.why.states : null;
+    if (!states) {
+      stateSeries.setData([]);
+      el('state-legend').hidden = true;
+      // With it: an explanation of a state left over from the last strategy,
+      // sitting under a chart that has no states at all.
+      el('state-explainer').hidden = true;
+      return;
+    }
+    // Constant height: the ribbon says *which* state, never how much of it.
+    stateSeries.setData(payload.bars.map(function (bar, i) {
+      // No fallback colour: `STATE_COLORS` is asserted against `MarketState` in
+      // Python, so a missing one means a state was added there and not here --
+      // which should look wrong rather than quietly grey.
+      return { time: bar.time, value: 1, color: CFG.stateColors[states[i]] };
+    }));
+    el('state-legend').hidden = false;
+  }
+
   function toMarkers(markers) {
     return markers.map(function (marker) {
       var entering = marker.kind === 'entry';
@@ -646,6 +877,7 @@ __SHELL_CSS__
     });
 
     drawBars(payload.bars);
+    drawStateRibbon(payload);
     // Both assignments are unconditional so neither contract can inherit the
     // other's leftovers: a level is never drawn as a set of fills, and a set of
     // fills is never drawn as a level.
@@ -664,7 +896,15 @@ __SHELL_CSS__
       if (range) exposureChart.timeScale().setVisibleLogicalRange(range);
     }
 
+    renderLadder();
+    view.stream = streams[datasetSel.value] || null;
+    el('live').hidden = !view.stream;
+    openSocket();
+
     renderProvenance(payload.provenance);
+    view.shifts = payload.why ? shiftsFrom(payload.why.states, payload.bars) : null;
+    renderShifts();
+    renderTrades();
     view.pinned = null;
     renderBar(payload.bars.length - 1);
     document.title = payload.provenance.identity.symbol + ' · ' +
@@ -785,8 +1025,8 @@ __SHELL_CSS__
     var bar = view.bars[i];
     if (!bar) return;
     renderLegend(bar);
-    el('why-bar').textContent = new Date(bar.time * 1000).toISOString()
-      .slice(0, 16).replace('T', ' ') + ' UTC' + (view.pinned === i ? ' · pinned' : '');
+    el('why-bar').textContent = utcMinute(bar.time) + ' UTC' +
+      (view.pinned === i ? ' · pinned' : '');
 
     var host = el('why-chips');
     host.replaceChildren();
@@ -833,9 +1073,313 @@ __SHELL_CSS__
         'has nothing further to show about why.';
   }
 
+  // ------------------------------------------------------- the state sequence
+
+  // A `!==` over a series the payload already carries, so it cannot disagree
+  // with the per-bar chip or the board tile. Deriving it server-side would be
+  // M36's third answer, free to drift from the two that already agree.
+  function shiftsFrom(states, bars) {
+    var out = [];
+    // Bar 0 for the first change: it is the opening state rather than one
+    // something moved into, and its dwell is measured from the frame's start.
+    var previousIndex = 0;
+    for (var i = 1; i < states.length; i += 1) {
+      if (states[i] === states[i - 1]) continue;
+      out.push({
+        index: i,
+        previousIndex: previousIndex,
+        from: states[i - 1],
+        to: states[i],
+        time: bars[i].time
+      });
+      previousIndex = i;
+    }
+    return out;
+  }
+
+  function dwellText(bars, fromIndex, toIndex) {
+    var count = toIndex - fromIndex;
+    var seconds = bars[toIndex].time - bars[fromIndex].time;
+    var hours = seconds / 3600;
+    var span = hours < 48 ? fmt(hours, 1) + 'h' : fmt(hours / 24, 1) + 'd';
+    return count + (count === 1 ? ' bar · ' : ' bars · ') + span;
+  }
+
+  function renderShifts() {
+    var section = el('transitions-section');
+    var host = el('transitions');
+    host.replaceChildren();
+    if (!view.shifts) {
+      section.hidden = true;
+      return;
+    }
+    section.hidden = false;
+
+    var warmup = view.payload.provenance.warmup_bars;
+    var inWarmup = 0;
+    // Newest first: the question a monitor answers most often is what it is
+    // doing now, not what it did first.
+    view.shifts.slice().reverse().forEach(function (shift) {
+      var early = warmup !== null && shift.index < warmup;
+      if (early) inWarmup += 1;
+      var row = document.createElement('button');
+      row.type = 'button';
+      row.setAttribute('aria-pressed', 'false');
+      row.className = 'shift' + (early ? ' warmup' : '');
+      row.dataset.index = shift.index;
+
+      var when = document.createElement('span');
+      when.className = 'shift-when';
+      when.textContent = utcMinute(shift.time);
+      var what = document.createElement('span');
+      var from = document.createElement('span');
+      from.className = 'shift-from';
+      from.textContent = shift.from + ' \u2192 ';
+      var to = document.createElement('span');
+      to.className = 'shift-to';
+      to.textContent = shift.to;
+      what.appendChild(from);
+      what.appendChild(to);
+      var dwell = document.createElement('span');
+      dwell.className = 'shift-dwell';
+      dwell.textContent = dwellText(view.bars, shift.previousIndex, shift.index);
+
+      row.appendChild(when);
+      row.appendChild(what);
+      row.appendChild(dwell);
+      row.addEventListener('click', function () { pinBar(shift.index); });
+      host.appendChild(row);
+    });
+
+    el('transitions-count').textContent = view.shifts.length +
+      (view.shifts.length === 1 ? ' change' : ' changes') + ' · newest first';
+    el('transitions-note').textContent = inWarmup
+      ? inWarmup + ' of these fall inside the ' + warmup.toLocaleString() +
+        '-bar warmup and are dimmed: ' +
+        'the machine walked through them, but the strategy was not acting yet, so they ' +
+        'are not decisions.'
+      : 'Dwell is how long the previous state held. Click a row to pin that bar.';
+  }
+
+  function pinBar(i) {
+    view.pinned = i;
+    renderBar(i);
+    markSelectedShift(i);
+    var range = priceChart.timeScale().getVisibleLogicalRange();
+    // Only recentre when the bar is off screen: a click on a visible row should
+    // not yank the chart out from under someone comparing two of them.
+    if (range && (i < range.from || i > range.to)) {
+      var half = Math.max(20, (range.to - range.from) / 2);
+      priceChart.timeScale().setVisibleLogicalRange({ from: i - half, to: i + half });
+    }
+  }
+
+  function markSelectedShift(i) {
+    Array.prototype.forEach.call(el('transitions').children, function (row) {
+      var selected = Number(row.dataset.index) === i;
+      row.classList.toggle('selected', selected);
+      row.setAttribute('aria-pressed', String(selected));
+    });
+  }
+
+  // ------------------------------------------------------------------ trades
+
+  // The quote currency, when the symbol names one. `BTC/USDT:USDT` quotes in
+  // USDT; `SPY` names no currency at all, and printing a guessed one beside a
+  // PnL would be a claim about the account this never touched.
+  function quoteUnit(symbol) {
+    var parts = String(symbol).split('/');
+    return parts.length > 1 ? parts[1].split(':')[0] : '';
+  }
+
+  function cell(row, text, cls) {
+    var td = document.createElement('td');
+    td.textContent = text;
+    if (cls) td.className = cls;
+    row.appendChild(td);
+  }
+
+  function renderTrades() {
+    var section = el('trades-section');
+    var host = el('trades');
+    host.replaceChildren();
+    var trades = view.payload.trades;
+    var costs = view.payload.provenance.cost_model;
+    // Empty is a different statement from absent. The continuous contract runs
+    // no book here at all, so it gets no section; a boolean strategy that
+    // simply never traded over this range gets one saying so, because "no
+    // trades" is the result.
+    if (!costs) {
+      section.hidden = true;
+      return;
+    }
+    section.hidden = false;
+
+    var unit = quoteUnit(view.payload.provenance.identity.symbol);
+    var closed = trades.filter(function (t) { return t.status === 'closed'; });
+    var won = closed.filter(function (t) { return t.pnl > 0; }).length;
+    var net = closed.reduce(function (sum, t) { return sum + t.pnl; }, 0);
+    var open = trades.length - closed.length;
+
+    var table = document.createElement('table');
+    var head = document.createElement('tr');
+    ['opened', 'closed', 'side', 'qty', 'in', 'out', 'fees', 'pnl', 'return']
+      .forEach(function (name) {
+        var th = document.createElement('th');
+        th.textContent = name;
+        head.appendChild(th);
+      });
+    var thead = document.createElement('thead');
+    thead.appendChild(head);
+    table.appendChild(thead);
+
+    var body = document.createElement('tbody');
+    // Newest first, matching the state changes above it.
+    trades.slice().reverse().forEach(function (trade) {
+      var row = document.createElement('tr');
+      row.className = trade.status;
+      cell(row, utcMinute(trade.entry_time));
+      cell(row, trade.exit_time === null ? 'still open' : utcMinute(trade.exit_time));
+      cell(row, trade.direction, 'side-' + trade.direction);
+      cell(row, fmt(trade.size, 6));
+      cell(row, fmt(trade.entry_price, 2));
+      cell(row, trade.exit_price === null ? '—' : fmt(trade.exit_price, 2));
+      cell(row, fmt(trade.fees, 2));
+      cell(row, fmt(trade.pnl, 2), trade.pnl >= 0 ? 'gain' : 'loss');
+      cell(row, fmt(trade.return_pct * 100, 2) + '%',
+           trade.return_pct >= 0 ? 'gain' : 'loss');
+      // The exit is the bar that decided the result; an open trade has only its
+      // entry to point at.
+      var at = view.index[trade.exit_time === null ? trade.entry_time : trade.exit_time];
+      row.addEventListener('click', function () { pinBar(at); });
+      body.appendChild(row);
+    });
+    table.appendChild(body);
+    host.appendChild(table);
+
+    el('trades-summary').textContent = closed.length
+      ? closed.length + ' closed · net ' + fmt(net, 2) + (unit ? ' ' + unit : '') +
+        ' · ' + fmt((won / closed.length) * 100, 1) + '% won' +
+        (open ? ' · ' + open + ' still open' : '')
+      : (trades.length ? trades.length + ' open, none closed yet' : 'none');
+    el('trades-note').textContent = trades.length
+      ? 'What this strategy would have made over the frame above, at ' +
+        fmt(costs.fee * 100, 3) + '% fee and ' + fmt(costs.slippage * 100, 3) +
+        '% slippage, sized non-compounding from ' + fmt(costs.cash, 0) +
+        ' — the same run the arrows are drawn from, not an account. ' +
+        'Net and win rate count closed trades only: an open one is marked ' +
+        'against the last bar, and that mark moves. Click a row to pin its bar.'
+      : 'No trade over this range. The arrows and this table come from the same ' +
+        'run, so an empty table means the chart is empty too.';
+  }
+
+  // ---------------------------------------------------------------- live feed
+
+  // The venue's forming candle, drawn but **never analysed**. A tick that
+  // reached `build_analysis` would produce a state and a marker that flip when
+  // the bar closes, which is the one reading the whole event path refuses --
+  // `include_forming=False`, and a timestamp is complete only once a later one
+  // arrives. So the candle moves and the why-layer stays where the last closed
+  // bar left it, and `renderBar` says so rather than letting the previous bar's
+  // state read as this one's.
+  var live = { socket: null, on: true, bar: null, ticks: 0, watchdog: null };
+
+  // A socket that opens is not a feed that delivers. Measured against Binance
+  // from here: `fstream.binance.com` -- every perp dataset in this repo --
+  // accepts the connection and then sends nothing, on both the raw and combined
+  // stream forms, while `stream.binance.com` delivers 6 frames in 12s on the
+  // same pair. `onopen` is therefore a proxy for working, and reporting "live"
+  // off it would leave a green dot over a frozen chart. It says live once a
+  // frame has actually arrived, and says so when none does.
+  var FIRST_TICK_GRACE_MS = 15000;
+
+  function setLive(cls, text) {
+    var button = el('live');
+    button.className = 'live ' + cls;
+    el('live-text').textContent = text;
+  }
+
+  function closeSocket() {
+    if (live.watchdog) { clearTimeout(live.watchdog); live.watchdog = null; }
+    if (!live.socket) return;
+    var socket = live.socket;
+    live.socket = null;          // before close(), so onclose knows it was us
+    socket.close();
+  }
+
+  function openSocket() {
+    closeSocket();
+    live.bar = null;
+    var url = view.stream;
+    if (!url || !live.on) {
+      setLive('off', live.on ? 'no stream' : 'paused');
+      return;
+    }
+    setLive('wait', 'connecting');
+    live.ticks = 0;
+    var socket = new WebSocket(url);
+    live.socket = socket;
+    socket.onopen = function () {
+      if (live.socket !== socket) return;
+      setLive('wait', 'waiting for data');
+      live.watchdog = setTimeout(function () {
+        if (live.socket === socket && !live.ticks) setLive('off', 'connected · no data');
+      }, FIRST_TICK_GRACE_MS);
+    };
+    socket.onmessage = function (event) {
+      // The guard `onclose` and the watchdog already carry. Without it a frame
+      // in flight when the dataset changed draws the old market's candle onto
+      // the new chart, and a stale `x: true` POSTs a refresh nobody asked for.
+      if (live.socket !== socket) return;
+      if (!live.ticks) setLive('on', 'live');
+      live.ticks += 1;
+      onTick(JSON.parse(event.data));
+    };
+    socket.onerror = function () {
+      if (live.socket === socket) setLive('off', 'stream error');
+    };
+    socket.onclose = function () {
+      // Only report a drop we did not ask for; switching dataset closes it too.
+      if (live.socket === socket) { live.socket = null; setLive('off', 'disconnected'); }
+    };
+  }
+
+  function onTick(message) {
+    var k = message.k;
+    if (!k) return;
+    live.bar = {
+      time: Math.floor(k.t / 1000),
+      open: Number(k.o), high: Number(k.h), low: Number(k.l), close: Number(k.c)
+    };
+    candleSeries.update(live.bar);
+    if (!k.x) return;
+    // The venue says this bar is final, which is the whole reason this is not a
+    // timer: the one moment the stored candles are provably behind. Refresh
+    // stores it and recomputes, so state and markers catch up to the bar the
+    // chart already drew.
+    if (viewSel.value !== 'instrument') return;
+    setLive('wait', 'bar closed · refreshing');
+    refreshInstrument().then(function () {
+      if (live.socket) setLive('on', 'live');
+    });
+  }
+
+  el('live').addEventListener('click', function () {
+    live.on = !live.on;
+    openSocket();
+  });
+
   priceChart.subscribeCrosshairMove(function (param) {
     if (view.pinned !== null) return;
     var i = param.time !== undefined ? view.index[param.time] : undefined;
+    // A live bar has no index: it was drawn after the analysis, on purpose. Say
+    // so rather than falling back to the last analysed bar, whose state would
+    // then read as this one's.
+    if (i === undefined && live.bar && param.time === live.bar.time) {
+      el('why-bar').textContent = 'live bar · not analysed until it closes';
+      el('why-chips').replaceChildren();
+      return;
+    }
     renderBar(i === undefined ? view.bars.length - 1 : i);
   });
   priceChart.subscribeClick(function (param) {
@@ -843,6 +1387,7 @@ __SHELL_CSS__
     if (i === undefined) return;
     view.pinned = view.pinned === i ? null : i;
     renderBar(i);
+    markSelectedShift(view.pinned === null ? -1 : i);
   });
 
   // ----------------------------------------------------------------- the board
@@ -1056,8 +1601,7 @@ __SHELL_CSS__
       var fill = row.latest_fill;
       wrap.appendChild(tileLine(
         fill.side + ' ' + fill.kind,
-        fmt(fill.price, 2) + ' × ' + fmt(fill.size, 4) + '  ' +
-        new Date(fill.time * 1000).toISOString().slice(0, 16).replace('T', ' ')
+        fmt(fill.price, 2) + ' × ' + fmt(fill.size, 4) + '  ' + utcMinute(fill.time)
       ));
     } else if (row.target !== null) {
       wrap.appendChild(tileLine('target', fmt(row.target, 3)));
@@ -1438,7 +1982,7 @@ __SHELL_CSS__
     // fires on its own: leaving the board would keep appending tiles to a
     // hidden host and finishing a full recompute per dataset, and leaving the
     // instrument view would draw a chart over the board and retitle the page.
-    if (name === 'board') abandonInstrument(); else abortBoard();
+    if (name === 'board') { abandonInstrument(); closeSocket(); } else abortBoard();
     return name === 'board' ? loadBoard() : load();
   }
 
@@ -1475,14 +2019,20 @@ __SHELL_CSS__
       load();
     });
   });
-  el('refresh').addEventListener('click', function () {
+  function refreshInstrument() {
+    // The view can change while the fetch is in flight, and this one is not
+    // always started by a click -- a closing bar starts it too. Reloading then
+    // draws a chart over the board and retitles the page, which is what
+    // `abandonInstrument` prevents for requests already running but cannot for
+    // one begun afterwards.
+    var startedIn = viewSel.value;
     var button = el('refresh');
     button.disabled = true;
     setStatus('fetching newest bars …');
     var params = new URLSearchParams(identity());
     var last = view.bars[view.bars.length - 1];
     if (last) params.set('after', String(last.time));
-    getJSON('/api/refresh?' + params.toString(), { method: 'POST' })
+    return getJSON('/api/refresh?' + params.toString(), { method: 'POST' })
       // The counts exist so drift is visible at the moment it opens, not two
       // clicks later as a 409. A perp that moved candles and no settlements is
       // exactly the state the coverage guard will refuse next, and thrown away
@@ -1504,11 +2054,114 @@ __SHELL_CSS__
         // coverage guard tolerates only to one funding cadence.
         exactBounds = { start: exactBounds && exactBounds.start, end: null };
         el('end').value = '';
+        if (viewSel.value !== startedIn) return null;
         return load();
       })
       .catch(function (error) { setError(error.message); })
       .then(function () { button.disabled = false; });
+  }
+
+  el('refresh').addEventListener('click', refreshInstrument);
+
+  // A rung switches to the stored dataset for that timeframe, and offers to
+  // fetch it when there is none. Never a client-side resample: a 1h bar built
+  // from four 15m bars is not the venue's 1h bar, and this repo keys a dataset
+  // on its timeframe precisely so the two cannot be confused.
+  function datasetFor(timeframe) {
+    var id = identity();
+    return [id.exchange, id.market_type, id.symbol, timeframe].join('|');
+  }
+
+  function renderLadder() {
+    var host = el('ladder');
+    host.replaceChildren();
+    var id = identity();
+    var current = id.timeframe;
+    // The four rungs, plus every timeframe this instrument already has stored,
+    // so switching away from one never strands it in the dropdown.
+    var rungs = (CFG.timeframeLadders[id.exchange] || CFG.defaultTimeframeLadder).slice();
+    Array.prototype.forEach.call(datasetSel.options, function (option) {
+      var parts = option.value.split('|');
+      var mine = parts[0] === id.exchange && parts[1] === id.market_type &&
+        parts[2] === id.symbol;
+      if (mine && rungs.indexOf(parts[3]) < 0) rungs.push(parts[3]);
+    });
+    if (rungs.indexOf(current) < 0) rungs.push(current);
+    rungs.sort(function (a, b) {
+      return CFG.timeframeOrder.indexOf(a) - CFG.timeframeOrder.indexOf(b);
+    });
+    rungs.forEach(function (timeframe) {
+      var wanted = datasetFor(timeframe);
+      var stored = Object.prototype.hasOwnProperty.call(streams, wanted) ||
+        Array.prototype.some.call(datasetSel.options, function (o) { return o.value === wanted; });
+      var button = document.createElement('button');
+      button.type = 'button';
+      button.textContent = timeframe;
+      button.className = timeframe === current ? 'current' : (stored ? '' : 'absent');
+      button.title = stored
+        ? 'switch to ' + timeframe
+        : timeframe + ' is not stored for this instrument yet — click to fetch it';
+      button.addEventListener('click', function () { switchTimeframe(timeframe, stored); });
+      host.appendChild(button);
+    });
+  }
+
+  function switchTimeframe(timeframe, stored) {
+    var wanted = datasetFor(timeframe);
+    if (stored) {
+      datasetSel.value = wanted;
+      exactBounds = null;
+      return load();
+    }
+    setStatus('fetching ' + timeframe + ' candles …');
+    var parts = wanted.split('|');
+    var params = new URLSearchParams({
+      exchange: parts[0], market_type: parts[1], symbol: parts[2], timeframe: parts[3]
+    });
+    // From this frame's own left edge, so the new timeframe covers what is on
+    // screen rather than the five bars a top-up would take.
+    var first = view.bars && view.bars[0];
+    if (first) params.set('since', new Date(first.time * 1000).toISOString());
+    return getJSON('/api/refresh?' + params.toString(), { method: 'POST' })
+      .then(function () { return getJSON('/api/datasets'); })
+      .then(function (rows) {
+        datasetSel.replaceChildren();
+        fillDatasets(rows);
+        datasetSel.value = wanted;
+        exactBounds = null;
+        return load();
+      })
+      .catch(function (error) { setError(error.message); });
+  }
+
+  Object.keys(CFG.stateColors).forEach(function (name) {
+    // A `button`, not a `span`: the explanation has to be reachable without a
+    // mouse, and `title` alone is hover-only. Focusing one shows the same text.
+    var swatch = document.createElement('button');
+    swatch.type = 'button';
+    swatch.className = 'swatch';
+    swatch.title = CFG.stateDescriptions[name];
+    var dot = document.createElement('i');
+    dot.style.background = CFG.stateColors[name];
+    swatch.appendChild(dot);
+    swatch.appendChild(document.createTextNode(name));
+    swatch.addEventListener('click', function () { explainState(name); });
+    swatch.addEventListener('focus', function () { explainState(name); });
+    el('state-swatches').appendChild(swatch);
   });
+
+  function explainState(name) {
+    var note = el('state-explainer');
+    note.replaceChildren();
+    var dot = document.createElement('i');
+    dot.style.background = CFG.stateColors[name];
+    var label = document.createElement('b');
+    label.textContent = name;
+    note.appendChild(dot);
+    note.appendChild(label);
+    note.appendChild(document.createTextNode(' — ' + CFG.stateDescriptions[name]));
+    note.hidden = false;
+  }
 
   fillMarkets();
   fillExitModes();

@@ -57,6 +57,10 @@ def page() -> str:
     return render_browser_html()
 
 
+def _style(page: str) -> str:
+    return page[page.index("<style>") : page.index("</style>")]
+
+
 def _script(page: str) -> str:
     """The page's own script, without the 191 KB of vendored chart under it."""
     return page[page.rindex("<script>") :]
@@ -455,8 +459,28 @@ def test_a_tile_offers_refresh_for_itself_and_for_the_whole_board(page):
 
     assert "function refreshOne(identity, button)" in script
     assert "function refreshAll()" in script
-    assert "setInterval" not in script, "the board must not poll on a timer"
-    assert "setTimeout" not in script
+    assert "setInterval" not in script, "nothing may fetch on a clock"
+
+
+def test_the_only_unclicked_fetch_is_the_one_a_closing_bar_asks_for(page):
+    """The rule this page kept was "never on a timer", and the reason was
+    honesty about when it last spoke to a venue -- not a ban on timers as such.
+    A closing bar is not a clock: it is the venue naming the one moment the
+    stored candles are provably behind, and the page still says when it last
+    refreshed.
+
+    So `setInterval` stays banned, and the single `setTimeout` here is the
+    first-frame watchdog, which changes a label and fetches nothing.
+    """
+    script = _script(page)
+
+    assert script.count("setTimeout") == 1
+    after = script[script.index("live.watchdog = setTimeout") :]
+    watchdog = after[: after.index("FIRST_TICK_GRACE_MS")]
+    assert watchdog, "the watchdog body was not found"
+    for fetching in ("getJSON", "fetch(", "/api/"):
+        assert fetching not in watchdog, "the watchdog must not talk to anything"
+    assert "refreshInstrument()" in _within(script, "function onTick(message)")
 
 
 def test_a_row_the_board_could_not_answer_says_why_on_its_own_tile(page):
@@ -653,7 +677,10 @@ def test_switching_views_stops_whichever_one_is_being_left(page):
 
     body = script[script.index("function setView(name)"):]
     body = body[: body.index("function reload()")]
-    assert "if (name === 'board') abandonInstrument(); else abortBoard();" in body
+    assert "abandonInstrument();" in body and "abortBoard();" in body
+    # And the venue socket: a stream left open behind the board is a connection
+    # nobody is watching, still redrawing a hidden chart on every tick.
+    assert "closeSocket();" in body
     # The two guards key on different counters, so each branch may bump the one
     # it is not about to take a token from.
     assert "pending += 1;" in _within(script, "function abandonInstrument()")
@@ -703,8 +730,7 @@ def test_refreshing_the_instrument_moves_only_the_edge_the_fetch_moved(page):
     """
     script = _script(page)
 
-    body = script[script.index("el('refresh').addEventListener"):]
-    body = body[: body.index("});")]
+    body = _within(script, "function refreshInstrument()")
     assert "exactBounds = { start: exactBounds && exactBounds.start, end: null };" in body
     assert "el('end').value = '';" in body
     assert body.index("end: null };") < body.index("return load();")
@@ -815,3 +841,319 @@ def test_refresh_all_is_refused_while_the_board_is_still_arriving(page):
     assert done.index("if (token !== boardPending) return;") < done.index("disabled = false;")
     caught = board[board.index("}).catch("):]
     assert "disabled = false;" not in caught, "a truncated board must stay unrefreshable"
+
+
+def test_the_state_sequence_is_derived_from_the_series_the_page_already_has(page):
+    """A transition is a `!==` over `why.states`, computed in the page.
+
+    Deriving it server-side would be M36's third answer: the board tile, the
+    per-bar chip and the transition list would each have their own route to the
+    same fact, free to drift. Here there is one series and two renderings of it.
+    """
+    script = _script(page)
+
+    assert "shiftsFrom(payload.why.states, payload.bars)" in script
+    assert "if (states[i] === states[i - 1]) continue;" in script
+
+
+def test_a_strategy_with_no_state_machine_shows_no_sequence(page):
+    """Eight of nine registered strategies compute no feature frame, so there is
+    no state to sequence — an empty list would claim there were no changes."""
+    script = _script(page)
+
+    assert "payload.why ? shiftsFrom(payload.why.states, payload.bars) : null" in script
+    render = script[script.index("function renderShifts()") : script.index("function pinBar")]
+    assert "if (!view.shifts) {\n      section.hidden = true;" in render
+
+
+def test_a_transition_inside_warmup_is_marked_rather_than_hidden(page):
+    """Measured on BTC/USDT perp 4h over 2023-01-01 → 2024-06-01: 8 of 50
+    changes fall inside `state_machine_v1`'s 2,192-bar warmup. The machine really
+    walked through them, so hiding them would misreport the sequence — but the
+    strategy was not acting yet, so showing them plain would read as decisions.
+    """
+    script = _script(page)
+
+    assert "var early = warmup !== null && shift.index < warmup;" in script
+    assert "'shift' + (early ? ' warmup' : '')" in script
+    # The row, not a list of its children: enumerating them is what left
+    # `.shift-from` undimmed, so a warmup row showed the state it left at full
+    # strength and the state it moved into at half.
+    assert ".shift.warmup { opacity: 0.55; }" in _style(page)
+    # And the reader is told *how many*, not just that some are: a dimmed row
+    # with no count is a style nobody can act on.
+    assert "if (early) inWarmup += 1;" in script
+    assert "el('transitions-note').textContent = inWarmup" in script
+    assert "are not decisions." in script
+
+
+def test_clicking_a_transition_recentres_only_when_the_bar_is_off_screen(page):
+    """Otherwise comparing two rows yanks the chart on every click."""
+    script = _script(page)
+
+    assert "if (range && (i < range.from || i > range.to))" in script
+
+
+def test_a_transition_row_is_a_button_rather_than_a_clickable_div(page):
+    """It is an action, and everything else actionable on this page is a button.
+    A `div` is unreachable by keyboard and announces nothing, so a row that pins
+    a bar could only be used with a mouse."""
+    script, style = _script(page), _style(page)
+    render = script[script.index("function renderShifts()") : script.index("function pinBar")]
+
+    assert "document.createElement('button')" in render
+    assert "row.type = 'button';" in render
+    assert "row.setAttribute('aria-pressed', String(selected));" in script
+    assert ".shift:focus-visible" in style
+
+
+def test_a_transition_carries_the_bar_its_dwell_is_measured_from(page):
+    """`dwellText` reads `bars[shift.previousIndex]`, so a shift without it
+    indexes `undefined` and the whole list fails to render. It is set where the
+    shift is built rather than stitched on by the caller — assembling an object
+    in two places is what made it read as missing."""
+    script = _script(page)
+    build = script[script.index("function shiftsFrom") : script.index("function dwellText")]
+
+    assert "previousIndex: previousIndex," in build
+    assert "previousIndex = i;" in build
+    assert "dwellText(view.bars, shift.previousIndex, shift.index)" in script
+
+
+def test_a_live_tick_is_drawn_but_never_analysed(page):
+    """The one reading the whole event path refuses. A tick reaching
+    `build_analysis` produces a state and a marker that flip when the bar
+    closes — `include_forming=False` exists for this, and a timestamp is
+    complete only once a later one arrives. So the candle moves and the
+    why-layer stays where the last closed bar left it."""
+    tick = _within(_script(page), "function onTick(message)")
+
+    assert "candleSeries.update(live.bar);" in tick
+    assert "build_analysis" not in tick and "/api/analysis" not in tick
+    # And the gap that leaves is named rather than papered over: a live bar has
+    # no index, and falling through would show the previous bar's state as if it
+    # were this one's.
+    assert "'live bar · not analysed until it closes'" in _script(page)
+
+
+def test_a_closing_bar_is_what_triggers_the_refresh_not_a_timer(page):
+    """`serve` polls every 60s and guesses. The stream says `x: true` on the
+    one update where the stored candles are provably behind, so the refresh
+    happens exactly then and the page can say when it last did."""
+    script = _script(page)
+    tick = _within(script, "function onTick(message)")
+
+    assert "if (!k.x) return;" in tick
+    assert "refreshInstrument()" in tick
+    assert "setInterval" not in script, "a timer would be the thing this replaces"
+
+
+def test_the_live_control_is_hidden_where_there_is_no_stream(page):
+    """Most datasets have none — Yahoo publishes nothing, and `1wk` is a Yahoo
+    timeframe. A control that cannot connect is worse than no control."""
+    script = _script(page)
+
+    assert "streams[id] = row.stream || null;" in script
+    assert "view.stream = streams[datasetSel.value] || null;" in script
+    assert "el('live').hidden = !view.stream;" in script
+
+
+def test_the_page_composes_no_venue_url_of_its_own(page):
+    """Which URL a stream lives at is venue knowledge, and it is wrong in ways a
+    chart still renders. It comes from `market_data.streams`, tested in Python,
+    and reaches the page as a field on the dataset row."""
+    script = _script(page)
+
+    assert "wss://" not in script
+    assert "@kline_" not in script
+
+
+def test_live_means_a_frame_arrived_not_that_a_socket_opened(page):
+    """Measured against Binance from one network: `fstream.binance.com` — every
+    perp dataset in this repo — accepts the connection and sends nothing, on
+    both the raw and combined stream forms at 1m and 4h, while
+    `stream.binance.com` delivers 6 frames in 12 s on the same pair.
+
+    So `onopen` is a proxy for working, and reporting off it leaves a green dot
+    over a frozen chart. Green comes from the first frame; silence gets said out
+    loud.
+    """
+    socket = _within(_script(page), "function openSocket()")
+
+    assert "socket.onopen" in socket
+    # To the handler's own close, not to the next handler's start: slicing
+    # between two markers goes empty if they are ever reordered, and this
+    # assertion is a negative -- it would pass on nothing.
+    after = socket[socket.index("socket.onopen") :]
+    onopen = after[: after.index("};")]
+    assert onopen, "the onopen body was not found"
+    assert "setLive('on', 'live')" not in onopen
+    assert "setLive('wait', 'waiting for data');" in socket
+    assert "if (!live.ticks) setLive('on', 'live');" in socket
+    assert "setLive('off', 'connected · no data');" in socket
+
+
+def test_volume_is_an_overlay_rather_than_a_pane_of_its_own(page):
+    """As a pane it took half the chart: `panes()[1].setHeight(80)` did not hold
+    and the separator would not drag, leaving price squeezed into the top half of
+    an already wide range."""
+    script = _script(page)
+
+    volume = script[script.index("var volumeSeries") : script.index("var stateSeries")]
+    assert "priceScaleId: ''" in volume
+    assert "scaleMargins: { top: 0.82, bottom: 0 }" in script
+
+
+def test_the_state_ribbon_is_coloured_from_the_series_the_payload_carries(page):
+    """The state was readable one bar at a time by hovering. As a ribbon the
+    shape of a regime is visible at a glance, which is what a lifecycle strategy
+    is about — and it is the same `why.states` the chip and the change list use,
+    so the three cannot disagree."""
+    script = _script(page)
+    draw = _within(script, "function drawStateRibbon(payload)")
+
+    assert "payload.why ? payload.why.states : null" in draw
+    assert "CFG.stateColors[states[i]]" in draw
+    # Constant height: the ribbon says which state, never how much of it.
+    assert "value: 1," in draw
+    # And nothing to colour means no ribbon and no legend, rather than a blank band.
+    assert "stateSeries.setData([]);" in draw
+
+
+def test_the_lifecycle_keeps_its_own_order_and_its_colours_come_from_python(page):
+    """Alphabetical would describe a different thing from the one the machine
+    walks: compression → breakout → confirmed → riding → exhaustion → reset."""
+    from strategy_lab.browser.page import STATE_COLORS, STATE_DESCRIPTIONS
+    from strategy_lab.state.machine import MarketState
+
+    assert list(STATE_COLORS) == [state.value for state in MarketState]
+    # A colour with no explanation is a band the reader cannot name. The module
+    # refuses to import without the pair, so this pins both to the enum rather
+    # than to each other -- otherwise adding a state to `MarketState` alone
+    # passes.
+    assert list(STATE_DESCRIPTIONS) == [state.value for state in MarketState]
+    assert "#" not in _within(_script(page), "function drawStateRibbon(payload)")
+
+
+def test_the_timeframe_rungs_sit_with_the_chart_not_with_the_query(page):
+    """The header's fields change *what is asked*; the rungs change *what the
+    chart is*, and a reader reaches for them where TradingView puts them."""
+    markup = page[: page.index('<script id="config"')]
+    charts = markup.index('<div class="charts')
+
+    assert charts < markup.index('id="ladder"') < markup.index('id="price-pane"')
+    assert 'id="ladder"' not in markup[: markup.index('<span class="range"')]
+
+
+def test_the_realised_total_counts_closed_trades_only(page):
+    """vectorbt values an open trade against the last close, so its PnL moves on
+    the next bar and on whatever range was asked for. Summing it into the net
+    would report an unrealised number under a realised name — and the one on the
+    page is the number most likely to be quoted."""
+    body = _within(_script(page), "function renderTrades()")
+
+    assert "trades.filter(function (t) { return t.status === 'closed'; })" in body
+    for derived in ("won", "net"):
+        assert re.search(rf"var {derived} = closed\.", body), (
+            f"{derived} was computed from something other than the closed trades"
+        )
+
+
+def test_the_trade_table_is_absent_where_no_book_ran_rather_than_empty(page):
+    """The continuous contract returns no trades because ``build_analysis`` runs
+    no portfolio for it — not because the strategy sat out. An empty table under
+    that chart would be a claim about the strategy instead of about the path."""
+    body = _within(_script(page), "function renderTrades()")
+
+    assert "var costs = view.payload.provenance.cost_model;" in body
+    assert "if (!costs) {" in body
+
+
+def test_no_two_functions_in_the_page_script_share_a_name(page):
+    """A function declaration does not shadow an earlier one — it replaces it,
+    silently, for every call site in the scope. The whole page is one IIFE, so a
+    second `stamp` written for the trade table took over the board's, which then
+    called it with an epoch and threw `text.slice is not a function`. Nothing
+    warns; the collision is only visible when it runs."""
+    names = re.findall(r"^  function (\w+)\(", _script(page), flags=re.MULTILINE)
+
+    duplicated = {name for name in names if names.count(name) > 1}
+    assert not duplicated, f"declared more than once in one scope: {sorted(duplicated)}"
+
+
+def test_the_ladder_offers_no_month(page):
+    """Binance publishes `1M` klines and `timeframe_to_millis` raises on it — a
+    month is not a fixed width, and warmup, funding windows and the poll cadence
+    are all `bar_ms` arithmetic. A rung that fetches candles and then cannot be
+    analysed is the live control that cannot connect, again."""
+    from strategy_lab.browser.page import TIMEFRAME_LADDERS
+    from strategy_lab.timeframes import timeframe_to_millis
+
+    for ladder in TIMEFRAME_LADDERS.values():
+        assert "1M" not in ladder
+        for timeframe in ladder:
+            assert timeframe_to_millis(timeframe) > 0
+    with pytest.raises(ValueError):
+        timeframe_to_millis("1M")
+
+
+def test_a_timeframe_switch_never_resamples_on_the_client(page):
+    """A 1h bar built from four 15m bars is not the venue's 1h bar, and this repo
+    keys a dataset on its timeframe precisely so the two cannot be confused. A
+    rung with nothing stored fetches that timeframe instead."""
+    switch = _within(_script(page), "function switchTimeframe(timeframe, stored)")
+
+    assert "/api/refresh?" in switch
+    assert "params.set('since'" in switch, "a new timeframe needs its own history"
+    for resampling in ("resample", "aggregate", "reduce("):
+        assert resampling not in switch
+
+
+def test_the_ladder_carries_the_timeframes_this_instrument_already_has(page):
+    """Otherwise leaving 15m for 1h strands 15m in the dropdown, because it is
+    not one of the four rungs."""
+    render = _within(_script(page), "function renderLadder()")
+
+    assert "if (mine && rungs.indexOf(parts[3]) < 0) rungs.push(parts[3]);" in render
+    assert "if (rungs.indexOf(current) < 0) rungs.push(current);" in render
+    assert "CFG.timeframeOrder.indexOf(a) - CFG.timeframeOrder.indexOf(b)" in render
+
+
+def test_a_frame_from_a_replaced_socket_reaches_nothing(page):
+    """`closeSocket()` nulls the reference, but a message already in flight is
+    still dispatched. Ungated it draws the old market's candle onto the new
+    dataset's chart, and a stale `x: true` POSTs a refresh nobody asked for — to
+    the app's only write."""
+    socket = _within(_script(page), "function openSocket()")
+
+    for handler in ("socket.onopen", "socket.onmessage"):
+        after = socket[socket.index(handler) :]
+        body = after[: after.index("};")]
+        assert "if (live.socket !== socket) return;" in body, handler
+    assert "if (live.socket === socket) setLive('off', 'stream error');" in socket
+
+
+def test_a_bar_close_refresh_does_not_redraw_over_the_board(page):
+    """This refresh is not always started by a click, so the view can change
+    while it is in flight. `abandonInstrument` invalidates requests already
+    running; it cannot stop one begun afterwards."""
+    script = _script(page)
+
+    tick = _within(script, "function onTick(message)")
+    assert "if (viewSel.value !== 'instrument') return;" in tick
+    refresh = _within(script, "function refreshInstrument()")
+    assert "var startedIn = viewSel.value;" in refresh
+    assert "if (viewSel.value !== startedIn) return null;" in refresh
+
+
+def test_the_ladder_spells_a_week_the_way_each_venue_does(page):
+    """Yahoo's own error names its set — `[1m, 2m, 5m, 15m, 30m, 60m, 90m, 1h,
+    4h, 1d, 5d, 1wk, 1mo, 3mo]` — so `4h` is fine there and `1w` returns nothing.
+    That is the `1w`/`1wk` split this repo already keys datasets on, and a rung
+    that fetches nothing is the live control that cannot connect."""
+    from strategy_lab.browser.page import TIMEFRAME_LADDERS
+
+    assert "1w" in TIMEFRAME_LADDERS["binance"] and "1wk" not in TIMEFRAME_LADDERS["binance"]
+    assert "1wk" in TIMEFRAME_LADDERS["yahoo"] and "1w" not in TIMEFRAME_LADDERS["yahoo"]
+    assert "4h" in TIMEFRAME_LADDERS["yahoo"], "Yahoo does serve 4h — measured"
+    assert "CFG.timeframeLadders[id.exchange] || CFG.defaultTimeframeLadder" in _script(page)
