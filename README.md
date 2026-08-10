@@ -646,6 +646,30 @@ The equity gaps are Yahoo's own limits, named in its errors, and no amount of
 fetching moves them. The weekly gap is arithmetic: 2,192 weeks is longer than
 most instruments have existed.
 
+#### `direction` has only been validated at 4h
+
+The feature that sets the sign is `tanh(((EMA24 − EMA96)/close) / ATR / √36)` —
+a **4-day against 16-day** lean at 4h. The spans are counted in bars, so the same
+feature is a 1-day/4-day lean at 1h and a 6-hour/24-hour lean at 15m, and
+measured on BTC/USDT spot against the `[t+1, t+1+h]` forward return those are not
+the same feature at all:
+
+| timeframe | lookback | IC@30 (halves) | IC@90 (halves) |
+|---|---|---|---|
+| 15m | 6h / 1d | −0.0207 (−.024/−.020) | −0.0016 (−.021/+.013) |
+| 1h | 1d / 4d | −0.0196 (−.004/−.047) | −0.0391 (−.079/−.016) |
+| **4h** | **4d / 16d** | **+0.0464 (+.083/+.003)** | **+0.0949 (+.145/+.031)** |
+| 1d | 24d / 96d | −0.0794 (−.220/−.037) | −0.0215 (−.270/+.124) |
+
+4h is the only row positive at both horizons with both halves agreeing in sign.
+Rescaling the spans to hold the wall clock recovers most of it — 1h at 96/384 is
++0.0137 against −0.0379 at 24/96 — but not the half-sample agreement.
+
+So the ladder will happily draw a state at 15m or 1h, and those states come from
+a sign whose forward IC is **negative** on the one instrument where this has been
+measured across timeframes. The 4h row is the one R4 and R5 were run on. Read the
+others as exploratory.
+
 #### The state is also the chart's background
 
 `shade` (on by default, beside the live pill) paints the same reading **behind
