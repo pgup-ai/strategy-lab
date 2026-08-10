@@ -144,10 +144,6 @@ if DEFAULT_MARKET_TYPE not in MARKET_TYPES:
     )
 
 
-# The lifecycle in order, with a colour per state. In Python because the order
-# is the machine's -- compression -> breakout -> confirmed -> riding ->
-# exhaustion -> reset -- and a legend that listed them alphabetically would
-# describe a different thing from the one the strategy walks.
 # What a chart offers to switch between.
 #
 # **No month.** Binance publishes `1M` klines, but a month is not a fixed width
@@ -174,6 +170,10 @@ TIMEFRAME_ORDER: tuple[str, ...] = (
     "6h", "8h", "12h", "1d", "3d", "1w", "1wk",
 )
 
+# The lifecycle in order, with a colour per state. In Python because the order
+# is the machine's -- compression -> breakout -> confirmed -> riding ->
+# exhaustion -> reset -- and a legend that listed them alphabetically would
+# describe a different thing from the one the strategy walks.
 STATE_COLORS: dict[str, str] = {
     "compression": "#4a5163",
     "breakout": "#d1a54a",
@@ -182,6 +182,49 @@ STATE_COLORS: dict[str, str] = {
     "exhaustion": "#ef5350",
     "reset": "#7e6bab",
 }
+
+# What each state means, for the legend. The percentages are
+# ``state.policy.STATE_TARGET_RISK`` -- the whole of what a state *does*, since
+# the policy maps state to a target risk and nothing else -- and they are quoted
+# rather than imported because the browser shows the machine's own vocabulary,
+# not one strategy's tuning of it.
+#
+# ``riding`` carries R6's finding rather than the row's intent, because that is
+# the sentence a reader of this chart most needs: the machine spends real time
+# there, the ribbon shows it, and no entry has ever been sized by it.
+STATE_DESCRIPTIONS: dict[str, str] = {
+    "compression": (
+        "Quiet. The entry gate has not opened, so the policy holds nothing (0% risk). "
+        "This is the state the thesis is about: chop, waited out."
+    ),
+    "breakout": (
+        "The gate opened — enough directional lean, energy under its ceiling. "
+        "First and smallest position (35% risk)."
+    ),
+    "confirmed": (
+        "The move survived the breakout's minimum dwell. Size steps up (70% risk)."
+    ),
+    "riding": (
+        "The trend is running: the row sized highest (100% risk). It is only ever "
+        "reached with a position already open, and an entry needs a change of side "
+        "— so no entry has ever been sized here, and a position that reaches it "
+        "keeps whatever size its entry bar carried."
+    ),
+    "exhaustion": (
+        "The advance stopped. Sized down (55% risk), and served out a dwell before "
+        "the machine will reset."
+    ),
+    "reset": (
+        "A finished or failed move, flat (0% risk). The cooldown is served here so "
+        "the machine cannot re-enter on the next bar of the same chop."
+    ),
+}
+
+if set(STATE_DESCRIPTIONS) != set(STATE_COLORS):
+    raise RuntimeError(
+        "every state the ribbon colours must also be explained: "
+        f"{sorted(set(STATE_COLORS) ^ set(STATE_DESCRIPTIONS))}"
+    )
 
 
 def bootstrap_config() -> dict[str, object]:
@@ -196,6 +239,7 @@ def bootstrap_config() -> dict[str, object]:
         "restatementStaleDays": RESTATEMENT_STALE_DAYS,
         "colors": {"up": UP, "down": DOWN, "upDim": UP_DIM, "downDim": DOWN_DIM},
         "stateColors": STATE_COLORS,
+        "stateDescriptions": STATE_DESCRIPTIONS,
         # The rungs a chart offers, in order. Not every one is stored for every
         # instrument -- the switcher fetches the missing one rather than hiding
         # it, because "this timeframe does not exist here" is a fact about
@@ -301,17 +345,54 @@ __SHELL_CSS__
      strategy was not acting yet, so they are not decisions. */
   .shift.warmup { opacity: 0.55; }
   .shift.warmup .shift-to { font-weight: 400; }
+  /* Above the price pane rather than in the header: the rungs change what the
+     chart is, where the header's fields change what is being asked. */
+  .chart-bar { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; }
+  .chart-bar-right { margin-left: auto; display: inline-flex; gap: 6px;
+    align-items: center; }
   .ladder { display: inline-flex; gap: 2px; }
   .ladder button { padding: 4px 9px; font-size: 12px; }
   .ladder button.current { border-color: var(--accent); color: var(--ink); }
   .ladder button.absent { color: var(--ink-dim); border-style: dashed; }
   .legend-strip { display: flex; flex-wrap: wrap; gap: 8px 18px; margin: 6px 20px 0;
     font-size: 12px; color: var(--ink-dim); align-items: center; }
+  /* `hidden` is a UA rule that any author `display` defeats. */
+  .legend-strip[hidden] { display: none; }
   .legend-strip .mk { font-size: 14px; }
   .legend-strip .mk.up { color: var(--up); }
   .legend-strip .mk.down { color: var(--down); }
   .swatch { display: inline-flex; align-items: center; gap: 4px; margin-left: 8px; }
-  .swatch i { width: 9px; height: 9px; border-radius: 2px; display: inline-block; }
+  .swatch i { width: 9px; height: 9px; border-radius: 2px; display: inline-block;
+    flex: none; }
+  button.swatch { padding: 1px 5px 1px 3px; border: 1px solid transparent;
+    background: transparent; color: inherit; font: inherit; font-size: 12px;
+    cursor: help; border-radius: 4px; }
+  button.swatch:hover, button.swatch:focus-visible { border-color: #4a5163;
+    background: #232733; color: var(--ink); }
+  /* Block, not the strip's flex: the swatch and its sentence are one run of
+     text, and as flex items the dash wraps onto a line of its own. */
+  .state-explainer { display: block; max-width: 104ch; line-height: 1.6; }
+  .state-explainer i { width: 9px; height: 9px; border-radius: 2px;
+    display: inline-block; margin-right: 6px; }
+  .state-explainer b { color: var(--ink); font-weight: 600; }
+  #trades { max-height: 320px; overflow-y: auto; }
+  #trades table { border-collapse: collapse; width: 100%; font-size: 13px; }
+  #trades th {
+    position: sticky; top: 0; background: var(--bg); z-index: 1; text-align: right;
+    color: var(--ink-dim); font-weight: 500; font-size: 11px; letter-spacing: 0.4px;
+    text-transform: uppercase; padding: 4px 8px; border-bottom: 1px solid var(--border-soft);
+  }
+  #trades td { padding: 4px 8px; font-variant-numeric: tabular-nums; text-align: right; }
+  #trades th:first-child, #trades td:first-child { text-align: left; }
+  #trades tbody tr { cursor: pointer; }
+  #trades tbody tr:hover { background: #232733; }
+  #trades .side-long { color: var(--up); }
+  #trades .side-short { color: var(--down); }
+  #trades .gain { color: var(--up); }
+  #trades .loss { color: var(--down); }
+  /* An open trade's PnL is a mark against the last close, not money -- it must
+     not read like the closed rows it sits beside. */
+  #trades tr.open td { opacity: 0.6; font-style: italic; }
   .live { display: inline-flex; align-items: center; gap: 6px; }
   .live-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--ink-dim); }
   .live.on .live-dot { background: var(--up); }
@@ -394,17 +475,6 @@ __SHELL_CSS__
       <label for="end">To</label>
       <input id="end" type="date">
     </div>
-    <div class="field instrument-only">
-      <label for="refresh">Candles</label>
-      <span id="ladder" class="ladder"></span>
-      <button id="live" type="button" class="live off" hidden
-              title="Draw the venue's forming candle, and recompute when it closes">
-        <span class="live-dot"></span><span id="live-text">live</span>
-      </button>
-      <button id="refresh" type="button" title="Fetch the newest bars and recompute">
-        refresh
-      </button>
-    </div>
     <div class="field board-only">
       <label for="refresh-all">Candles</label>
       <button id="refresh-all" type="button"
@@ -432,6 +502,18 @@ __SHELL_CSS__
 </div>
 <div class="provenance instrument-only" id="provenance"></div>
 <div class="charts instrument-only">
+  <div class="chart-bar">
+    <span id="ladder" class="ladder" role="group" aria-label="Candle timeframe"></span>
+    <span class="chart-bar-right">
+      <button id="live" type="button" class="live off" hidden
+              title="Draw the venue's forming candle, and recompute when it closes">
+        <span class="live-dot"></span><span id="live-text">live</span>
+      </button>
+      <button id="refresh" type="button" title="Fetch the newest bars and recompute">
+        refresh
+      </button>
+    </span>
+  </div>
   <div class="pane" id="price-pane">
     <span class="pane-tag">PRICE · VOLUME</span>
     <div id="legend"></div>
@@ -447,6 +529,12 @@ __SHELL_CSS__
   <span><b class="mk down">&darr;</b> sold &mdash; opening a short or closing a long</span>
   <span id="state-legend" hidden>state ribbon: <span id="state-swatches"></span></span>
 </p>
+<p class="legend-strip instrument-only state-explainer" id="state-explainer" hidden></p>
+<section class="why instrument-only" id="trades-section" hidden>
+  <h2>Trades <span class="pin" id="trades-summary"></span></h2>
+  <div id="trades"></div>
+  <p class="note" id="trades-note"></p>
+</section>
 <section class="why instrument-only">
   <h2>Why this bar <span class="pin" id="why-bar"></span></h2>
   <div class="why-chips" id="why-chips"></div>
@@ -605,6 +693,13 @@ __SHELL_CSS__
     if (message) setStatus('showing the last run that succeeded');
   }
 
+  // A bar's own time, to the minute. Bars are UTC everywhere in this lab, so
+  // rendering one in the reader's zone would put a chart, a state change and a
+  // trade on three different clocks.
+  function utcMinute(seconds) {
+    return new Date(seconds * 1000).toISOString().slice(0, 16).replace('T', ' ');
+  }
+
   function fmt(value, digits) {
     if (value === null || value === undefined) return '—';
     return Number(value).toLocaleString(undefined, {
@@ -719,6 +814,9 @@ __SHELL_CSS__
     if (!states) {
       stateSeries.setData([]);
       el('state-legend').hidden = true;
+      // With it: an explanation of a state left over from the last strategy,
+      // sitting under a chart that has no states at all.
+      el('state-explainer').hidden = true;
       return;
     }
     // Constant height: the ribbon says *which* state, never how much of it.
@@ -806,6 +904,7 @@ __SHELL_CSS__
     renderProvenance(payload.provenance);
     view.shifts = payload.why ? shiftsFrom(payload.why.states, payload.bars) : null;
     renderShifts();
+    renderTrades();
     view.pinned = null;
     renderBar(payload.bars.length - 1);
     document.title = payload.provenance.identity.symbol + ' · ' +
@@ -926,8 +1025,8 @@ __SHELL_CSS__
     var bar = view.bars[i];
     if (!bar) return;
     renderLegend(bar);
-    el('why-bar').textContent = new Date(bar.time * 1000).toISOString()
-      .slice(0, 16).replace('T', ' ') + ' UTC' + (view.pinned === i ? ' · pinned' : '');
+    el('why-bar').textContent = utcMinute(bar.time) + ' UTC' +
+      (view.pinned === i ? ' · pinned' : '');
 
     var host = el('why-chips');
     host.replaceChildren();
@@ -1031,8 +1130,7 @@ __SHELL_CSS__
 
       var when = document.createElement('span');
       when.className = 'shift-when';
-      when.textContent = new Date(shift.time * 1000).toISOString()
-        .slice(0, 16).replace('T', ' ');
+      when.textContent = utcMinute(shift.time);
       var what = document.createElement('span');
       var from = document.createElement('span');
       from.className = 'shift-from';
@@ -1082,6 +1180,97 @@ __SHELL_CSS__
       row.classList.toggle('selected', selected);
       row.setAttribute('aria-pressed', String(selected));
     });
+  }
+
+  // ------------------------------------------------------------------ trades
+
+  // The quote currency, when the symbol names one. `BTC/USDT:USDT` quotes in
+  // USDT; `SPY` names no currency at all, and printing a guessed one beside a
+  // PnL would be a claim about the account this never touched.
+  function quoteUnit(symbol) {
+    var parts = String(symbol).split('/');
+    return parts.length > 1 ? parts[1].split(':')[0] : '';
+  }
+
+  function cell(row, text, cls) {
+    var td = document.createElement('td');
+    td.textContent = text;
+    if (cls) td.className = cls;
+    row.appendChild(td);
+  }
+
+  function renderTrades() {
+    var section = el('trades-section');
+    var host = el('trades');
+    host.replaceChildren();
+    var trades = view.payload.trades;
+    var costs = view.payload.provenance.cost_model;
+    // Empty is a different statement from absent. The continuous contract runs
+    // no book here at all, so it gets no section; a boolean strategy that
+    // simply never traded over this range gets one saying so, because "no
+    // trades" is the result.
+    if (!costs) {
+      section.hidden = true;
+      return;
+    }
+    section.hidden = false;
+
+    var unit = quoteUnit(view.payload.provenance.identity.symbol);
+    var closed = trades.filter(function (t) { return t.status === 'closed'; });
+    var won = closed.filter(function (t) { return t.pnl > 0; }).length;
+    var net = closed.reduce(function (sum, t) { return sum + t.pnl; }, 0);
+    var open = trades.length - closed.length;
+
+    var table = document.createElement('table');
+    var head = document.createElement('tr');
+    ['opened', 'closed', 'side', 'qty', 'in', 'out', 'fees', 'pnl', 'return']
+      .forEach(function (name) {
+        var th = document.createElement('th');
+        th.textContent = name;
+        head.appendChild(th);
+      });
+    var thead = document.createElement('thead');
+    thead.appendChild(head);
+    table.appendChild(thead);
+
+    var body = document.createElement('tbody');
+    // Newest first, matching the state changes above it.
+    trades.slice().reverse().forEach(function (trade) {
+      var row = document.createElement('tr');
+      row.className = trade.status;
+      cell(row, utcMinute(trade.entry_time));
+      cell(row, trade.exit_time === null ? 'still open' : utcMinute(trade.exit_time));
+      cell(row, trade.direction, 'side-' + trade.direction);
+      cell(row, fmt(trade.size, 6));
+      cell(row, fmt(trade.entry_price, 2));
+      cell(row, trade.exit_price === null ? '—' : fmt(trade.exit_price, 2));
+      cell(row, fmt(trade.fees, 2));
+      cell(row, fmt(trade.pnl, 2), trade.pnl >= 0 ? 'gain' : 'loss');
+      cell(row, fmt(trade.return_pct * 100, 2) + '%',
+           trade.return_pct >= 0 ? 'gain' : 'loss');
+      // The exit is the bar that decided the result; an open trade has only its
+      // entry to point at.
+      var at = view.index[trade.exit_time === null ? trade.entry_time : trade.exit_time];
+      row.addEventListener('click', function () { pinBar(at); });
+      body.appendChild(row);
+    });
+    table.appendChild(body);
+    host.appendChild(table);
+
+    el('trades-summary').textContent = closed.length
+      ? closed.length + ' closed · net ' + fmt(net, 2) + (unit ? ' ' + unit : '') +
+        ' · ' + fmt((won / closed.length) * 100, 1) + '% won' +
+        (open ? ' · ' + open + ' still open' : '')
+      : (trades.length ? trades.length + ' open, none closed yet' : 'none');
+    el('trades-note').textContent = trades.length
+      ? 'What this strategy would have made over the frame above, at ' +
+        fmt(costs.fee * 100, 3) + '% fee and ' + fmt(costs.slippage * 100, 3) +
+        '% slippage, sized non-compounding from ' + fmt(costs.cash, 0) +
+        ' — the same run the arrows are drawn from, not an account. ' +
+        'Net and win rate count closed trades only: an open one is marked ' +
+        'against the last bar, and that mark moves. Click a row to pin its bar.'
+      : 'No trade over this range. The arrows and this table come from the same ' +
+        'run, so an empty table means the chart is empty too.';
   }
 
   // ---------------------------------------------------------------- live feed
@@ -1412,8 +1601,7 @@ __SHELL_CSS__
       var fill = row.latest_fill;
       wrap.appendChild(tileLine(
         fill.side + ' ' + fill.kind,
-        fmt(fill.price, 2) + ' × ' + fmt(fill.size, 4) + '  ' +
-        new Date(fill.time * 1000).toISOString().slice(0, 16).replace('T', ' ')
+        fmt(fill.price, 2) + ' × ' + fmt(fill.size, 4) + '  ' + utcMinute(fill.time)
       ));
     } else if (row.target !== null) {
       wrap.appendChild(tileLine('target', fmt(row.target, 3)));
@@ -1947,14 +2135,33 @@ __SHELL_CSS__
   }
 
   Object.keys(CFG.stateColors).forEach(function (name) {
-    var swatch = document.createElement('span');
+    // A `button`, not a `span`: the explanation has to be reachable without a
+    // mouse, and `title` alone is hover-only. Focusing one shows the same text.
+    var swatch = document.createElement('button');
+    swatch.type = 'button';
     swatch.className = 'swatch';
+    swatch.title = CFG.stateDescriptions[name];
     var dot = document.createElement('i');
     dot.style.background = CFG.stateColors[name];
     swatch.appendChild(dot);
     swatch.appendChild(document.createTextNode(name));
+    swatch.addEventListener('click', function () { explainState(name); });
+    swatch.addEventListener('focus', function () { explainState(name); });
     el('state-swatches').appendChild(swatch);
   });
+
+  function explainState(name) {
+    var note = el('state-explainer');
+    note.replaceChildren();
+    var dot = document.createElement('i');
+    dot.style.background = CFG.stateColors[name];
+    var label = document.createElement('b');
+    label.textContent = name;
+    note.appendChild(dot);
+    note.appendChild(label);
+    note.appendChild(document.createTextNode(' — ' + CFG.stateDescriptions[name]));
+    note.hidden = false;
+  }
 
   fillMarkets();
   fillExitModes();

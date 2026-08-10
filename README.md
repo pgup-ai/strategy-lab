@@ -652,11 +652,12 @@ traded), and a `TargetExposure` strategy gets a baseline pane carrying the signe
 **state ribbon** — one band per bar, coloured by the state the machine was in,
 so a regime is visible as a shape rather than one bar at a time. A legend under
 the chart says what the arrows mean (**↑ bought** — opening a long *or* closing
-a short; **↓ sold** — the reverse) and what each ribbon colour is. Volume is an
-overlay in the bottom fifth of the price pane rather than a pane of its own,
-which used to take half the chart.
+a short; **↓ sold** — the reverse) and what each ribbon colour is. Click or focus
+a ribbon colour and it explains what that state means and what risk the policy
+holds there. Volume is an overlay in the bottom fifth of the price pane rather
+than a pane of its own, which used to take half the chart.
 
-**A timeframe ladder** sits beside the candle-set selector: `1h 4h 1d 1w`, plus
+**A timeframe ladder** sits directly above the price pane: `1h 4h 1d 1w`, plus
 whatever else this instrument already has stored. A rung with data switches to
 it; a dashed rung has nothing stored and **fetches that timeframe** over the
 frame you are looking at, then switches. It never resamples on the client — a 1h
@@ -673,6 +674,18 @@ feature frame and the section stays hidden rather than claiming there were no
 changes. Transitions inside warmup are dimmed — measured on BTC/USDT perp 4h over
 2023-01-01 → 2024-06-01, 8 of 50 fall there: the machine walked through them, but
 the strategy was not acting yet, so they are not decisions.
+
+**And what the fills made.** A trade table under the chart carries every round
+trip — opened, closed, side, quantity, both prices, fees, PnL and return — sliced
+from the same `Portfolio` the arrows are drawn from, so it cannot disagree with
+them. The header nets **closed trades only**: a position still open is valued
+against the last bar, and that mark moves on the next one and on whatever range
+you asked for, so it is shown italic and left out of the total. This is what the
+strategy would have made over the frame on screen at the cost model in the
+provenance strip — non-compounding from initial cash, like every backtest here —
+not an account. A `TargetExposure` strategy gets no table at all, because
+`build_analysis` runs no book for that contract; an empty one would read as "this
+strategy never traded".
 
 Hover or click any bar and the panel below shows the state and feature values
 behind it; a strategy with no feature frame says so rather than showing an empty

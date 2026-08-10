@@ -1023,11 +1023,62 @@ def test_the_state_ribbon_is_coloured_from_the_series_the_payload_carries(page):
 def test_the_lifecycle_keeps_its_own_order_and_its_colours_come_from_python(page):
     """Alphabetical would describe a different thing from the one the machine
     walks: compression → breakout → confirmed → riding → exhaustion → reset."""
-    from strategy_lab.browser.page import STATE_COLORS
+    from strategy_lab.browser.page import STATE_COLORS, STATE_DESCRIPTIONS
     from strategy_lab.state.machine import MarketState
 
     assert list(STATE_COLORS) == [state.value for state in MarketState]
+    # A colour with no explanation is a band the reader cannot name. The module
+    # refuses to import without the pair, so this pins both to the enum rather
+    # than to each other -- otherwise adding a state to `MarketState` alone
+    # passes.
+    assert list(STATE_DESCRIPTIONS) == [state.value for state in MarketState]
     assert "#" not in _within(_script(page), "function drawStateRibbon(payload)")
+
+
+def test_the_timeframe_rungs_sit_with_the_chart_not_with_the_query(page):
+    """The header's fields change *what is asked*; the rungs change *what the
+    chart is*, and a reader reaches for them where TradingView puts them."""
+    markup = page[: page.index('<script id="config"')]
+    charts = markup.index('<div class="charts')
+
+    assert charts < markup.index('id="ladder"') < markup.index('id="price-pane"')
+    assert 'id="ladder"' not in markup[: markup.index('<span class="range"')]
+
+
+def test_the_realised_total_counts_closed_trades_only(page):
+    """vectorbt values an open trade against the last close, so its PnL moves on
+    the next bar and on whatever range was asked for. Summing it into the net
+    would report an unrealised number under a realised name — and the one on the
+    page is the number most likely to be quoted."""
+    body = _within(_script(page), "function renderTrades()")
+
+    assert "trades.filter(function (t) { return t.status === 'closed'; })" in body
+    for derived in ("won", "net"):
+        assert re.search(rf"var {derived} = closed\.", body), (
+            f"{derived} was computed from something other than the closed trades"
+        )
+
+
+def test_the_trade_table_is_absent_where_no_book_ran_rather_than_empty(page):
+    """The continuous contract returns no trades because ``build_analysis`` runs
+    no portfolio for it — not because the strategy sat out. An empty table under
+    that chart would be a claim about the strategy instead of about the path."""
+    body = _within(_script(page), "function renderTrades()")
+
+    assert "var costs = view.payload.provenance.cost_model;" in body
+    assert "if (!costs) {" in body
+
+
+def test_no_two_functions_in_the_page_script_share_a_name(page):
+    """A function declaration does not shadow an earlier one — it replaces it,
+    silently, for every call site in the scope. The whole page is one IIFE, so a
+    second `stamp` written for the trade table took over the board's, which then
+    called it with an epoch and threw `text.slice is not a function`. Nothing
+    warns; the collision is only visible when it runs."""
+    names = re.findall(r"^  function (\w+)\(", _script(page), flags=re.MULTILINE)
+
+    duplicated = {name for name in names if names.count(name) > 1}
+    assert not duplicated, f"declared more than once in one scope: {sorted(duplicated)}"
 
 
 def test_the_ladder_offers_no_month(page):

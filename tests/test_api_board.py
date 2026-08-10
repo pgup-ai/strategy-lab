@@ -261,6 +261,9 @@ def test_a_row_is_the_last_bar_of_every_series_the_payload_carries(monkeypatch):
             Marker(time=101, kind="entry", side="long", price=1.0, size=1.0),
             Marker(time=103, kind="exit", side="long", price=2.0, size=1.0),
         ],
+        # A tile shows the latest *fill*, never a round trip -- there is no room
+        # for one, and `latest_fill` is the slice it takes.
+        trades=[],
         position_size=None,
         target=[0.1, 0.2, 0.3, 0.4],
         why=WhyLayer(

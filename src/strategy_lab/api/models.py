@@ -311,6 +311,19 @@ class MarkerModel(_Strict):
     size: float
 
 
+class TradeModel(_Strict):
+    entry_time: int
+    exit_time: int | None
+    direction: Literal["long", "short"]
+    size: float
+    entry_price: float
+    exit_price: float | None
+    fees: float
+    pnl: float
+    return_pct: float
+    status: Literal["closed", "open"]
+
+
 class WhyModel(_Strict):
     states: list[str]
     features: dict[str, list[float | None]]
@@ -340,6 +353,7 @@ class ProvenanceModel(_Strict):
 class AnalysisModel(_Strict):
     bars: list[BarModel]
     markers: list[MarkerModel]
+    trades: list[TradeModel]
     position_size: list[float | None] | None
     target: list[float | None] | None
     why: WhyModel | None

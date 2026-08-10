@@ -178,6 +178,28 @@ def test_the_payload_marks_the_bars_the_backtest_actually_trades(
     assert not trades.empty, "a frame with no trades would pass this vacuously"
     _assert_same_fills(_entries(payload), _expected_entries(trades))
     _assert_same_fills(_exits(payload), _expected_exits(trades))
+    _assert_same_results(payload.trades, trades)
+
+
+def _assert_same_results(actual, expected) -> None:
+    """The same gate, on the number a reader is most likely to quote.
+
+    The arrows above pin *where* the browser trades; without this, its PnL could
+    be a second derivation off the same bars -- right about every fill and wrong
+    about what they made. That is precisely the drift M36 refuses on the board.
+    """
+    assert [trade.status for trade in actual] == [
+        status.lower() for status in expected["Status"]
+    ]
+    assert [trade.pnl for trade in actual] == pytest.approx(
+        list(expected["PnL"]), rel=1e-9
+    ), "at least one trade's PnL differs from trades.csv"
+    assert [trade.return_pct for trade in actual] == pytest.approx(
+        list(expected["Return"]), rel=1e-9
+    )
+    assert [trade.fees for trade in actual] == pytest.approx(
+        list(expected["Entry Fees"] + expected["Exit Fees"]), rel=1e-9
+    )
 
 
 def _assert_same_fills(actual, expected) -> None:
@@ -400,6 +422,10 @@ def test_the_continuous_contract_returns_a_signed_level_rather_than_markers(perp
 
     assert payload.provenance.contract == Contract.TARGET_EXPOSURE.value
     assert payload.markers == []
+    # Empty rather than absent, and for the same reason the markers are: this
+    # path runs no book. The page reads `cost_model is None` to tell that apart
+    # from a strategy that ran one and simply never traded.
+    assert payload.trades == []
     assert payload.target is not None
     assert len(payload.target) == _MACHINE_BARS
     assert max(payload.target) > 0.0 and min(payload.target) < 0.0
@@ -411,6 +437,33 @@ def test_the_continuous_contract_returns_a_signed_level_rather_than_markers(perp
     warmup = payload.target[: payload.provenance.warmup_bars]
     assert warmup and all(value == 0.0 for value in warmup)
     assert all(value is not None for value in payload.target)
+
+
+def test_a_position_still_open_carries_no_exit_and_is_marked_as_such(spot_frame):
+    """An open trade has a PnL, and it is a mark rather than money.
+
+    vectorbt values it against the last close, which moves on the next bar and
+    on whatever range was asked for. The page nets *closed* trades only and
+    needs ``status`` to do that, so this pins the pair: no exit price, no exit
+    time, and a status that says why.
+
+    The exit markers and the closed trades must also agree on how many there
+    are, since both are drawn from the same run -- a table showing a round trip
+    the chart never closed is the disagreement this whole path is shaped to
+    prevent.
+    """
+    payload = build_analysis(_SPOT, strategy_name="tsmom")
+
+    open_trades = [trade for trade in payload.trades if trade.status == "open"]
+    assert len(open_trades) == 1, "a frame ending flat would pass this vacuously"
+    assert open_trades[0].exit_time is None
+    assert open_trades[0].exit_price is None
+    assert open_trades[0].pnl != 0.0
+    # The open one is the last: nothing can be entered after a position that is
+    # still held, on a contract that holds one position at a time.
+    assert payload.trades[-1] is open_trades[0]
+    assert len(_exits(payload)) == len(payload.trades) - 1
+    assert len(_entries(payload)) == len(payload.trades)
 
 
 def test_the_continuous_contract_reports_no_cost_model_because_it_executed_none(

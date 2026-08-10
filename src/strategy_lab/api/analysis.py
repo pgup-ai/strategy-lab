@@ -130,6 +130,35 @@ class Marker:
 
 
 @dataclass(frozen=True)
+class Trade:
+    """A round trip and what it made, sliced from the same ``Portfolio`` the
+    arrows come from.
+
+    The engine already computes this and ``_markers`` throws all but the
+    timestamps away. Recomputing PnL from the markers would be a second
+    derivation free to disagree with the chart it sits under -- the board's rule
+    (M36), applied to the one number a reader is most likely to quote.
+
+    **``pnl`` on an open trade is a mark, not money**, so ``status`` travels with
+    it and the two are summed separately. vectorbt reports an open trade against
+    the last close, which moves on the next bar and on the range you asked for;
+    adding that into a realised total would report an unrealised number under a
+    realised name.
+    """
+
+    entry_time: int
+    exit_time: int | None
+    direction: str
+    size: float
+    entry_price: float
+    exit_price: float | None
+    fees: float
+    pnl: float
+    return_pct: float
+    status: str
+
+
+@dataclass(frozen=True)
 class WhyLayer:
     """The state a strategy was in on each bar and the feature values behind it.
 
@@ -175,6 +204,7 @@ class Provenance:
 class AnalysisPayload:
     bars: list[dict[str, float]]
     markers: list[Marker]
+    trades: list[Trade]
     position_size: list[float | None] | None
     target: list[float | None] | None
     why: WhyLayer | None
@@ -351,6 +381,7 @@ def _signal_payload(
     return AnalysisPayload(
         bars=build_candles_payload(df)["bars"],
         markers=_markers(trades),
+        trades=_trades(trades),
         position_size=_values(signals.position_size),
         target=None,
         why=_why_layer(strategy, df),
@@ -396,6 +427,7 @@ def _exposure_payload(
     return AnalysisPayload(
         bars=build_candles_payload(df)["bars"],
         markers=[],
+        trades=[],
         position_size=None,
         target=_values(target),
         why=_why_layer(strategy, df),
@@ -409,6 +441,9 @@ def _exposure_payload(
             allow_shorts=allow_shorts,
             # Nothing was executed: this is the level the strategy asked for, and
             # a fee rate reported beside it would claim a book that never ran.
+            # Which is also why the trade table above is empty rather than
+            # missing -- ``run_exposure_backtest`` would produce one, and this
+            # path deliberately does not call it.
             cost_model=None,
         ),
     )
@@ -511,6 +546,30 @@ def _markers(trades: pd.DataFrame) -> list[Marker]:
             )
     markers.sort(key=lambda marker: (marker.time, marker.kind))
     return markers
+
+
+def _trades(trades: pd.DataFrame) -> list[Trade]:
+    """The same round trips the arrows are drawn from, carrying their result."""
+    rows: list[Trade] = []
+    for _, trade in trades.iterrows():
+        closed = trade["Status"] == "Closed"
+        rows.append(
+            Trade(
+                entry_time=_epoch(trade["Entry Timestamp"]),
+                exit_time=_epoch(trade["Exit Timestamp"]) if closed else None,
+                direction="long" if trade["Direction"] == "Long" else "short",
+                size=float(trade["Size"]),
+                entry_price=float(trade["Avg Entry Price"]),
+                exit_price=float(trade["Avg Exit Price"]) if closed else None,
+                # Both legs, so the table's PnL column visibly nets what the cost
+                # model charged rather than leaving a reader to infer it.
+                fees=float(trade["Entry Fees"]) + float(trade["Exit Fees"]),
+                pnl=float(trade["PnL"]),
+                return_pct=float(trade["Return"]),
+                status="closed" if closed else "open",
+            )
+        )
+    return rows
 
 
 def _why_layer(strategy: Strategy | ExposureStrategy, df: pd.DataFrame) -> WhyLayer | None:
