@@ -475,7 +475,9 @@ def test_the_only_unclicked_fetch_is_the_one_a_closing_bar_asks_for(page):
     script = _script(page)
 
     assert script.count("setTimeout") == 1
-    watchdog = script[script.index("live.watchdog = setTimeout") :][:400]
+    after = script[script.index("live.watchdog = setTimeout") :]
+    watchdog = after[: after.index("FIRST_TICK_GRACE_MS")]
+    assert watchdog, "the watchdog body was not found"
     for fetching in ("getJSON", "fetch(", "/api/"):
         assert fetching not in watchdog, "the watchdog must not talk to anything"
     assert "refreshInstrument()" in _within(script, "function onTick(message)")
@@ -979,7 +981,12 @@ def test_live_means_a_frame_arrived_not_that_a_socket_opened(page):
     socket = _within(_script(page), "function openSocket()")
 
     assert "socket.onopen" in socket
-    onopen = socket[socket.index("socket.onopen") : socket.index("socket.onmessage")]
+    # To the handler's own close, not to the next handler's start: slicing
+    # between two markers goes empty if they are ever reordered, and this
+    # assertion is a negative -- it would pass on nothing.
+    after = socket[socket.index("socket.onopen") :]
+    onopen = after[: after.index("};")]
+    assert onopen, "the onopen body was not found"
     assert "setLive('on', 'live')" not in onopen
     assert "setLive('wait', 'waiting for data');" in socket
     assert "if (!live.ticks) setLive('on', 'live');" in socket
