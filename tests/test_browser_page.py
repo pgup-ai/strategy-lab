@@ -1128,6 +1128,17 @@ def test_the_timeframe_rungs_sit_with_the_chart_not_with_the_query(page):
     assert 'id="ladder"' not in markup[: markup.index('<span class="range"')]
 
 
+def test_switching_view_resyncs_the_exit_control_after_a_forced_strategy(page):
+    """`syncStrategyChoices` can reassign `strategySel.value` when the current
+    strategy has no state, and an assignment fires no `change` — the only thing
+    that calls `syncExitEnabled`. Latent rather than live today, since the first
+    state-bearing option is a `signal_set`, but it is the same shape as any
+    programmatic assignment that skips its handler."""
+    body = _within(_script(page), "function setView(name)")
+
+    assert body.index("syncStrategyChoices();") < body.index("syncExitEnabled();")
+
+
 def test_the_state_view_offers_only_strategies_that_have_a_state(page):
     """`/api/state` refuses a strategy with no feature frame, and the refusal
     would read as a fault in the dataset. Filtered on the server's own

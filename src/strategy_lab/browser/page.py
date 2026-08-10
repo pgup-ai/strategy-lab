@@ -2162,6 +2162,11 @@ __SHELL_CSS__
     document.body.className = name + '-view';
     viewSel.value = name;
     syncStrategyChoices();
+    // `syncStrategyChoices` may reassign `strategySel.value`, and assigning it
+    // fires no `change` -- the one handler that keeps the exit-mode control in
+    // step with the contract. Called here rather than beside the assignment so
+    // it covers every route into a view, not just the reassigning one.
+    syncExitEnabled();
     // Whichever view is being left stops writing into the one being entered.
     // Neither switch starts a request on the side it leaves, so neither guard
     // fires on its own: leaving the board would keep appending tiles to a
